@@ -192,18 +192,19 @@ npm run dev
 - [x] AI Module (backend/api.py, llm_client.py) - 팀원 원본 코드
 - [x] Gateway 스캐폴딩 (FastAPI, 인증, 회의 CRUD, WebSocket, 리포트)
 - [x] Supabase 스키마 및 RLS 정책
+- [x] Frontend 인증 통합 (AuthContext, login, register, dashboard 페이지)
+- [x] 실시간 회의 기능 (WebSocket 클라이언트, audio-recorder, 완전한 websocket.py)
+- [x] Supabase 용량 최적화 (중요 발화만 저장 로직)
 - [x] .gitignore, README.md 작성
 
-### 🚧 진행 중
-- [ ] Frontend 인증 통합 (로그인, 회원가입, 대시보드 페이지)
-- [ ] 실시간 회의 참여 기능 (getUserMedia, WebSocket 통합, 화자 구분)
-- [ ] 회의 워크스페이스 UI (팀원 원본 UI 유지하며 인증 레이어 추가)
-- [ ] 리포트 생성 및 PDF 다운로드
-- [ ] 대시보드, 설정, 팀노트 탭 구현
+### 🚧 진행 중 (로컬에서 진행)
+- [ ] 메인 회의 워크스페이스 UI 통합 (frontend/app/page.tsx에 WebSocket + Audio Recorder 연결)
+- [ ] 회의 시작/종료 흐름 테스트
+- [ ] 리포트 생성 및 PDF 다운로드 테스트
 
 ### 🔜 예정
-- [ ] 프로덕션 배포 (Cloudflare Pages/Workers 또는 Vercel + Railway)
-- [ ] 성능 최적화 및 테스트
+- [ ] 프로덕션 배포 (Vercel Frontend + Railway Backend)
+- [ ] 성능 최적화 및 실전 테스트
 - [ ] 사용자 피드백 반영
 
 ## 기여자

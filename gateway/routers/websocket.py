@@ -2,43 +2,196 @@
 WebSocket Router
 실시간 회의 음성 스트리밍 및 전사
 """
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from typing import Dict
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from typing import Dict, List
 import asyncio
+import httpx
+import json
+import base64
+from datetime import datetime
+from ..config import get_supabase
 
 router = APIRouter()
 
 # 회의방별 연결 관리
-active_connections: Dict[str, list] = {}
+active_connections: Dict[str, List[Dict]] = {}
+
+# AI 백엔드 URL
+AI_BACKEND_URL = "http://localhost:8000"
+
+
+async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str = None):
+    """회의방의 모든 참가자에게 메시지 브로드캐스트"""
+    if meeting_id not in active_connections:
+        return
+    
+    disconnected = []
+    for conn_info in active_connections[meeting_id]:
+        if exclude_user and conn_info['user_id'] == exclude_user:
+            continue
+            
+        try:
+            await conn_info['ws'].send_json(message)
+        except Exception as e:
+            print(f"❌ Failed to send to {conn_info['user_id']}: {e}")
+            disconnected.append(conn_info)
+    
+    # 연결 끊긴 사용자 제거
+    for conn_info in disconnected:
+        active_connections[meeting_id].remove(conn_info)
+
+
+async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str):
+    """전사 결과를 Supabase에 저장 (중요 발화만)"""
+    # 중요 키워드 필터링
+    important_keywords = ['결정', '안건', '액션', '과제', '완료', '시작', '종료', '승인', '반대', '동의']
+    
+    # 짧은 발화나 중복 무시
+    if len(text.strip()) < 10:
+        return
+    
+    # 중요 키워드 포함 여부 확인
+    has_important_keyword = any(keyword in text for keyword in important_keywords)
+    
+    if not has_important_keyword:
+        # 중요하지 않은 발화는 저장하지 않음
+        return
+    
+    try:
+        supabase = get_supabase()
+        supabase.table('transcripts').insert({
+            'meeting_id': meeting_id,
+            'user_id': user_id,
+            'speaker': speaker,
+            'text': text,
+            'timestamp': datetime.utcnow().isoformat()
+        }).execute()
+        print(f"💾 Saved transcript: {speaker}: {text[:50]}...")
+    except Exception as e:
+        print(f"❌ Failed to save transcript: {e}")
+
 
 @router.websocket("/ws/{meeting_id}")
-async def websocket_endpoint(websocket: WebSocket, meeting_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket, 
+    meeting_id: str,
+    user_id: str = Query(...)
+):
     await websocket.accept()
+    print(f"✅ User {user_id} connected to meeting {meeting_id}")
     
     # 회의방에 연결 추가
     if meeting_id not in active_connections:
         active_connections[meeting_id] = []
-    active_connections[meeting_id].append(websocket)
+    
+    conn_info = {
+        'ws': websocket,
+        'user_id': user_id
+    }
+    active_connections[meeting_id].append(conn_info)
+    
+    # 참가자 입장 알림
+    await broadcast_to_meeting(meeting_id, {
+        'type': 'user_joined',
+        'user_id': user_id,
+        'timestamp': datetime.utcnow().isoformat()
+    })
     
     try:
         while True:
-            # 클라이언트로부터 오디오 청크 수신
-            data = await websocket.receive_bytes()
+            # 클라이언트로부터 메시지 수신
+            message = await websocket.receive_json()
+            message_type = message.get('type')
             
-            # TODO: 
-            # 1. 오디오 청크를 backend/api.py의 /api/transcribe-chunk로 전달
-            # 2. user_id 기반 화자 구분
-            # 3. 전사 결과를 같은 회의방의 모든 연결에 브로드캐스트
+            if message_type == 'audio_chunk':
+                # 오디오 청크 처리
+                audio_data = message.get('audio_data')  # base64 encoded
+                speaker = message.get('speaker', f'User_{user_id[:8]}')
+                
+                try:
+                    # AI 백엔드로 전사 요청
+                    async with httpx.AsyncClient() as client:
+                        # base64를 바이너리로 디코드
+                        audio_bytes = base64.b64decode(audio_data)
+                        
+                        response = await client.post(
+                            f"{AI_BACKEND_URL}/api/transcribe-chunk",
+                            files={'audio_file': ('audio.webm', audio_bytes, 'audio/webm')}
+                        )
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            transcribed_text = result.get('text', '').strip()
+                            
+                            if transcribed_text:
+                                print(f"📝 Transcribed: {speaker}: {transcribed_text}")
+                                
+                                # Supabase에 저장 (중요 발화만)
+                                await save_transcript(meeting_id, user_id, speaker, transcribed_text)
+                                
+                                # 모든 참가자에게 브로드캐스트
+                                await broadcast_to_meeting(meeting_id, {
+                                    'type': 'transcript',
+                                    'meeting_id': meeting_id,
+                                    'user_id': user_id,
+                                    'speaker': speaker,
+                                    'text': transcribed_text,
+                                    'timestamp': datetime.utcnow().isoformat()
+                                })
+                        else:
+                            print(f"❌ Transcription failed: {response.status_code}")
+                            
+                except Exception as e:
+                    print(f"❌ Error processing audio chunk: {e}")
             
-            # 임시로 에코백 테스트
-            for connection in active_connections[meeting_id]:
-                if connection != websocket:
-                    await connection.send_json({
-                        "type": "audio_chunk",
-                        "data": "received"
-                    })
+            elif message_type == 'request_analysis':
+                # 분석 요청 처리
+                try:
+                    supabase = get_supabase()
+                    
+                    # 최근 전사 데이터 가져오기
+                    transcripts_response = supabase.table('transcripts') \
+                        .select('*') \
+                        .eq('meeting_id', meeting_id) \
+                        .order('timestamp', desc=False) \
+                        .execute()
+                    
+                    transcripts = transcripts_response.data
+                    
+                    if len(transcripts) >= 4:  # 최소 4개 발화 이상
+                        # AI 백엔드로 분석 요청
+                        async with httpx.AsyncClient() as client:
+                            response = await client.post(
+                                f"{AI_BACKEND_URL}/api/tick-analysis",
+                                json={'transcripts': transcripts}
+                            )
+                            
+                            if response.status_code == 200:
+                                analysis = response.json()
+                                
+                                # 분석 결과 브로드캐스트
+                                await broadcast_to_meeting(meeting_id, {
+                                    'type': 'analysis_update',
+                                    'data': analysis,
+                                    'timestamp': datetime.utcnow().isoformat()
+                                })
+                except Exception as e:
+                    print(f"❌ Error in analysis: {e}")
                     
     except WebSocketDisconnect:
-        active_connections[meeting_id].remove(websocket)
+        print(f"❌ User {user_id} disconnected from meeting {meeting_id}")
+        active_connections[meeting_id].remove(conn_info)
+        
         if not active_connections[meeting_id]:
             del active_connections[meeting_id]
+        
+        # 참가자 퇴장 알림
+        await broadcast_to_meeting(meeting_id, {
+            'type': 'user_left',
+            'user_id': user_id,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+        if conn_info in active_connections.get(meeting_id, []):
+            active_connections[meeting_id].remove(conn_info)
