@@ -110,7 +110,7 @@ async def websocket_endpoint(
                 
                 try:
                     # AI 백엔드로 전사 요청
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(timeout=120.0) as client:
                         # base64를 바이너리로 디코드
                         audio_bytes = base64.b64decode(audio_data)
                         
@@ -142,7 +142,10 @@ async def websocket_endpoint(
                             print(f"❌ Transcription failed: {response.status_code}")
                             
                 except Exception as e:
+                    import traceback
                     print(f"❌ Error processing audio chunk: {e}")
+                    print(f"❌ Full traceback:")
+                    traceback.print_exc()
             
             elif message_type == 'request_analysis':
                 # 분석 요청 처리
@@ -160,7 +163,7 @@ async def websocket_endpoint(
                     
                     if len(transcripts) >= 4:  # 최소 4개 발화 이상
                         # AI 백엔드로 분석 요청
-                        async with httpx.AsyncClient() as client:
+                        async with httpx.AsyncClient(timeout=120.0) as client:
                             response = await client.post(
                                 f"{AI_BACKEND_URL}/api/tick-analysis",
                                 json={'transcripts': transcripts}

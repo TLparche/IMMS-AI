@@ -3452,3 +3452,32 @@ async def post_stt_chunk(
             "error": err_msg,
         },
     }
+
+
+##추가 코드(웹소켓 에러 방지)
+@app.post("/api/transcribe-chunk")
+async def post_transcribe_chunk(
+    audio_file: UploadFile = File(...),
+):
+    """
+    Gateway에서 호출하는 전사 엔드포인트
+    오디오 청크를 받아서 Whisper로 전사한 후 텍스트 반환
+    """
+    try:
+        blob = await audio_file.read()
+        if not blob:
+            return {"text": "", "language": "ko", "error": "empty audio"}
+        
+        suffix = Path(audio_file.filename or "chunk.webm").suffix or ".webm"
+        text = _transcribe_with_whisper(blob, suffix=suffix)
+        
+        return {
+            "text": _safe_text(text),
+            "language": "ko"
+        }
+    except Exception as exc:
+        return {
+            "text": "",
+            "language": "ko",
+            "error": str(exc)
+        }

@@ -140,7 +140,7 @@ export default function Home() {
       });
       
       setIsRecording(true);
-      console.log('🎤 녹음 시작');
+      console.log('녹음 시작');
     }
   };
 
@@ -148,7 +148,7 @@ export default function Home() {
   const requestAnalysis = () => {
     if (wsClientRef.current?.isConnected()) {
       wsClientRef.current.sendMessage('request_analysis', {});
-      console.log('📊 Requested analysis');
+      console.log('Requested analysis');
       alert('분석이 요청되었습니다. 잠시 후 결과가 표시됩니다.');
     } else {
       alert('WebSocket이 연결되지 않았습니다.');
@@ -272,7 +272,7 @@ export default function Home() {
                     : 'bg-blue-600 hover:bg-blue-700 text-white'
                 }`}
               >
-                {isRecording ? '⏹️ 녹음 중지' : '🎤 녹음 시작'}
+                {isRecording ? '녹음 중지' : '녹음 시작'}
               </button>
             </div>
           </div>
@@ -368,19 +368,19 @@ export default function Home() {
               onClick={requestAnalysis}
               className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition"
             >
-              📊 분석 요청
+              분석 요청
             </button>
             <button
               onClick={endMeeting}
               className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition"
             >
-              ⏹️ 회의 종료
+              회의 종료
             </button>
             <button
               onClick={generateReport}
               className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition"
             >
-              📄 리포트 생성
+              리포트 생성
             </button>
           </div>
         </div>
