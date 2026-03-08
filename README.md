@@ -188,7 +188,7 @@ npm run dev
 
 ## 현재 구현 상태
 
-### ✅ 완료
+###  완료
 - [x] AI Module (backend/api.py, llm_client.py) - 팀원 원본 코드
 - [x] Gateway 스캐폴딩 (FastAPI, 인증, 회의 CRUD, WebSocket, 리포트)
 - [x] Supabase 스키마 및 RLS 정책
@@ -202,7 +202,7 @@ npm run dev
 - [ ] 회의 시작/종료 흐름 테스트
 - [ ] 리포트 생성 및 PDF 다운로드 테스트
 
-### 🔜 예정
+### 예정
 - [ ] 프로덕션 배포 (Vercel Frontend + Railway Backend)
 - [ ] 성능 최적화 및 실전 테스트
 - [ ] 사용자 피드백 반영
@@ -216,7 +216,5 @@ npm run dev
 MIT License
 
 ## 추가 정보
-
-- **팀원 GitHub**: https://github.com/TLparche/Meeting-AI-Proto (원본 AI 모듈 참고)
 - **Supabase Project**: uqlrawufmurqnqnbkuzz
 - **API 문서**: http://localhost:8001/docs (Gateway), http://localhost:8000/docs (AI Module)
