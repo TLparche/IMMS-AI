@@ -61,6 +61,12 @@ export default function Home() {
     }
   }, [user, authLoading, meetingId, router]);
 
+  useEffect(() => {
+    if (user && meetingId) {
+      console.log('📍 Active meeting changed:', { meetingId, userId: user.id });
+    }
+  }, [user, meetingId]);
+
   // WebSocket 초기화
   useEffect(() => {
     if (!user || !meetingId) return;
@@ -91,6 +97,7 @@ export default function Home() {
     setWsConnected(true);
 
     return () => {
+      console.log('🧹 Cleaning up WebSocket for meeting:', meetingId);
       wsClient.disconnect();
       setWsConnected(false);
     };

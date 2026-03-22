@@ -181,8 +181,8 @@ async def websocket_endpoint(
                 except Exception as e:
                     print(f"❌ Error in analysis: {e}")
                     
-    except WebSocketDisconnect:
-        print(f"❌ User {user_id} disconnected from meeting {meeting_id}")
+    except WebSocketDisconnect as exc:
+        print(f"ℹ️ User {user_id} disconnected from meeting {meeting_id} (code={exc.code})")
         active_connections[meeting_id].remove(conn_info)
         
         if not active_connections[meeting_id]:
@@ -195,6 +195,6 @@ async def websocket_endpoint(
             'timestamp': datetime.utcnow().isoformat()
         })
     except Exception as e:
-        print(f"❌ WebSocket error: {e}")
+        print(f"❌ WebSocket error for meeting {meeting_id}, user {user_id}: {e}")
         if conn_info in active_connections.get(meeting_id, []):
             active_connections[meeting_id].remove(conn_info)
