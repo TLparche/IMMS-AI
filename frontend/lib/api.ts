@@ -8,6 +8,7 @@ import type {
   LastLlmJsonResponse,
   LlmStatus,
   MeetingState,
+  MeetingGoalSuggestionResponse,
 } from "./types";
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
@@ -134,6 +135,16 @@ export async function generateCanvasProblemDefinition(payload: {
   }>;
 }): Promise<CanvasProblemDefinitionResponse> {
   return requestJson<CanvasProblemDefinitionResponse>("/api/canvas/problem-definition", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generateMeetingGoal(payload: {
+  topic: string;
+}): Promise<MeetingGoalSuggestionResponse> {
+  return requestJson<MeetingGoalSuggestionResponse>("/api/canvas/meeting-goal", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),

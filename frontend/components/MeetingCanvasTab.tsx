@@ -20,8 +20,7 @@ import {
 } from "@xyflow/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  exportAgendaMarkdown,
-  exportAgendaSnapshot,
+  generateMeetingGoal,
   generateCanvasProblemDefinition,
   generateCanvasSolutionStage,
   importAgendaSnapshot,
@@ -92,6 +91,12 @@ function toolLabel(tool: ComposerTool) {
   if (tool === "note") return "메모";
   if (tool === "comment") return "코멘트";
   return "주제";
+}
+
+function buildFallbackMeetingGoal(topic: string) {
+  const cleanTopic = topic.trim();
+  if (!cleanTopic) return "이번 회의에서 실행 방향과 핵심 우선순위를 정리한다.";
+  return `${cleanTopic}에 대해 실행 방향과 핵심 우선순위를 정리한다.`;
 }
 
 function extractAgendaIdFromNodeId(nodeId: string) {
@@ -234,6 +239,8 @@ export default function MeetingCanvasTab({
   const [importedState, setImportedState] = useState<MeetingState | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>("detail");
+  const [generatedMeetingGoal, setGeneratedMeetingGoal] = useState("");
+  const [meetingGoalBusy, setMeetingGoalBusy] = useState(false);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
@@ -245,12 +252,50 @@ export default function MeetingCanvasTab({
 
   const effectiveState = importedState ?? analysisState;
   const agendaModels = useMemo(() => buildAgendaModels(effectiveState, agendas, transcripts), [effectiveState, agendas, transcripts]);
+  const meetingGoalTopic = useMemo(
+    () => meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim(),
+    [effectiveState?.meeting_goal, meetingTitle],
+  );
+  const displayMeetingGoal = generatedMeetingGoal || buildFallbackMeetingGoal(meetingGoalTopic);
 
   useEffect(() => {
     if (!selectedAgendaId && agendaModels[0]) {
       setSelectedAgendaId(agendaModels[0].id);
     }
   }, [agendaModels, selectedAgendaId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const topic = meetingGoalTopic;
+
+    if (!topic) {
+      setGeneratedMeetingGoal(buildFallbackMeetingGoal(""));
+      setMeetingGoalBusy(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setMeetingGoalBusy(true);
+    void generateMeetingGoal({ topic })
+      .then((result) => {
+        if (cancelled) return;
+        setGeneratedMeetingGoal(result.goal || buildFallbackMeetingGoal(topic));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setGeneratedMeetingGoal(buildFallbackMeetingGoal(topic));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setMeetingGoalBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingGoalTopic]);
 
   useEffect(() => {
     const syncViewportMode = () => {
@@ -534,7 +579,7 @@ export default function MeetingCanvasTab({
     setBusy(true);
     try {
       const result = await generateCanvasProblemDefinition({
-        topic: meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+        topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
         agendas: agendaModels.map((agenda) => ({
           agenda_id: agenda.id,
           title: agenda.title,
@@ -564,7 +609,7 @@ export default function MeetingCanvasTab({
     setBusy(true);
     try {
       const result = await generateCanvasSolutionStage({
-        meeting_topic: meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+        meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
         topics: problemGroups.map((group, index) => ({
           group_id: group.group_id,
           topic_no: index + 1,
@@ -642,70 +687,58 @@ export default function MeetingCanvasTab({
   return (
     <div className="h-full min-h-0 bg-slate-50">
       <section className="flex h-full min-h-0 flex-col border-t border-slate-200 bg-white">
-        <div className="border-b border-slate-200 bg-slate-800 px-4 py-4 text-white sm:px-6">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-            <div className="max-w-3xl">
-              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-blue-100">Group Canvas</p>
-              <h2 className="mt-2 text-lg font-semibold sm:text-xl">{meetingTitle || "회의 그룹 보드"}</h2>
-              <p className="mt-2 text-sm text-slate-200">{syncStatusText}</p>
-              {activityMessage ? <p className="mt-1 text-xs text-slate-300">{activityMessage}</p> : null}
+        <div className="relative border-b border-slate-200 bg-slate-800 text-white">
+          <div className="border-b border-white/10 px-4 py-4 pr-36 sm:px-6 sm:pr-44">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0 max-w-3xl">
+                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-blue-100">Group Canvas</p>
+                <h2 className="mt-2 text-lg font-semibold sm:text-xl">{meetingTitle || "회의 그룹 보드"}</h2>
+                {activityMessage ? <p className="mt-1 text-xs text-slate-300">{activityMessage}</p> : null}
+              </div>
+              <button type="button" onClick={() => fileInputRef.current?.click()} className="min-h-[42px] shrink-0 rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
+                불러오기
+              </button>
             </div>
-            <div className="flex flex-col gap-3 xl:items-end">
-              <div className="flex flex-wrap gap-2">
-                <span className={`inline-flex items-center rounded-full px-3 py-2 text-xs font-semibold ${autoSyncing ? "bg-blue-100 text-blue-800" : "bg-white/15 text-slate-100"}`}>
-                  {autoSyncing ? "자동 동기화 중" : "실시간 자동 동기화"}
-                </span>
-                <button type="button" onClick={() => void onSyncFromMeeting(false).then(() => exportAgendaMarkdown()).then((res) => safeDownload(res.filename, res.markdown, "text/markdown;charset=utf-8"))} className="rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
-                  Markdown
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                accept="application/json"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    void importAgendaSnapshot({ file, reset_state: true }).then((result) => {
+                      setImportedState(result.state);
+                      setProblemGroups([]);
+                      setSolutionTopics([]);
+                      setStage("ideation");
+                      setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
+                    });
+                  }
+                  event.currentTarget.value = "";
+                }}
+              />
+            </div>
+          <div className="bg-slate-500/45 px-4 py-4 pr-36 sm:px-6 sm:pr-44">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-200">Meeting Goal</p>
+            <p className="mt-2 text-base font-medium leading-7 text-slate-100 sm:text-lg">
+              {meetingGoalBusy ? "회의 목표를 정리하는 중입니다." : displayMeetingGoal}
+            </p>
+          </div>
+          <div className="absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-[20px] border border-white/20 bg-white px-2 py-2 text-slate-700 shadow-sm">
+            <div className="flex flex-col gap-1">
+              {(["ideation", "problem-definition", "solution"] as CanvasStage[]).map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setStage(item)}
+                  className={`min-w-[96px] rounded-xl px-4 py-2 text-sm font-semibold ${stage === item ? "bg-slate-200 text-slate-900" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"}`}
+                >
+                  {stageLabel(item)}
                 </button>
-                <button type="button" onClick={() => void onSyncFromMeeting(false).then(() => exportAgendaSnapshot()).then((res) => safeDownload(res.filename, JSON.stringify(res.snapshot, null, 2), "application/json;charset=utf-8"))} className="rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
-                  Snapshot
-                </button>
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
-                  불러오기
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  accept="application/json"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      void importAgendaSnapshot({ file, reset_state: true }).then((result) => {
-                        setImportedState(result.state);
-                        setProblemGroups([]);
-                        setSolutionTopics([]);
-                        setStage("ideation");
-                        setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
-                      });
-                    }
-                    event.currentTarget.value = "";
-                  }}
-                />
-              </div>
-              <div className="self-end rounded-[20px] border border-white/20 bg-white px-2 py-2 text-slate-700 shadow-sm">
-                <div className="flex flex-col gap-1">
-                  {(["ideation", "problem-definition", "solution"] as CanvasStage[]).map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => setStage(item)}
-                      className={`min-w-[96px] rounded-xl px-4 py-2 text-sm font-semibold ${stage === item ? "bg-slate-200 text-slate-900" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"}`}
-                    >
-                      {stageLabel(item)}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              ))}
             </div>
           </div>
-        </div>
-
-        <div className="border-b border-slate-200 bg-white px-4 py-5 sm:px-6">
-          <p className="text-xl font-semibold text-slate-900 sm:text-2xl">
-            {meetingTitle || "우리가 어떻게 하면 방향성을 더 분명하게 만들 것인가?"}
-          </p>
         </div>
 
         <div

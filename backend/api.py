@@ -707,6 +707,10 @@ class ProblemDefinitionGenerateInput(BaseModel):
     ideas: list[ProblemDefinitionIdeaInput] = Field(default_factory=list)
 
 
+class MeetingGoalGenerateInput(BaseModel):
+    topic: str = ""
+
+
 class SolutionStageTopicInput(BaseModel):
     group_id: str
     topic_no: int = 0
@@ -977,6 +981,37 @@ def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
     if cleaned:
         return " ".join(cleaned)
     return _safe_text(fallback, "주제")
+
+
+def _build_meeting_goal_local(topic: str) -> str:
+    clean_topic = _safe_text(topic, "이번 회의").strip()
+    if not clean_topic:
+        return "이번 회의에서 실행 방향과 우선순위를 정리한다."
+    return f"{clean_topic}에 대해 실행 방향과 핵심 우선순위를 정리한다."
+
+
+def _build_meeting_goal_prompt(topic: str) -> str:
+    payload = {
+        "meeting_topic": _safe_text(topic),
+    }
+    return (
+        "너는 회의 제목을 보고 회의 목표를 한 문장으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- meeting_topic을 바탕으로 이번 회의가 무엇을 정리하거나 결정해야 하는지 한 문장으로 쓴다.\n"
+        "- 제목을 그대로 반복하지 말고, 회의에서 얻고 싶은 결과나 방향이 드러나게 쓴다.\n"
+        "- 너무 추상적이지 않게, 실행 또는 정리의 대상이 보이도록 쓴다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "goal": "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다."\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- goal은 한국어 1문장.\n"
+        "- 제목 복붙이 아니라 회의 목적이 드러나는 재작성 문장.\n"
+        "- 18~40자 정도의 짧고 분명한 문장.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
 
 
 def _build_problem_definition_prompt(topic: str, groups: list[dict[str, Any]]) -> str:
@@ -3935,6 +3970,54 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
             "warning": warning,
             "generated_at": _now_ts(),
             "groups": groups,
+        }
+
+
+@app.post("/api/canvas/meeting-goal")
+def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
+    with RT.lock:
+        topic = _safe_text(payload.topic)
+        goal = _build_meeting_goal_local(topic)
+        used_llm = False
+        warning = ""
+
+        client = get_client()
+        if topic and bool(RT.llm_enabled) and bool(client.connected):
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_meeting_goal_prompt(topic),
+                    stage="canvas_meeting_goal",
+                    temperature=0.2,
+                    max_tokens=220,
+                )
+                candidate = _safe_text(parsed.get("goal")) if isinstance(parsed, dict) else ""
+                if candidate:
+                    goal = candidate
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_meeting_goal",
+                        "topic": topic,
+                        "goal": goal,
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 회의 목표를 사용했습니다."
+            except Exception as exc:
+                warning = f"회의 목표 LLM 생성 실패: {exc}"
+        elif topic:
+            warning = "LLM 미연결 상태로 로컬 회의 목표를 사용했습니다."
+        else:
+            warning = "회의 제목이 없어 기본 회의 목표를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "topic": topic,
+            "goal": goal,
         }
 
 

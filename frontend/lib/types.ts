@@ -194,6 +194,15 @@ export interface CanvasProblemDefinitionResponse {
   groups: CanvasProblemDefinitionGroup[];
 }
 
+export interface MeetingGoalSuggestionResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  topic: string;
+  goal: string;
+}
+
 export interface CanvasPlacementConfirmResponse {
   ok: boolean;
   saved_at: string;
