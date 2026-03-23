@@ -565,6 +565,87 @@ function buildGridPositions(heights: number[], gapX: number, gapY: number, baseX
   });
 }
 
+type CanvasNodeData = {
+  label: React.ReactNode;
+  contentSignature: string;
+};
+
+type CanvasNodeDescriptor = {
+  id: string;
+  position: { x: number; y: number };
+  sourcePosition: Position;
+  targetPosition: Position;
+  className: string;
+  style: React.CSSProperties;
+  data: CanvasNodeData;
+};
+
+function buildNodeContentSignature(parts: Array<string | number | boolean | undefined>) {
+  return parts
+    .map((part) => (part === undefined ? "" : String(part)))
+    .join("|");
+}
+
+function positionsEqual(
+  left?: { x: number; y: number },
+  right?: { x: number; y: number },
+) {
+  return (left?.x ?? 0) === (right?.x ?? 0) && (left?.y ?? 0) === (right?.y ?? 0);
+}
+
+function styleSignature(style?: React.CSSProperties) {
+  return buildNodeContentSignature([
+    style?.width,
+    style?.minHeight,
+    style?.borderRadius,
+    style?.padding,
+  ]);
+}
+
+function reconcileNodes(
+  currentNodes: Node[],
+  descriptors: CanvasNodeDescriptor[],
+  preservePositions: boolean,
+) {
+  const currentNodeMap = new Map(currentNodes.map((node) => [node.id, node]));
+  let changed = currentNodes.length !== descriptors.length;
+
+  const nextNodes = descriptors.map((descriptor, index) => {
+    const existingNode = currentNodeMap.get(descriptor.id);
+    const nextPosition =
+      existingNode && preservePositions ? existingNode.position : descriptor.position;
+    const nextContentSignature =
+      (descriptor.data as CanvasNodeData | undefined)?.contentSignature || "";
+    const existingContentSignature =
+      ((existingNode?.data as CanvasNodeData | undefined)?.contentSignature) || "";
+
+    const nodeChanged =
+      !existingNode ||
+      currentNodes[index]?.id !== descriptor.id ||
+      !positionsEqual(existingNode.position, nextPosition) ||
+      existingNode.className !== descriptor.className ||
+      styleSignature(existingNode.style) !== styleSignature(descriptor.style) ||
+      existingNode.sourcePosition !== descriptor.sourcePosition ||
+      existingNode.targetPosition !== descriptor.targetPosition ||
+      existingContentSignature !== nextContentSignature;
+
+    if (!nodeChanged && existingNode) {
+      return existingNode;
+    }
+
+    changed = true;
+
+    return {
+      ...existingNode,
+      ...descriptor,
+      position: nextPosition,
+      data: descriptor.data,
+    };
+  });
+
+  return changed ? nextNodes : currentNodes;
+}
+
 export default function MeetingCanvasTab({
   meetingId,
   meetingTitle,
@@ -610,6 +691,7 @@ export default function MeetingCanvasTab({
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
   const lastAutoFitSignatureRef = useRef("");
+  const lastGraphLayoutSignatureRef = useRef("");
   const workspaceLoadedRef = useRef(false);
   const workspaceHydratingRef = useRef(false);
   const workspaceSaveTimerRef = useRef<number | null>(null);
@@ -632,6 +714,7 @@ export default function MeetingCanvasTab({
     autoProblemDefinitionRef.current = false;
     problemConclusionEntryHandledRef.current = false;
     lastAutoFitSignatureRef.current = "";
+    lastGraphLayoutSignatureRef.current = "";
     workspaceLoadedRef.current = false;
     workspaceHydratingRef.current = false;
     if (workspaceSaveTimerRef.current) {
@@ -964,50 +1047,79 @@ export default function MeetingCanvasTab({
     };
   }, [meetingId, problemGroups, solutionTopics, stage]);
 
-  const graph = useMemo(() => {
+  const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
       const heights = problemGroups.map((group) => estimateProblemGroupNodeHeight(group));
       const positions = buildGridPositions(heights, 600, 92, 80, 120);
+
       return {
-        nodes: problemGroups.map((group, index) => ({
-          id: `problem-${group.group_id}`,
-          position: positions[index],
-          sourcePosition: Position.Bottom,
-          targetPosition: Position.Top,
-          className: "rounded-3xl border border-violet-200 bg-violet-50 shadow-sm",
-          style: { width: 520, minHeight: heights[index], borderRadius: 28, padding: 0 },
-          data: {
-            label: makeProblemGroupNodeLabel(
-              group,
-              index,
-              selectedProblemGroupId === group.group_id,
-              loadingProblemGroupIds.includes(group.group_id),
-              dropProblemGroupId === group.group_id,
-              (event) => {
-                if (!draggingPersonalNoteId) return;
-                event.preventDefault();
-                event.stopPropagation();
-                setDropProblemGroupId(group.group_id);
-              },
-              () => {
-                if (dropProblemGroupId === group.group_id) {
-                  setDropProblemGroupId("");
-                }
-              },
-              (event) => {
-                if (!draggingPersonalNoteId) return;
-                event.preventDefault();
-                event.stopPropagation();
-                const noteId =
-                  event.dataTransfer.getData("application/x-imms-note-id") ||
-                  event.dataTransfer.getData("text/plain");
-                if (!noteId) return;
-                handleAttachPersonalNoteToProblemGroup(group.group_id, noteId);
-              },
-            ),
-          },
-        })),
-        edges: [] as Edge[],
+        layoutSignature: buildNodeContentSignature([
+          stage,
+          ...problemGroups.map((group) => group.group_id),
+        ]),
+        nodeDescriptors: problemGroups.map((group, index) => {
+          const selected = selectedProblemGroupId === group.group_id;
+          const loading = loadingProblemGroupIds.includes(group.group_id);
+          const dropTarget = dropProblemGroupId === group.group_id;
+
+          return {
+            id: `problem-${group.group_id}`,
+            position: positions[index],
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "rounded-3xl border border-violet-200 bg-violet-50 shadow-sm",
+            style: { width: 520, minHeight: heights[index], borderRadius: 28, padding: 0 },
+            data: {
+              contentSignature: buildNodeContentSignature([
+                group.group_id,
+                group.topic,
+                group.status,
+                selected,
+                loading,
+                dropTarget,
+                group.insight_lens,
+                group.conclusion,
+                ...(group.keywords || []),
+                ...(group.agenda_titles || []),
+                ...(group.source_summary_items || []),
+                ...(group.ideas || []).flatMap((idea) => [
+                  idea.id,
+                  idea.kind,
+                  idea.title,
+                  idea.body,
+                ]),
+              ]),
+              label: makeProblemGroupNodeLabel(
+                group,
+                index,
+                selected,
+                loading,
+                dropTarget,
+                (event) => {
+                  if (!draggingPersonalNoteId) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setDropProblemGroupId(group.group_id);
+                },
+                () => {
+                  if (dropProblemGroupId === group.group_id) {
+                    setDropProblemGroupId("");
+                  }
+                },
+                (event) => {
+                  if (!draggingPersonalNoteId) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const noteId =
+                    event.dataTransfer.getData("application/x-imms-note-id") ||
+                    event.dataTransfer.getData("text/plain");
+                  if (!noteId) return;
+                  handleAttachPersonalNoteToProblemGroup(group.group_id, noteId);
+                },
+              ),
+            },
+          };
+        }),
       };
     }
 
@@ -1021,8 +1133,13 @@ export default function MeetingCanvasTab({
         ),
       );
       const positions = buildGridPositions(heights, 410, 52, 120, 140);
+
       return {
-        nodes: solutionTopics.map((topic, index) => ({
+        layoutSignature: buildNodeContentSignature([
+          stage,
+          ...solutionTopics.map((topic) => topic.group_id),
+        ]),
+        nodeDescriptors: solutionTopics.map((topic, index) => ({
           id: `solution-${topic.group_id}`,
           position: positions[index],
           sourcePosition: Position.Bottom,
@@ -1030,6 +1147,13 @@ export default function MeetingCanvasTab({
           className: "rounded-3xl border border-emerald-200 bg-emerald-50 shadow-sm",
           style: { width: 340, minHeight: heights[index], borderRadius: 20, padding: 0 },
           data: {
+            contentSignature: buildNodeContentSignature([
+              topic.group_id,
+              topic.topic_no,
+              topic.topic,
+              topic.conclusion,
+              ...topic.ideas,
+            ]),
             label: makeNodeLabel(
               `SOLUTION ${topic.topic_no || index + 1}`,
               topic.topic,
@@ -1039,12 +1163,9 @@ export default function MeetingCanvasTab({
             ),
           },
         })),
-        edges: [] as Edge[],
       };
     }
 
-    const nextNodes: Node[] = [];
-    const nextEdges: Edge[] = [];
     const agendaHeights = agendaModels.map((agenda) =>
       estimateAgendaNodeHeight(
         agenda.title,
@@ -1054,8 +1175,12 @@ export default function MeetingCanvasTab({
     );
     const positions = buildGridPositions(agendaHeights, 370, 56, 120, 80);
 
-    agendaModels.forEach((agenda, agendaIndex) => {
-      nextNodes.push({
+    return {
+      layoutSignature: buildNodeContentSignature([
+        stage,
+        ...agendaModels.map((agenda) => agenda.id),
+      ]),
+      nodeDescriptors: agendaModels.map((agenda, agendaIndex) => ({
         id: `agenda-${agenda.id}`,
         position: positions[agendaIndex],
         sourcePosition: Position.Bottom,
@@ -1063,6 +1188,13 @@ export default function MeetingCanvasTab({
         className: "rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)]",
         style: { width: 300, minHeight: agendaHeights[agendaIndex], borderRadius: 28, padding: 0 },
         data: {
+          contentSignature: buildNodeContentSignature([
+            agenda.id,
+            agenda.title,
+            agenda.status,
+            ...(agenda.keywords || []),
+            ...(agenda.summaryBullets || []),
+          ]),
           label: makeAgendaNodeLabel(
             agenda.title,
             stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
@@ -1070,16 +1202,26 @@ export default function MeetingCanvasTab({
             agenda.keywords || [],
           ),
         },
-      });
-    });
-
-    return { nodes: nextNodes, edges: nextEdges };
-  }, [stage, agendaModels, draggingPersonalNoteId, dropProblemGroupId, loadingProblemGroupIds, personalNotes, problemGroups, selectedProblemGroupId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+      })),
+    };
+  }, [stage, agendaModels, draggingPersonalNoteId, dropProblemGroupId, loadingProblemGroupIds, problemGroups, selectedProblemGroupId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
-    setNodes(graph.nodes);
-    setEdges(graph.edges);
-  }, [graph]);
+    const preservePositions =
+      lastGraphLayoutSignatureRef.current === graphBlueprint.layoutSignature;
+    lastGraphLayoutSignatureRef.current = graphBlueprint.layoutSignature;
+
+    setNodes((current) =>
+      reconcileNodes(current, graphBlueprint.nodeDescriptors, preservePositions),
+    );
+    setEdges((current) => {
+      const validNodeIds = new Set(graphBlueprint.nodeDescriptors.map((node) => node.id));
+      const nextEdges = current.filter(
+        (edge) => validNodeIds.has(edge.source) && validNodeIds.has(edge.target),
+      );
+      return nextEdges.length === current.length ? current : nextEdges;
+    });
+  }, [graphBlueprint]);
 
   const autoFitSignature = useMemo(
     () => `${meetingId}|${stage}|${nodes.map((node) => node.id).join("|")}`,
@@ -1831,8 +1973,6 @@ export default function MeetingCanvasTab({
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
-                fitView
-                fitViewOptions={{ padding: stage === "problem-definition" ? 0.08 : 0.16, duration: 300 }}
                 minZoom={0.45}
                 maxZoom={1.6}
                 defaultEdgeOptions={{ type: "smoothstep" }}
