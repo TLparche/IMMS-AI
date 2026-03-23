@@ -1096,7 +1096,11 @@ export default function MeetingCanvasTab({
                 loading,
                 dropTarget,
                 (event) => {
-                  if (!draggingPersonalNoteId) return;
+                  const types = Array.from(event.dataTransfer.types || []);
+                  const isNoteDrag =
+                    types.includes("application/x-imms-note-id") ||
+                    types.includes("text/plain");
+                  if (!isNoteDrag) return;
                   event.preventDefault();
                   event.stopPropagation();
                   setDropProblemGroupId(group.group_id);
@@ -1107,7 +1111,6 @@ export default function MeetingCanvasTab({
                   }
                 },
                 (event) => {
-                  if (!draggingPersonalNoteId) return;
                   event.preventDefault();
                   event.stopPropagation();
                   const noteId =
@@ -1204,7 +1207,7 @@ export default function MeetingCanvasTab({
         },
       })),
     };
-  }, [stage, agendaModels, draggingPersonalNoteId, dropProblemGroupId, loadingProblemGroupIds, problemGroups, selectedProblemGroupId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+  }, [stage, agendaModels, dropProblemGroupId, loadingProblemGroupIds, problemGroups, selectedProblemGroupId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
     const preservePositions =
