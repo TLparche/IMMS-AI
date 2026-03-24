@@ -123,6 +123,7 @@ export async function confirmCanvasPlacement(payload: {
 }
 
 export async function generateCanvasProblemDefinition(payload: {
+  meeting_id: string;
   topic: string;
   agendas: Array<{
     agenda_id: string;
@@ -146,6 +147,7 @@ export async function generateCanvasProblemDefinition(payload: {
 }
 
 export async function generateProblemGroupConclusion(payload: {
+  meeting_id: string;
   meeting_topic: string;
   group: {
     group_id: string;
@@ -169,6 +171,7 @@ export async function generateProblemGroupConclusion(payload: {
 }
 
 export async function generateMeetingGoal(payload: {
+  meeting_id: string;
   topic: string;
 }): Promise<MeetingGoalSuggestionResponse> {
   return requestJson<MeetingGoalSuggestionResponse>("/api/canvas/meeting-goal", {
@@ -179,6 +182,7 @@ export async function generateMeetingGoal(payload: {
 }
 
 export async function generateCanvasSolutionStage(payload: {
+  meeting_id: string;
   meeting_topic: string;
   topics: Array<{
     group_id: string;

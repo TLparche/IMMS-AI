@@ -13,7 +13,7 @@ import copy
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -265,6 +265,208 @@ def _normalize_canvas_stage(raw: Any) -> str:
     if s in {"ideation", "problem-definition", "solution"}:
         return s
     return "ideation"
+
+
+def _payload_to_primitive(payload: Any) -> Any:
+    if hasattr(payload, "model_dump"):
+        try:
+            return payload.model_dump()
+        except Exception:
+            pass
+    if hasattr(payload, "dict"):
+        try:
+            return payload.dict()
+        except Exception:
+            pass
+    return payload
+
+
+def _canvas_llm_signature(payload: Any) -> str:
+    return json.dumps(
+        _payload_to_primitive(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return {}
+
+    workspace = rt.canvas_workspace_by_meeting.get(normalized_meeting_id)
+    if not isinstance(workspace, dict):
+        workspace = {}
+    workspace.setdefault("meeting_id", normalized_meeting_id)
+    workspace.setdefault("stage", "ideation")
+    workspace.setdefault("problem_groups", [])
+    workspace.setdefault("solution_topics", [])
+    workspace.setdefault("node_positions", {})
+    workspace.setdefault("imported_state", None)
+    workspace.setdefault("saved_at", "")
+    workspace.setdefault("llm_cache", {})
+    rt.canvas_workspace_by_meeting[normalized_meeting_id] = workspace
+    return workspace
+
+
+def _get_canvas_llm_cached_result(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+) -> dict[str, Any] | None:
+    workspace = _ensure_canvas_workspace_entry(rt, meeting_id)
+    if not workspace:
+        return None
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        return None
+    cached = llm_cache.get(cache_key)
+    if not isinstance(cached, dict):
+        return None
+    if _safe_text(cached.get("signature")) != _safe_text(signature):
+        return None
+    result = cached.get("result")
+    if not isinstance(result, dict):
+        return None
+    return copy.deepcopy(result)
+
+
+def _set_canvas_llm_cached_result(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    result: dict[str, Any],
+) -> None:
+    workspace = _ensure_canvas_workspace_entry(rt, meeting_id)
+    if not workspace:
+        return
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        llm_cache = {}
+        workspace["llm_cache"] = llm_cache
+    llm_cache[cache_key] = {
+        "signature": _safe_text(signature),
+        "generated_at": _now_ts(),
+        "result": copy.deepcopy(result),
+    }
+
+
+def _get_canvas_llm_inflight_entry(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    meeting_entries = rt.canvas_llm_inflight_by_meeting.get(_safe_text(meeting_id))
+    if not isinstance(meeting_entries, dict):
+        return None
+    entry = meeting_entries.get(_safe_text(cache_key))
+    return entry if isinstance(entry, dict) else None
+
+
+def _run_canvas_llm_cached_request(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    compute: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_cache_key = _safe_text(cache_key)
+    normalized_signature = _safe_text(signature)
+    if not normalized_meeting_id or not normalized_cache_key or not normalized_signature:
+        return compute()
+
+    while True:
+        wait_event: threading.Event | None = None
+        wait_error = ""
+        should_compute = False
+
+        with rt.lock:
+            cached = _get_canvas_llm_cached_result(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+            )
+            if cached:
+                return cached
+
+            meeting_entries = rt.canvas_llm_inflight_by_meeting.setdefault(normalized_meeting_id, {})
+            inflight = meeting_entries.get(normalized_cache_key)
+            if (
+                isinstance(inflight, dict)
+                and _safe_text(inflight.get("signature")) == normalized_signature
+                and isinstance(inflight.get("event"), threading.Event)
+            ):
+                wait_event = inflight["event"]
+                wait_error = _safe_text(inflight.get("error"))
+            else:
+                wait_event = threading.Event()
+                meeting_entries[normalized_cache_key] = {
+                    "signature": normalized_signature,
+                    "event": wait_event,
+                    "error": "",
+                }
+                should_compute = True
+
+        if not should_compute and wait_event is not None:
+            wait_event.wait(timeout=90.0)
+            with rt.lock:
+                cached = _get_canvas_llm_cached_result(
+                    rt,
+                    normalized_meeting_id,
+                    normalized_cache_key,
+                    normalized_signature,
+                )
+                if cached:
+                    return cached
+
+                inflight = _get_canvas_llm_inflight_entry(rt, normalized_meeting_id, normalized_cache_key)
+                if (
+                    isinstance(inflight, dict)
+                    and _safe_text(inflight.get("signature")) == normalized_signature
+                    and isinstance(inflight.get("event"), threading.Event)
+                    and not inflight["event"].is_set()
+                ):
+                    continue
+                wait_error = _safe_text((inflight or {}).get("error"), wait_error)
+
+            if wait_error:
+                raise RuntimeError(wait_error)
+            continue
+
+        try:
+            with rt.canvas_llm_request_lock:
+                result = compute()
+        except Exception as exc:
+            with rt.lock:
+                meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+                inflight = meeting_entries.pop(normalized_cache_key, None)
+                if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
+                    inflight["error"] = str(exc)
+                    inflight["event"].set()
+                if not meeting_entries:
+                    rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+            raise
+
+        with rt.lock:
+            _set_canvas_llm_cached_result(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+                result,
+            )
+            meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+            inflight = meeting_entries.pop(normalized_cache_key, None)
+            if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
+                inflight["event"].set()
+            if not meeting_entries:
+                rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+            return copy.deepcopy(result)
 
 
 def _doc_freq(rows: list[dict[str, Any]]) -> Counter[str]:
@@ -709,6 +911,7 @@ class ProblemDefinitionIdeaInput(BaseModel):
 
 
 class ProblemDefinitionGenerateInput(BaseModel):
+    meeting_id: str = ""
     topic: str = ""
     agendas: list[ProblemDefinitionAgendaInput] = Field(default_factory=list)
     ideas: list[ProblemDefinitionIdeaInput] = Field(default_factory=list)
@@ -731,11 +934,13 @@ class ProblemConclusionGroupInput(BaseModel):
 
 
 class ProblemConclusionGenerateInput(BaseModel):
+    meeting_id: str = ""
     meeting_topic: str = ""
     group: ProblemConclusionGroupInput
 
 
 class MeetingGoalGenerateInput(BaseModel):
+    meeting_id: str = ""
     topic: str = ""
 
 
@@ -747,6 +952,7 @@ class SolutionStageTopicInput(BaseModel):
 
 
 class SolutionStageGenerateInput(BaseModel):
+    meeting_id: str = ""
     meeting_topic: str = ""
     topics: list[SolutionStageTopicInput] = Field(default_factory=list)
 
@@ -798,6 +1004,8 @@ class CanvasWorkspaceStateInput(BaseModel):
 @dataclass
 class RuntimeStore:
     lock: threading.Lock = field(default_factory=threading.Lock)
+    llm_io_lock: threading.Lock = field(default_factory=threading.Lock)
+    canvas_llm_request_lock: threading.Lock = field(default_factory=threading.Lock)
     meeting_goal: str = ""
     window_size: int = 12
     transcript: list[dict[str, str]] = field(default_factory=list)
@@ -834,6 +1042,7 @@ class RuntimeStore:
     llm_io_logs: list[dict[str, Any]] = field(default_factory=list)
     canvas_last_placement: dict[str, Any] = field(default_factory=dict)
     canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.meeting_goal = ""
@@ -871,6 +1080,7 @@ class RuntimeStore:
         self.llm_io_logs = []
         self.canvas_last_placement = {}
         self.canvas_workspace_by_meeting = {}
+        self.canvas_llm_inflight_by_meeting = {}
 
 
 RT = RuntimeStore()
@@ -906,19 +1116,20 @@ def _truncate_text(raw: Any, limit: int = LLM_IO_PREVIEW_MAX) -> str:
 
 
 def _append_llm_io_log(rt: RuntimeStore, direction: str, stage: str, payload: Any, meta: dict[str, Any] | None = None) -> None:
-    rt.llm_io_seq += 1
-    preview = _truncate_text(payload)
-    entry = {
-        "seq": int(rt.llm_io_seq),
-        "at": _now_ts(),
-        "direction": _safe_text(direction),
-        "stage": _safe_text(stage),
-        "payload": preview,
-        "meta": dict(meta or {}),
-    }
-    rt.llm_io_logs.append(entry)
-    if len(rt.llm_io_logs) > LLM_IO_LOG_MAX:
-        rt.llm_io_logs = rt.llm_io_logs[-LLM_IO_LOG_MAX:]
+    with rt.llm_io_lock:
+        rt.llm_io_seq += 1
+        preview = _truncate_text(payload)
+        entry = {
+            "seq": int(rt.llm_io_seq),
+            "at": _now_ts(),
+            "direction": _safe_text(direction),
+            "stage": _safe_text(stage),
+            "payload": preview,
+            "meta": dict(meta or {}),
+        }
+        rt.llm_io_logs.append(entry)
+        if len(rt.llm_io_logs) > LLM_IO_LOG_MAX:
+            rt.llm_io_logs = rt.llm_io_logs[-LLM_IO_LOG_MAX:]
 
 
 def _call_llm_json(
@@ -4137,7 +4348,10 @@ def get_last_llm_json():
 
 @app.post("/api/canvas/problem-definition")
 def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
-    with RT.lock:
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
         groups = _build_problem_definition_groups_local(payload)
         used_llm = False
         warning = ""
@@ -4195,12 +4409,22 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
             "generated_at": _now_ts(),
             "groups": groups,
         }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "problem_definition",
+        signature,
+        _compute,
+    )
 
 
 @app.post("/api/canvas/problem-conclusion")
 def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
-    with RT.lock:
-        group_id = _safe_text(payload.group.group_id)
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    group_id = _safe_text(payload.group.group_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
         conclusion = _build_problem_group_conclusion_local(payload)
         insight_lens = _build_problem_group_insight_lens_local(payload)
         used_llm = False
@@ -4247,12 +4471,22 @@ def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
             "insight_lens": insight_lens,
             "conclusion": conclusion,
         }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        f"problem_conclusion:{group_id}",
+        signature,
+        _compute,
+    )
 
 
 @app.post("/api/canvas/meeting-goal")
 def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
-    with RT.lock:
-        topic = _safe_text(payload.topic)
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    topic = _safe_text(payload.topic)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
         goal = _build_meeting_goal_local(topic)
         used_llm = False
         warning = ""
@@ -4295,11 +4529,21 @@ def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
             "topic": topic,
             "goal": goal,
         }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "meeting_goal",
+        signature,
+        _compute,
+    )
 
 
 @app.post("/api/canvas/solution-stage")
 def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
-    with RT.lock:
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
         topics = [
             {
                 "group_id": _safe_text(item.group_id),
@@ -4364,6 +4608,13 @@ def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
             "generated_at": _now_ts(),
             "topics": topics,
         }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "solution_stage",
+        signature,
+        _compute,
+    )
 
 
 @app.get("/api/canvas/workspace-state")
@@ -4396,6 +4647,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
 
     with RT.lock:
         saved_at = _now_ts()
+        previous_workspace = _ensure_canvas_workspace_entry(RT, normalized_meeting_id)
         workspace = {
             "meeting_id": normalized_meeting_id,
             "stage": _normalize_canvas_stage(payload.stage),
@@ -4444,6 +4696,9 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
             if isinstance(payload.imported_state, dict)
             else None,
             "saved_at": saved_at,
+            "llm_cache": copy.deepcopy(previous_workspace.get("llm_cache") or {})
+            if isinstance(previous_workspace.get("llm_cache"), dict)
+            else {},
         }
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 

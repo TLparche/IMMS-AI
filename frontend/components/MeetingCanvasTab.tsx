@@ -578,6 +578,33 @@ function buildGridPositions(heights: number[], gapX: number, gapY: number, baseX
   });
 }
 
+function serializeSharedProblemGroups(groups: ProblemGroupViewModel[]) {
+  return groups.map((group) => ({
+    group_id: group.group_id,
+    topic: group.topic,
+    insight_lens: group.insight_lens,
+    insight_user_edited: group.insight_user_edited,
+    keywords: group.keywords,
+    agenda_ids: group.agenda_ids,
+    agenda_titles: group.agenda_titles,
+    ideas: group.ideas,
+    source_summary_items: group.source_summary_items,
+    conclusion: group.conclusion,
+    conclusion_user_edited: group.conclusion_user_edited,
+    status: group.status,
+  }));
+}
+
+function serializeSharedSolutionTopics(topics: CanvasSolutionTopicResponse[]) {
+  return topics.map((topic) => ({
+    group_id: topic.group_id,
+    topic_no: topic.topic_no,
+    topic: topic.topic,
+    conclusion: topic.conclusion,
+    ideas: topic.ideas,
+  }));
+}
+
 function buildSharedCanvasSignature(payload: {
   stage: CanvasStage;
   problem_groups: unknown[];
@@ -922,7 +949,7 @@ export default function MeetingCanvasTab({
     }
 
     setMeetingGoalBusy(true);
-    void generateMeetingGoal({ topic })
+    void generateMeetingGoal({ meeting_id: meetingId, topic })
       .then((result) => {
         if (cancelled) return;
         setGeneratedMeetingGoal(result.goal || buildFallbackMeetingGoal(topic));
@@ -940,7 +967,7 @@ export default function MeetingCanvasTab({
     return () => {
       cancelled = true;
     };
-  }, [meetingGoalTopic]);
+  }, [meetingGoalTopic, meetingId]);
 
   useEffect(() => {
     const syncViewportMode = () => {
@@ -954,6 +981,7 @@ export default function MeetingCanvasTab({
 
   const buildProblemConclusionPayload = useCallback(
     (group: ProblemGroupViewModel) => ({
+      meeting_id: meetingId,
       meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
       group: {
         group_id: group.group_id,
@@ -969,7 +997,52 @@ export default function MeetingCanvasTab({
         })),
       },
     }),
-    [effectiveState?.meeting_goal, generatedMeetingGoal, meetingTitle],
+    [effectiveState?.meeting_goal, generatedMeetingGoal, meetingId, meetingTitle],
+  );
+
+  const forceBroadcastSharedCanvas = useCallback(
+    (overrides?: {
+      stage?: CanvasStage;
+      problemGroups?: ProblemGroupViewModel[];
+      solutionTopics?: CanvasSolutionTopicResponse[];
+      nodePositions?: CanvasNodePositionsByStage;
+      importedState?: MeetingState | null;
+    }) => {
+      if (!meetingId || !userId) {
+        return;
+      }
+
+      const snapshot = {
+        stage: overrides?.stage ?? stage,
+        problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
+        solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
+        node_positions: overrides?.nodePositions ?? nodePositions,
+        imported_state: overrides?.importedState ?? importedState,
+      };
+
+      lastSharedSyncSignatureRef.current = buildSharedCanvasSignature(snapshot);
+      onSharedCanvasSync({
+        sync_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        meeting_id: meetingId,
+        updated_by: userId,
+        updated_at: new Date().toISOString(),
+        stage: snapshot.stage,
+        problem_groups: snapshot.problem_groups,
+        solution_topics: snapshot.solution_topics,
+        node_positions: snapshot.node_positions,
+        imported_state: snapshot.imported_state,
+      });
+    },
+    [
+      importedState,
+      meetingId,
+      nodePositions,
+      onSharedCanvasSync,
+      problemGroups,
+      solutionTopics,
+      stage,
+      userId,
+    ],
   );
 
   const setProblemGroupsLoading = useCallback((groupIds: string[], loading: boolean) => {
@@ -994,8 +1067,9 @@ export default function MeetingCanvasTab({
       setConclusionRefreshingGroupId(group.group_id);
       try {
         const result = await generateProblemGroupConclusion(buildProblemConclusionPayload(group));
-        setProblemGroups((prev) =>
-          prev.map((item) =>
+        let nextGroups: ProblemGroupViewModel[] = [];
+        setProblemGroups((prev) => {
+          nextGroups = prev.map((item) =>
             item.group_id === group.group_id
               ? {
                   ...item,
@@ -1007,8 +1081,15 @@ export default function MeetingCanvasTab({
                     : result.conclusion || item.conclusion,
                 }
               : item,
-          ),
-        );
+          );
+          return nextGroups;
+        });
+        if (!sharedSyncEnabled && nextGroups.length > 0) {
+          forceBroadcastSharedCanvas({
+            stage: "problem-definition",
+            problemGroups: nextGroups,
+          });
+        }
         if (editingProblemGroupId === group.group_id) {
           if (!group.insight_user_edited) {
             setProblemGroupDraftInsight((result.used_llm ? result.insight_lens : "") || group.insight_lens || "");
@@ -1029,7 +1110,13 @@ export default function MeetingCanvasTab({
         setConclusionRefreshingGroupId("");
       }
     },
-    [buildProblemConclusionPayload, editingProblemGroupId, setProblemGroupsLoading],
+    [
+      buildProblemConclusionPayload,
+      editingProblemGroupId,
+      forceBroadcastSharedCanvas,
+      setProblemGroupsLoading,
+      sharedSyncEnabled,
+    ],
   );
 
   const handleGenerateAllProblemGroupConclusions = useCallback(
@@ -1049,25 +1136,31 @@ export default function MeetingCanvasTab({
       try {
         let lastWarning = "";
         let firstError = "";
+        let workingGroups = groups;
 
         for (const group of targetGroups) {
           try {
             const result = await generateProblemGroupConclusion(buildProblemConclusionPayload(group));
-            setProblemGroups((prev) =>
-              prev.map((item) =>
-                item.group_id === group.group_id
-                  ? {
-                      ...item,
-                      conclusion: item.conclusion_user_edited
-                        ? item.conclusion
-                        : result.conclusion || item.conclusion,
-                      insight_lens: item.insight_user_edited
-                        ? item.insight_lens
-                        : (result.used_llm ? result.insight_lens : "") || item.insight_lens,
-                    }
-                  : item,
-              ),
+            workingGroups = workingGroups.map((item) =>
+              item.group_id === group.group_id
+                ? {
+                    ...item,
+                    conclusion: item.conclusion_user_edited
+                      ? item.conclusion
+                      : result.conclusion || item.conclusion,
+                    insight_lens: item.insight_user_edited
+                      ? item.insight_lens
+                      : (result.used_llm ? result.insight_lens : "") || item.insight_lens,
+                  }
+                : item,
             );
+            setProblemGroups(workingGroups);
+            if (!sharedSyncEnabled) {
+              forceBroadcastSharedCanvas({
+                stage: "problem-definition",
+                problemGroups: workingGroups,
+              });
+            }
             if (result.warning && !lastWarning) {
               lastWarning = result.warning;
             }
@@ -1088,7 +1181,7 @@ export default function MeetingCanvasTab({
         setConclusionBatchBusy(false);
       }
     },
-    [buildProblemConclusionPayload, setProblemGroupsLoading],
+    [buildProblemConclusionPayload, forceBroadcastSharedCanvas, setProblemGroupsLoading, sharedSyncEnabled],
   );
 
   const handleAttachPersonalNoteToProblemGroup = useCallback((groupId: string, noteId: string) => {
@@ -1193,27 +1286,8 @@ export default function MeetingCanvasTab({
   const sharedCanvasSnapshot = useMemo(
     () => ({
       stage,
-      problem_groups: problemGroups.map((group) => ({
-        group_id: group.group_id,
-        topic: group.topic,
-        insight_lens: group.insight_lens,
-        insight_user_edited: group.insight_user_edited,
-        keywords: group.keywords,
-        agenda_ids: group.agenda_ids,
-        agenda_titles: group.agenda_titles,
-        ideas: group.ideas,
-        source_summary_items: group.source_summary_items,
-        conclusion: group.conclusion,
-        conclusion_user_edited: group.conclusion_user_edited,
-        status: group.status,
-      })),
-      solution_topics: solutionTopics.map((topic) => ({
-        group_id: topic.group_id,
-        topic_no: topic.topic_no,
-        topic: topic.topic,
-        conclusion: topic.conclusion,
-        ideas: topic.ideas,
-      })),
+      problem_groups: serializeSharedProblemGroups(problemGroups),
+      solution_topics: serializeSharedSolutionTopics(solutionTopics),
       node_positions: nodePositions,
       imported_state: importedState,
     }),
@@ -1732,6 +1806,7 @@ export default function MeetingCanvasTab({
     setBusy(true);
     try {
       const result = await generateCanvasProblemDefinition({
+        meeting_id: meetingId,
         topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
         agendas: agendaModels.map((agenda) => ({
           agenda_id: agenda.id,
@@ -1754,6 +1829,12 @@ export default function MeetingCanvasTab({
       setSelectedNodeId(nextGroups[0] ? `problem-${nextGroups[0].group_id}` : "");
       setEditingProblemGroupId("");
       setStage("problem-definition");
+      if (!sharedSyncEnabled) {
+        forceBroadcastSharedCanvas({
+          stage: "problem-definition",
+          problemGroups: nextGroups,
+        });
+      }
       setActivityMessage(result.warning || `문제 정의 주제 ${nextGroups.length}개를 생성했습니다.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1775,6 +1856,7 @@ export default function MeetingCanvasTab({
     setBusy(true);
     try {
       const result = await generateCanvasSolutionStage({
+        meeting_id: meetingId,
         meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
         topics: finalizedGroups.map((group, index) => ({
           group_id: group.group_id,
@@ -1785,6 +1867,12 @@ export default function MeetingCanvasTab({
       });
       setSolutionTopics(result.topics);
       setStage("solution");
+      if (!sharedSyncEnabled) {
+        forceBroadcastSharedCanvas({
+          stage: "solution",
+          solutionTopics: result.topics,
+        });
+      }
       setActivityMessage(result.warning || `확정된 문제 정의 ${finalizedGroups.length}개 기준으로 해결책을 생성했습니다.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
