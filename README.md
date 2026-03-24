@@ -149,22 +149,20 @@ npm install
 cd ..
 ```
 
-### 4. 서비스 실행 (3개 터미널)
+### 4. 서비스 실행
 
-**터미널 1: AI Module**
+**권장: 한 번에 실행**
+```bash
+python run_dev.py
+```
+
+이 스크립트는 `backend + gateway + frontend`를 함께 실행하고, 포트가 이미 사용 중이면 가능한 포트를 찾아 자동으로 연결합니다.
+
+**수동 실행이 필요할 때만**
 ```bash
 python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
-```
-
-**터미널 2: Gateway**
-```bash
 python -m uvicorn gateway.main:app --host 0.0.0.0 --port 8001 --reload
-```
-
-**터미널 3: Frontend**
-```bash
-cd frontend
-npm run dev
+cd frontend && npm run dev
 ```
 
 ### 5. 접속
