@@ -2,6 +2,7 @@ import type {
   AgendaMarkdownExportResponse,
   AgendaSnapshotExportResponse,
   AgendaSnapshotImportResponse,
+  CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasProblemConclusionResponse,
   CanvasProblemDefinitionResponse,
@@ -205,6 +206,8 @@ export async function saveCanvasWorkspaceState(payload: {
   stage: "ideation" | "problem-definition" | "solution";
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionStageResponse["topics"];
+  node_positions?: CanvasNodePositionsByStage;
+  imported_state?: MeetingState | null;
 }): Promise<CanvasWorkspaceStateResponse> {
   return requestJson<CanvasWorkspaceStateResponse>("/api/canvas/workspace-state", {
     method: "POST",

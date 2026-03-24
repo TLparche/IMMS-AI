@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useRouter, useSearchParams } from "next/navigation";
 import { WebSocketClient } from "@/lib/websocket";
 import { AudioRecorder } from "@/lib/audio-recorder";
 import { supabase } from "@/lib/supabase";
 import { syncTranscript } from "@/lib/api";
-import type { MeetingState } from "@/lib/types";
+import type { CanvasRealtimeSyncPayload, MeetingState } from "@/lib/types";
 import MeetingCanvasTab, { type MeetingAgenda as CanvasAgenda, type MeetingTranscript as CanvasTranscript } from "@/components/MeetingCanvasTab";
 
 interface Transcript {
@@ -99,6 +99,7 @@ export default function Home() {
   const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
   const [autoSyncing, setAutoSyncing] = useState(false);
   const [canvasViewportHeight, setCanvasViewportHeight] = useState<number | null>(null);
+  const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
 
   const wsClientRef = useRef<WebSocketClient | null>(null);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
@@ -148,6 +149,7 @@ export default function Home() {
     lastSyncedSignatureRef.current = "";
     queuedSyncSignatureRef.current = "";
     autoSyncInFlightRef.current = false;
+    setIncomingCanvasSync(null);
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
 
     const loadMeeting = async () => {
@@ -214,6 +216,12 @@ export default function Home() {
         setDecisions(mapped.decisions);
         setActionItems(mapped.actionItems);
       }
+    });
+
+    wsClient.on("canvas_sync", (message: any) => {
+      const payload = (message?.data ?? message?.workspace ?? message) as CanvasRealtimeSyncPayload | null;
+      if (!payload || payload.meeting_id !== meetingId) return;
+      setIncomingCanvasSync(payload);
     });
 
     wsClient.connect();
@@ -403,6 +411,12 @@ export default function Home() {
     [agendas],
   );
 
+  const broadcastCanvasSync = useCallback((payload: CanvasRealtimeSyncPayload) => {
+    wsClientRef.current?.sendMessage("canvas_sync", {
+      workspace: payload,
+    });
+  }, []);
+
   if (authLoading || !user || !meetingId || loadingMeeting) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -446,12 +460,15 @@ export default function Home() {
         {activeTab === "canvas" ? (
           <div style={{ minHeight: canvasViewportHeight ?? 520, height: canvasViewportHeight ?? undefined }}>
             <MeetingCanvasTab
+              userId={user.id}
               meetingId={meetingId}
               meetingTitle={meetingTitle}
               transcripts={canvasTranscripts}
               agendas={canvasAgendas}
               analysisState={analysisState}
               onSyncFromMeeting={syncBackendFromMeeting}
+              incomingSharedCanvasSync={incomingCanvasSync}
+              onSharedCanvasSync={broadcastCanvasSync}
               syncStatusText={canvasSyncStatus}
               autoSyncing={autoSyncing}
             />

@@ -31,7 +31,9 @@ import {
 import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
+  CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
+  CanvasRealtimeSyncPayload,
   CanvasSolutionTopicResponse,
   MeetingState,
   TranscriptUtterance,
@@ -54,6 +56,7 @@ type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
 type LeftPanelTab = "detail" | "agenda-list";
 type ProblemGroupStatus = "draft" | "review" | "final";
+const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
 
 type PersonalNote = {
   id: string;
@@ -86,12 +89,15 @@ type ProblemGroupDisplayCard = {
 };
 
 type MeetingCanvasTabProps = {
+  userId: string;
   meetingId: string;
   meetingTitle: string;
   transcripts: MeetingTranscript[];
   agendas: MeetingAgenda[];
   analysisState: MeetingState | null;
   onSyncFromMeeting: (analyze?: boolean) => Promise<MeetingState | null>;
+  incomingSharedCanvasSync: CanvasRealtimeSyncPayload | null;
+  onSharedCanvasSync: (payload: CanvasRealtimeSyncPayload) => void;
   syncStatusText: string;
   autoSyncing: boolean;
 };
@@ -100,6 +106,10 @@ function stageLabel(stage: CanvasStage) {
   if (stage === "ideation") return "아이디어";
   if (stage === "problem-definition") return "문제정의";
   return "해결책";
+}
+
+function syncModeLabel(enabled: boolean) {
+  return enabled ? "공유 ON" : "공유 OFF";
 }
 
 function toolLabel(tool: ComposerTool) {
@@ -568,6 +578,49 @@ function buildGridPositions(heights: number[], gapX: number, gapY: number, baseX
   });
 }
 
+function buildSharedCanvasSignature(payload: {
+  stage: CanvasStage;
+  problem_groups: unknown[];
+  solution_topics: unknown[];
+  node_positions: CanvasNodePositionsByStage;
+  imported_state: MeetingState | null;
+}) {
+  return JSON.stringify(payload);
+}
+
+function createLocalNodeOverrideMap() {
+  return {
+    ideation: new Set<string>(),
+    "problem-definition": new Set<string>(),
+    solution: new Set<string>(),
+  };
+}
+
+function mergeNodePositionsWithLocalOverrides(
+  currentPositions: CanvasNodePositionsByStage,
+  incomingPositions: CanvasNodePositionsByStage,
+  localOverrides: Record<CanvasStage, Set<string>>,
+) {
+  const nextPositions: CanvasNodePositionsByStage = {};
+
+  CANVAS_STAGES.forEach((stage) => {
+    const remoteStage = { ...(incomingPositions[stage] || {}) };
+    const localStage = currentPositions[stage] || {};
+
+    localOverrides[stage].forEach((nodeId) => {
+      if (localStage[nodeId]) {
+        remoteStage[nodeId] = localStage[nodeId];
+      }
+    });
+
+    if (Object.keys(remoteStage).length > 0) {
+      nextPositions[stage] = remoteStage;
+    }
+  });
+
+  return nextPositions;
+}
+
 type CanvasNodeData = {
   label: React.ReactNode;
   contentSignature: string;
@@ -608,15 +661,13 @@ function styleSignature(style?: React.CSSProperties) {
 function reconcileNodes(
   currentNodes: Node[],
   descriptors: CanvasNodeDescriptor[],
-  preservePositions: boolean,
 ) {
   const currentNodeMap = new Map(currentNodes.map((node) => [node.id, node]));
   let changed = currentNodes.length !== descriptors.length;
 
   const nextNodes = descriptors.map((descriptor, index) => {
     const existingNode = currentNodeMap.get(descriptor.id);
-    const nextPosition =
-      existingNode && preservePositions ? existingNode.position : descriptor.position;
+    const nextPosition = descriptor.position;
     const nextContentSignature =
       (descriptor.data as CanvasNodeData | undefined)?.contentSignature || "";
     const existingContentSignature =
@@ -650,12 +701,15 @@ function reconcileNodes(
 }
 
 export default function MeetingCanvasTab({
+  userId,
   meetingId,
   meetingTitle,
   transcripts,
   agendas,
   analysisState,
   onSyncFromMeeting,
+  incomingSharedCanvasSync,
+  onSharedCanvasSync,
   syncStatusText,
   autoSyncing,
 }: MeetingCanvasTabProps) {
@@ -686,6 +740,8 @@ export default function MeetingCanvasTab({
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
   const [solutionStagePending, setSolutionStagePending] = useState(false);
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
+  const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
+  const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
@@ -697,10 +753,14 @@ export default function MeetingCanvasTab({
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
   const lastAutoFitSignatureRef = useRef("");
-  const lastGraphLayoutSignatureRef = useRef("");
   const workspaceLoadedRef = useRef(false);
   const workspaceHydratingRef = useRef(false);
   const workspaceSaveTimerRef = useRef<number | null>(null);
+  const sharedSyncTimerRef = useRef<number | null>(null);
+  const applyingRemoteSharedSyncRef = useRef(false);
+  const lastIncomingSharedSyncIdRef = useRef("");
+  const lastSharedSyncSignatureRef = useRef("");
+  const localNodeOverridesRef = useRef(createLocalNodeOverrideMap());
 
   const effectiveState = importedState ?? analysisState;
   const agendaModels = useMemo(() => buildAgendaModels(effectiveState, agendas, transcripts), [effectiveState, agendas, transcripts]);
@@ -720,12 +780,19 @@ export default function MeetingCanvasTab({
     autoProblemDefinitionRef.current = false;
     problemConclusionEntryHandledRef.current = false;
     lastAutoFitSignatureRef.current = "";
-    lastGraphLayoutSignatureRef.current = "";
+    lastIncomingSharedSyncIdRef.current = "";
+    lastSharedSyncSignatureRef.current = "";
+    applyingRemoteSharedSyncRef.current = false;
+    localNodeOverridesRef.current = createLocalNodeOverrideMap();
     workspaceLoadedRef.current = false;
     workspaceHydratingRef.current = false;
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
+    }
+    if (sharedSyncTimerRef.current) {
+      window.clearTimeout(sharedSyncTimerRef.current);
+      sharedSyncTimerRef.current = null;
     }
   }, [meetingId]);
 
@@ -736,6 +803,8 @@ export default function MeetingCanvasTab({
     workspaceHydratingRef.current = true;
     setProblemGroups([]);
     setSolutionTopics([]);
+    setNodePositions({});
+    setImportedState(null);
     setStage("ideation");
     setProblemDefinitionStagePending(false);
     setSolutionStagePending(false);
@@ -764,7 +833,16 @@ export default function MeetingCanvasTab({
 
         setProblemGroups(nextGroups);
         setSolutionTopics(saved.solution_topics || []);
+        setNodePositions(saved.node_positions || {});
+        setImportedState(saved.imported_state || null);
         setStage(nextStage);
+        lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
+          stage: nextStage,
+          problem_groups: nextGroups,
+          solution_topics: saved.solution_topics || [],
+          node_positions: saved.node_positions || {},
+          imported_state: saved.imported_state || null,
+        });
         setSelectedProblemGroupId(nextGroups[0]?.group_id || "");
         setSelectedNodeId(
           nextStage === "problem-definition" && nextGroups[0] ? `problem-${nextGroups[0].group_id}` : "",
@@ -775,7 +853,16 @@ export default function MeetingCanvasTab({
         if (cancelled) return;
         setProblemGroups([]);
         setSolutionTopics([]);
+        setNodePositions({});
+        setImportedState(null);
         setStage("ideation");
+        lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
+          stage: "ideation",
+          problem_groups: [],
+          solution_topics: [],
+          node_positions: {},
+          imported_state: null,
+        });
         setSelectedProblemGroupId("");
         setSelectedNodeId("");
         setEditingProblemGroupId("");
@@ -804,10 +891,23 @@ export default function MeetingCanvasTab({
   }, [problemGroups, selectedProblemGroupId]);
 
   useEffect(() => {
+    if (!selectedNodeId) return;
+    if (!nodes.some((node) => node.id === selectedNodeId)) {
+      setSelectedNodeId("");
+    }
+  }, [nodes, selectedNodeId]);
+
+  useEffect(() => {
     if (stage !== "problem-definition") {
       setEditingProblemGroupId("");
     }
   }, [stage]);
+
+  useEffect(() => {
+    if (sharedSyncEnabled) {
+      localNodeOverridesRef.current = createLocalNodeOverrideMap();
+    }
+  }, [sharedSyncEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1042,7 +1142,13 @@ export default function MeetingCanvasTab({
   }, [busy, conclusionBatchBusy, handleGenerateAllProblemGroupConclusions, problemGroups, stage]);
 
   useEffect(() => {
-    if (!meetingId || !workspaceLoadedRef.current || workspaceHydratingRef.current) {
+    if (
+      !meetingId ||
+      !sharedSyncEnabled ||
+      !workspaceLoadedRef.current ||
+      workspaceHydratingRef.current ||
+      applyingRemoteSharedSyncRef.current
+    ) {
       return;
     }
 
@@ -1069,6 +1175,8 @@ export default function MeetingCanvasTab({
           status: group.status,
         })),
         solution_topics: solutionTopics,
+        node_positions: nodePositions,
+        imported_state: importedState,
       }).catch(() => {
         // 저장 실패는 작업 흐름을 끊지 않고 다음 변경 시 다시 시도한다.
       });
@@ -1080,7 +1188,149 @@ export default function MeetingCanvasTab({
         workspaceSaveTimerRef.current = null;
       }
     };
-  }, [meetingId, problemGroups, solutionTopics, stage]);
+  }, [importedState, meetingId, nodePositions, problemGroups, sharedSyncEnabled, solutionTopics, stage]);
+
+  const sharedCanvasSnapshot = useMemo(
+    () => ({
+      stage,
+      problem_groups: problemGroups.map((group) => ({
+        group_id: group.group_id,
+        topic: group.topic,
+        insight_lens: group.insight_lens,
+        insight_user_edited: group.insight_user_edited,
+        keywords: group.keywords,
+        agenda_ids: group.agenda_ids,
+        agenda_titles: group.agenda_titles,
+        ideas: group.ideas,
+        source_summary_items: group.source_summary_items,
+        conclusion: group.conclusion,
+        conclusion_user_edited: group.conclusion_user_edited,
+        status: group.status,
+      })),
+      solution_topics: solutionTopics.map((topic) => ({
+        group_id: topic.group_id,
+        topic_no: topic.topic_no,
+        topic: topic.topic,
+        conclusion: topic.conclusion,
+        ideas: topic.ideas,
+      })),
+      node_positions: nodePositions,
+      imported_state: importedState,
+    }),
+    [importedState, nodePositions, problemGroups, solutionTopics, stage],
+  );
+
+  const sharedCanvasSignature = useMemo(
+    () => buildSharedCanvasSignature(sharedCanvasSnapshot),
+    [sharedCanvasSnapshot],
+  );
+
+  useEffect(() => {
+    if (!incomingSharedCanvasSync || incomingSharedCanvasSync.meeting_id !== meetingId) {
+      return;
+    }
+
+    if (incomingSharedCanvasSync.updated_by === userId) {
+      return;
+    }
+
+    if (lastIncomingSharedSyncIdRef.current === incomingSharedCanvasSync.sync_id) {
+      return;
+    }
+
+    lastIncomingSharedSyncIdRef.current = incomingSharedCanvasSync.sync_id;
+    const incomingStage =
+      incomingSharedCanvasSync.stage === "problem-definition" ||
+      incomingSharedCanvasSync.stage === "solution"
+        ? incomingSharedCanvasSync.stage
+        : "ideation";
+    lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
+      stage: incomingStage,
+      problem_groups: incomingSharedCanvasSync.problem_groups || [],
+      solution_topics: incomingSharedCanvasSync.solution_topics || [],
+      node_positions: incomingSharedCanvasSync.node_positions || {},
+      imported_state: incomingSharedCanvasSync.imported_state || null,
+    });
+    applyingRemoteSharedSyncRef.current = true;
+
+    setProblemGroups((prev) =>
+      hydrateProblemGroups(incomingSharedCanvasSync.problem_groups || [], prev),
+    );
+    setSolutionTopics(incomingSharedCanvasSync.solution_topics || []);
+    setNodePositions((prev) =>
+      sharedSyncEnabled
+        ? incomingSharedCanvasSync.node_positions || {}
+        : mergeNodePositionsWithLocalOverrides(
+            prev,
+            incomingSharedCanvasSync.node_positions || {},
+            localNodeOverridesRef.current,
+          ),
+    );
+    setImportedState(incomingSharedCanvasSync.imported_state || null);
+    setStage(incomingStage);
+    setLeftPanelTab("detail");
+    if (incomingStage === "problem-definition") {
+      const nextGroupId = incomingSharedCanvasSync.problem_groups?.[0]?.group_id || "";
+      setSelectedProblemGroupId(nextGroupId);
+      setSelectedNodeId(nextGroupId ? `problem-${nextGroupId}` : "");
+    } else if (incomingStage === "solution") {
+      const nextTopicId = incomingSharedCanvasSync.solution_topics?.[0]?.group_id || "";
+      setSelectedProblemGroupId("");
+      setSelectedNodeId(nextTopicId ? `solution-${nextTopicId}` : "");
+    } else {
+      setSelectedProblemGroupId("");
+      setSelectedNodeId("");
+    }
+    setActivityMessage("다른 참가자의 canvas 변경사항이 반영되었습니다.");
+
+    window.setTimeout(() => {
+      applyingRemoteSharedSyncRef.current = false;
+    }, 0);
+  }, [incomingSharedCanvasSync, meetingId, sharedSyncEnabled, userId]);
+
+  useEffect(() => {
+    if (
+      !meetingId ||
+      !userId ||
+      !sharedSyncEnabled ||
+      !workspaceLoadedRef.current ||
+      workspaceHydratingRef.current ||
+      applyingRemoteSharedSyncRef.current ||
+      lastSharedSyncSignatureRef.current === sharedCanvasSignature
+    ) {
+      return;
+    }
+
+    if (sharedSyncTimerRef.current) {
+      window.clearTimeout(sharedSyncTimerRef.current);
+    }
+
+    sharedSyncTimerRef.current = window.setTimeout(() => {
+      if (workspaceHydratingRef.current || applyingRemoteSharedSyncRef.current) {
+        return;
+      }
+
+      lastSharedSyncSignatureRef.current = sharedCanvasSignature;
+      onSharedCanvasSync({
+        sync_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        meeting_id: meetingId,
+        updated_by: userId,
+        updated_at: new Date().toISOString(),
+        stage: sharedCanvasSnapshot.stage,
+        problem_groups: sharedCanvasSnapshot.problem_groups,
+        solution_topics: sharedCanvasSnapshot.solution_topics,
+        node_positions: sharedCanvasSnapshot.node_positions,
+        imported_state: sharedCanvasSnapshot.imported_state,
+      });
+    }, 140);
+
+    return () => {
+      if (sharedSyncTimerRef.current) {
+        window.clearTimeout(sharedSyncTimerRef.current);
+        sharedSyncTimerRef.current = null;
+      }
+    };
+  }, [meetingId, onSharedCanvasSync, sharedCanvasSignature, sharedCanvasSnapshot, sharedSyncEnabled, userId]);
 
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
@@ -1096,10 +1346,12 @@ export default function MeetingCanvasTab({
           const selected = selectedProblemGroupId === group.group_id;
           const loading = loadingProblemGroupIds.includes(group.group_id);
           const dropTarget = dropProblemGroupId === group.group_id;
+          const nodeId = `problem-${group.group_id}`;
+          const savedPosition = nodePositions["problem-definition"]?.[nodeId];
 
           return {
-            id: `problem-${group.group_id}`,
-            position: positions[index],
+            id: nodeId,
+            position: savedPosition || positions[index],
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
             className: "rounded-3xl border border-violet-200 bg-violet-50 shadow-sm",
@@ -1177,30 +1429,35 @@ export default function MeetingCanvasTab({
           stage,
           ...solutionTopics.map((topic) => topic.group_id),
         ]),
-        nodeDescriptors: solutionTopics.map((topic, index) => ({
-          id: `solution-${topic.group_id}`,
-          position: positions[index],
-          sourcePosition: Position.Bottom,
-          targetPosition: Position.Top,
-          className: "rounded-3xl border border-emerald-200 bg-emerald-50 shadow-sm",
-          style: { width: 340, minHeight: heights[index], borderRadius: 20, padding: 0 },
-          data: {
-            contentSignature: buildNodeContentSignature([
-              topic.group_id,
-              topic.topic_no,
-              topic.topic,
-              topic.conclusion,
-              ...topic.ideas,
-            ]),
-            label: makeNodeLabel(
-              `SOLUTION ${topic.topic_no || index + 1}`,
-              topic.topic,
-              topic.ideas.join(" / "),
-              [`아이디어 ${topic.ideas.length}개`, topic.conclusion || "결론 없음"],
-              "bg-emerald-100 text-emerald-700",
-            ),
-          },
-        })),
+        nodeDescriptors: solutionTopics.map((topic, index) => {
+          const nodeId = `solution-${topic.group_id}`;
+          const savedPosition = nodePositions.solution?.[nodeId];
+
+          return {
+            id: nodeId,
+            position: savedPosition || positions[index],
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "rounded-3xl border border-emerald-200 bg-emerald-50 shadow-sm",
+            style: { width: 340, minHeight: heights[index], borderRadius: 20, padding: 0 },
+            data: {
+              contentSignature: buildNodeContentSignature([
+                topic.group_id,
+                topic.topic_no,
+                topic.topic,
+                topic.conclusion,
+                ...topic.ideas,
+              ]),
+              label: makeNodeLabel(
+                `SOLUTION ${topic.topic_no || index + 1}`,
+                topic.topic,
+                topic.ideas.join(" / "),
+                [`아이디어 ${topic.ideas.length}개`, topic.conclusion || "결론 없음"],
+                "bg-emerald-100 text-emerald-700",
+              ),
+            },
+          };
+        }),
       };
     }
 
@@ -1218,39 +1475,65 @@ export default function MeetingCanvasTab({
         stage,
         ...agendaModels.map((agenda) => agenda.id),
       ]),
-      nodeDescriptors: agendaModels.map((agenda, agendaIndex) => ({
-        id: `agenda-${agenda.id}`,
-        position: positions[agendaIndex],
-        sourcePosition: Position.Bottom,
-        targetPosition: Position.Top,
-        className: "rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)]",
-        style: { width: 300, minHeight: agendaHeights[agendaIndex], borderRadius: 28, padding: 0 },
-        data: {
-          contentSignature: buildNodeContentSignature([
-            agenda.id,
-            agenda.title,
-            agenda.status,
-            ...(agenda.keywords || []),
-            ...(agenda.summaryBullets || []),
-          ]),
-          label: makeAgendaNodeLabel(
-            agenda.title,
-            stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
-            agenda.status,
-            agenda.keywords || [],
-          ),
-        },
-      })),
+      nodeDescriptors: agendaModels.map((agenda, agendaIndex) => {
+        const nodeId = `agenda-${agenda.id}`;
+        const savedPosition = nodePositions.ideation?.[nodeId];
+
+        return {
+          id: nodeId,
+          position: savedPosition || positions[agendaIndex],
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)]",
+          style: { width: 300, minHeight: agendaHeights[agendaIndex], borderRadius: 28, padding: 0 },
+          data: {
+            contentSignature: buildNodeContentSignature([
+              agenda.id,
+              agenda.title,
+              agenda.status,
+              ...(agenda.keywords || []),
+              ...(agenda.summaryBullets || []),
+            ]),
+            label: makeAgendaNodeLabel(
+              agenda.title,
+              stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
+              agenda.status,
+              agenda.keywords || [],
+            ),
+          },
+        };
+      }),
     };
-  }, [stage, agendaModels, dropProblemGroupId, loadingProblemGroupIds, problemGroups, selectedProblemGroupId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+  }, [stage, agendaModels, dropProblemGroupId, loadingProblemGroupIds, nodePositions, problemGroups, selectedProblemGroupId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
-    const preservePositions =
-      lastGraphLayoutSignatureRef.current === graphBlueprint.layoutSignature;
-    lastGraphLayoutSignatureRef.current = graphBlueprint.layoutSignature;
+    const stageKey = stage;
+    setNodePositions((prev) => {
+      const currentStagePositions = prev[stageKey] || {};
+      let changed = false;
+      const nextStagePositions = { ...currentStagePositions };
 
+      graphBlueprint.nodeDescriptors.forEach((descriptor) => {
+        if (!nextStagePositions[descriptor.id]) {
+          nextStagePositions[descriptor.id] = descriptor.position;
+          changed = true;
+        }
+      });
+
+      if (!changed) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        [stageKey]: nextStagePositions,
+      };
+    });
+  }, [graphBlueprint.layoutSignature, graphBlueprint.nodeDescriptors, stage]);
+
+  useEffect(() => {
     setNodes((current) =>
-      reconcileNodes(current, graphBlueprint.nodeDescriptors, preservePositions),
+      reconcileNodes(current, graphBlueprint.nodeDescriptors),
     );
     setEdges((current) => {
       const validNodeIds = new Set(graphBlueprint.nodeDescriptors.map((node) => node.id));
@@ -1561,6 +1844,42 @@ export default function MeetingCanvasTab({
 
   const onNodesChange = (changes: NodeChange[]) => {
     setNodes((current) => applyNodeChanges(changes, current));
+    setNodePositions((prev) => {
+      const stagePositions = { ...(prev[stage] || {}) };
+      let changed = false;
+
+      changes.forEach((change) => {
+        if (change.type === "position" && change.position) {
+          stagePositions[change.id] = change.position;
+          changed = true;
+          return;
+        }
+        if (change.type === "remove" && stagePositions[change.id]) {
+          delete stagePositions[change.id];
+          changed = true;
+        }
+      });
+
+      if (!changed) {
+        return prev;
+      }
+
+      if (!sharedSyncEnabled) {
+        changes.forEach((change) => {
+          if (change.type === "position" && change.position) {
+            localNodeOverridesRef.current[stage].add(change.id);
+          }
+          if (change.type === "remove") {
+            localNodeOverridesRef.current[stage].delete(change.id);
+          }
+        });
+      }
+
+      return {
+        ...prev,
+        [stage]: stagePositions,
+      };
+    });
   };
 
   const onEdgesChange = (changes: EdgeChange[]) => {
@@ -1679,9 +1998,32 @@ export default function MeetingCanvasTab({
                 <h2 className="mt-2 text-lg font-semibold sm:text-xl">{meetingTitle || "회의 그룹 보드"}</h2>
                 {activityMessage ? <p className="mt-1 text-xs text-slate-300">{activityMessage}</p> : null}
               </div>
-              <button type="button" onClick={() => fileInputRef.current?.click()} className="min-h-[42px] shrink-0 rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
-                불러오기
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSharedSyncEnabled((prev) => {
+                      const next = !prev;
+                      setActivityMessage(
+                        next
+                          ? "이제 내 canvas 변경사항이 다른 참가자들과 공유됩니다."
+                          : "이제 내 canvas 변경사항은 로컬에서만 유지되고, 다른 참가자의 변경만 받아옵니다.",
+                      );
+                      return next;
+                    });
+                  }}
+                  className={`min-h-[42px] rounded-xl border px-4 py-2 text-sm font-medium backdrop-blur-md ${
+                    sharedSyncEnabled
+                      ? "border-emerald-300/70 bg-emerald-400/20 text-emerald-50 hover:bg-emerald-400/25"
+                      : "border-amber-300/70 bg-amber-300/20 text-amber-50 hover:bg-amber-300/25"
+                  }`}
+                >
+                  {syncModeLabel(sharedSyncEnabled)}
+                </button>
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="min-h-[42px] rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
+                  불러오기
+                </button>
+              </div>
             </div>
               <input
                 ref={fileInputRef}
@@ -1695,7 +2037,11 @@ export default function MeetingCanvasTab({
                       setImportedState(result.state);
                       setProblemGroups([]);
                       setSolutionTopics([]);
+                      setNodePositions({});
                       setStage("ideation");
+                      setSelectedProblemGroupId("");
+                      setSelectedNodeId("");
+                      setEditingProblemGroupId("");
                       setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
                     });
                   }

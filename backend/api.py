@@ -758,6 +758,11 @@ class CanvasWorkspaceIdeaInput(BaseModel):
     body: str = ""
 
 
+class CanvasNodePositionInput(BaseModel):
+    x: float = 0
+    y: float = 0
+
+
 class CanvasWorkspaceProblemGroupInput(BaseModel):
     group_id: str = ""
     topic: str = ""
@@ -786,6 +791,8 @@ class CanvasWorkspaceStateInput(BaseModel):
     stage: str = "ideation"
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
+    node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
+    imported_state: dict[str, Any] | None = None
 
 
 @dataclass
@@ -3673,6 +3680,40 @@ def _ensure_llm_ready(rt: RuntimeStore) -> tuple[Any, bool, str]:
         return client, False, f"LLM 자동 연결 실패: {exc}"
 
 
+def _normalize_canvas_node_positions(
+    payload: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, dict[str, float]]]:
+    normalized: dict[str, dict[str, dict[str, float]]] = {}
+    if not isinstance(payload, dict):
+        return normalized
+
+    for raw_stage, raw_nodes in payload.items():
+        stage = _normalize_canvas_stage(_safe_text(raw_stage))
+        if stage not in {"ideation", "problem-definition", "solution"}:
+            continue
+        if not isinstance(raw_nodes, dict):
+            continue
+
+        stage_nodes: dict[str, dict[str, float]] = {}
+        for raw_node_id, raw_position in raw_nodes.items():
+            node_id = _safe_text(raw_node_id)
+            if not node_id or not isinstance(raw_position, dict):
+                continue
+
+            try:
+                x = float(raw_position.get("x", 0) or 0)
+                y = float(raw_position.get("y", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+            stage_nodes[node_id] = {"x": x, "y": y}
+
+        if stage_nodes:
+            normalized[stage] = stage_nodes
+
+    return normalized
+
+
 app = FastAPI(title="Meeting STT + Agenda MVP")
 app.add_middleware(
     CORSMiddleware,
@@ -4339,6 +4380,10 @@ def get_canvas_workspace_state(meeting_id: str):
             "stage": _normalize_canvas_stage(saved.get("stage")),
             "problem_groups": saved.get("problem_groups") or [],
             "solution_topics": saved.get("solution_topics") or [],
+            "node_positions": saved.get("node_positions") or {},
+            "imported_state": copy.deepcopy(saved.get("imported_state"))
+            if isinstance(saved.get("imported_state"), dict)
+            else None,
             "saved_at": _safe_text(saved.get("saved_at")),
         }
 
@@ -4359,6 +4404,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
                     "group_id": _safe_text(group.group_id),
                     "topic": _safe_text(group.topic),
                     "insight_lens": _safe_text(group.insight_lens),
+                    "insight_user_edited": bool(group.insight_user_edited),
                     "keywords": [_safe_text(item) for item in (group.keywords or []) if _safe_text(item)],
                     "agenda_ids": [_safe_text(item) for item in (group.agenda_ids or []) if _safe_text(item)],
                     "agenda_titles": [_safe_text(item) for item in (group.agenda_titles or []) if _safe_text(item)],
@@ -4376,6 +4422,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
                         _safe_text(item) for item in (group.source_summary_items or []) if _safe_text(item)
                     ],
                     "conclusion": _safe_text(group.conclusion),
+                    "conclusion_user_edited": bool(group.conclusion_user_edited),
                     "status": _safe_text(group.status, "draft"),
                 }
                 for group in (payload.problem_groups or [])
@@ -4392,6 +4439,10 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
                 for topic in (payload.solution_topics or [])
                 if _safe_text(topic.group_id) and _safe_text(topic.topic)
             ],
+            "node_positions": _normalize_canvas_node_positions(payload.node_positions),
+            "imported_state": copy.deepcopy(payload.imported_state)
+            if isinstance(payload.imported_state, dict)
+            else None,
             "saved_at": saved_at,
         }
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
@@ -4402,6 +4453,10 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
             "stage": workspace["stage"],
             "problem_groups": workspace["problem_groups"],
             "solution_topics": workspace["solution_topics"],
+            "node_positions": workspace["node_positions"],
+            "imported_state": copy.deepcopy(workspace["imported_state"])
+            if isinstance(workspace["imported_state"], dict)
+            else None,
             "saved_at": saved_at,
         }
 

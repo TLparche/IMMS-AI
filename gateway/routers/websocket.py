@@ -3,7 +3,7 @@ WebSocket Router
 실시간 회의 음성 스트리밍 및 전사
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from typing import Dict, List
+from typing import Any, Dict, List
 import asyncio
 import httpx
 import json
@@ -18,6 +18,22 @@ active_connections: Dict[str, List[Dict]] = {}
 
 # AI 백엔드 URL
 AI_BACKEND_URL = settings.ai_module_url.rstrip("/")
+
+
+async def persist_canvas_workspace(meeting_id: str, workspace: dict[str, Any]):
+    normalized_workspace = dict(workspace or {})
+    normalized_workspace["meeting_id"] = meeting_id
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{AI_BACKEND_URL}/api/canvas/workspace-state",
+                json=normalized_workspace,
+            )
+            if response.status_code >= 400:
+                print(f"❌ Failed to persist canvas workspace: {response.status_code} {response.text[:200]}")
+    except Exception as e:
+        print(f"❌ Failed to persist canvas workspace: {e}")
 
 
 async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str = None):
@@ -180,6 +196,25 @@ async def websocket_endpoint(
                                 })
                 except Exception as e:
                     print(f"❌ Error in analysis: {e}")
+
+            elif message_type == 'canvas_sync':
+                workspace = message.get('workspace') or {}
+                if not isinstance(workspace, dict):
+                    continue
+
+                workspace['meeting_id'] = meeting_id
+                sync_message = {
+                    'type': 'canvas_sync',
+                    'data': workspace,
+                    'meeting_id': meeting_id,
+                    'user_id': user_id,
+                    'timestamp': datetime.utcnow().isoformat(),
+                }
+
+                await asyncio.gather(
+                    persist_canvas_workspace(meeting_id, workspace),
+                    broadcast_to_meeting(meeting_id, sync_message, exclude_user=user_id),
+                )
                     
     except WebSocketDisconnect as exc:
         print(f"ℹ️ User {user_id} disconnected from meeting {meeting_id} (code={exc.code})")

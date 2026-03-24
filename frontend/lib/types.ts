@@ -227,13 +227,38 @@ export interface CanvasWorkspaceProblemGroup {
   status?: "draft" | "review" | "final" | string;
 }
 
+export interface CanvasNodePosition {
+  x: number;
+  y: number;
+}
+
+export interface CanvasNodePositionsByStage {
+  ideation?: Record<string, CanvasNodePosition>;
+  "problem-definition"?: Record<string, CanvasNodePosition>;
+  solution?: Record<string, CanvasNodePosition>;
+}
+
 export interface CanvasWorkspaceStateResponse {
   ok: boolean;
   meeting_id: string;
   stage: "ideation" | "problem-definition" | "solution";
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
+  node_positions?: CanvasNodePositionsByStage;
+  imported_state?: MeetingState | null;
   saved_at?: string;
+}
+
+export interface CanvasRealtimeSyncPayload {
+  sync_id: string;
+  meeting_id: string;
+  updated_by: string;
+  updated_at: string;
+  stage: "ideation" | "problem-definition" | "solution";
+  problem_groups: CanvasWorkspaceProblemGroup[];
+  solution_topics: CanvasSolutionTopicResponse[];
+  node_positions: CanvasNodePositionsByStage;
+  imported_state?: MeetingState | null;
 }
 
 export interface MeetingGoalSuggestionResponse {
