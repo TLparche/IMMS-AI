@@ -201,9 +201,69 @@ cd frontend && npm run dev
 - [ ] 리포트 생성 및 PDF 다운로드 테스트
 
 ### 예정
-- [ ] 프로덕션 배포 (Vercel Frontend + Railway Backend)
+- [ ] 2차 배포 구조 고도화 (도메인/리버스 프록시/운영 최적화)
 - [ ] 성능 최적화 및 실전 테스트
 - [ ] 사용자 피드백 반영
+
+## 1차 배포
+
+현재 저장소는 **단일 서버 + Docker Compose** 기준으로 바로 1차 배포할 수 있도록 정리되어 있습니다.
+
+### 배포 구조
+
+```text
+Frontend (Next.js, 3000)
+Gateway (FastAPI, 8001)
+Backend AI (FastAPI, 8000)
+Supabase (외부 서비스)
+```
+
+브라우저는 현재 구조상 `frontend`, `gateway`, `backend`에 모두 접근하므로 1차 배포에서는 세 포트를 그대로 노출하는 방식입니다.
+
+### 준비물
+
+- Docker
+- Docker Compose Plugin
+- Supabase 프로젝트
+- Gemini API Key
+
+### 배포 환경 변수 준비
+
+루트에 `.env.production` 파일을 만들고, 예시는 [.env.production.example](E:/AI/IMMS-AI/.env.production.example)을 기준으로 채웁니다.
+
+특히 아래 값은 실제 배포 주소로 맞춰야 합니다.
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://YOUR_SERVER_HOST:8000
+NEXT_PUBLIC_GATEWAY_URL=http://YOUR_SERVER_HOST:8001/gateway
+NEXT_PUBLIC_GATEWAY_WS_URL=ws://YOUR_SERVER_HOST:8001/gateway/ws
+CORS_ORIGINS=["http://YOUR_SERVER_HOST:3000"]
+```
+
+### Supabase 스키마 적용
+
+Supabase SQL Editor에서 [supabase_schema.sql](E:/AI/IMMS-AI/supabase_schema.sql)을 실행해 테이블과 RLS 정책을 생성합니다.
+
+### 배포 실행
+
+```bash
+cp .env.production.example .env.production
+# 값 수정 후
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+```
+
+### 배포 후 접속
+
+- Frontend: `http://YOUR_SERVER_HOST:3000`
+- Gateway: `http://YOUR_SERVER_HOST:8001/gateway/health`
+- Backend: `http://YOUR_SERVER_HOST:8000/api/health`
+
+### 중지 / 재배포
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml down
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+```
 
 ## 기여자
 
