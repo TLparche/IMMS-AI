@@ -3,6 +3,8 @@ export class WebSocketClient {
   private reconnectAttempts = 0
   private maxReconnectAttempts = 5
   private reconnectDelay = 2000
+  private shouldReconnect = true
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private meetingId: string
   private userId: string
   private messageHandlers: Map<string, (data: any) => void> = new Map()
@@ -13,10 +15,20 @@ export class WebSocketClient {
   }
 
   connect() {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return
+    }
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+
     const wsUrl = process.env.NEXT_PUBLIC_GATEWAY_WS_URL || 'ws://localhost:8001/gateway/ws'
     const url = `${wsUrl}/${this.meetingId}?user_id=${this.userId}`
 
     console.log('🔌 Connecting to WebSocket:', url)
+    this.shouldReconnect = true
 
     this.ws = new WebSocket(url)
 
@@ -40,20 +52,35 @@ export class WebSocketClient {
     }
 
     this.ws.onerror = (error) => {
+      if (!this.shouldReconnect) {
+        return
+      }
       console.error('❌ WebSocket error:', error)
     }
 
     this.ws.onclose = () => {
       console.log('🔌 WebSocket disconnected')
-      this.attemptReconnect()
+      this.ws = null
+      if (this.shouldReconnect) {
+        this.attemptReconnect()
+      }
     }
   }
 
   private attemptReconnect() {
+    if (!this.shouldReconnect) {
+      return
+    }
+
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++
       console.log(`🔄 Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`)
-      setTimeout(() => this.connect(), this.reconnectDelay)
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null
+        if (this.shouldReconnect) {
+          this.connect()
+        }
+      }, this.reconnectDelay)
     } else {
       console.error('❌ Max reconnect attempts reached')
     }
@@ -105,6 +132,11 @@ export class WebSocketClient {
   }
 
   disconnect() {
+    this.shouldReconnect = false
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     if (this.ws) {
       this.ws.close()
       this.ws = null

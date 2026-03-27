@@ -1,18 +1,7 @@
 import type { Metadata } from "next";
-import { Manrope, Space_Grotesk } from "next/font/google";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
-
-const bodyFont = Manrope({
-  subsets: ["latin"],
-  variable: "--font-body",
-});
-
-const displayFont = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-display",
-});
 
 export const metadata: Metadata = {
   title: "Meeting Workspace",
@@ -23,10 +12,15 @@ interface RootLayoutProps {
   children: ReactNode;
 }
 
+const fontVariables = {
+  "--font-body": '"Segoe UI", "Noto Sans KR", sans-serif',
+  "--font-display": '"Segoe UI", "Noto Sans KR", sans-serif',
+} as CSSProperties;
+
 export default function RootLayout({ children }: Readonly<RootLayoutProps>) {
   return (
     <html lang="en">
-      <body className={`${bodyFont.variable} ${displayFont.variable}`}>
+      <body style={fontVariables}>
         <AuthProvider>
           {children}
         </AuthProvider>

@@ -3,13 +3,13 @@ WebSocket Router
 실시간 회의 음성 스트리밍 및 전사
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from typing import Dict, List
+from typing import Any, Dict, List
 import asyncio
 import httpx
 import json
 import base64
 from datetime import datetime
-from ..config import get_supabase
+from ..config import get_supabase, settings
 
 router = APIRouter()
 
@@ -17,7 +17,23 @@ router = APIRouter()
 active_connections: Dict[str, List[Dict]] = {}
 
 # AI 백엔드 URL
-AI_BACKEND_URL = "http://localhost:8000"
+AI_BACKEND_URL = settings.ai_module_url.rstrip("/")
+
+
+async def persist_canvas_workspace(meeting_id: str, workspace: dict[str, Any]):
+    normalized_workspace = dict(workspace or {})
+    normalized_workspace["meeting_id"] = meeting_id
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{AI_BACKEND_URL}/api/canvas/workspace-state",
+                json=normalized_workspace,
+            )
+            if response.status_code >= 400:
+                print(f"❌ Failed to persist canvas workspace: {response.status_code} {response.text[:200]}")
+    except Exception as e:
+        print(f"❌ Failed to persist canvas workspace: {e}")
 
 
 async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str = None):
@@ -42,31 +58,21 @@ async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str
 
 
 async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str):
-    """전사 결과를 Supabase에 저장 (중요 발화만)"""
-    # 중요 키워드 필터링
-    important_keywords = ['결정', '안건', '액션', '과제', '완료', '시작', '종료', '승인', '반대', '동의']
-    
-    # 짧은 발화나 중복 무시
-    if len(text.strip()) < 10:
+    """전사 결과를 Supabase에 저장"""
+    normalized_text = (text or "").strip()
+    if not normalized_text:
         return
-    
-    # 중요 키워드 포함 여부 확인
-    has_important_keyword = any(keyword in text for keyword in important_keywords)
-    
-    if not has_important_keyword:
-        # 중요하지 않은 발화는 저장하지 않음
-        return
-    
+
     try:
         supabase = get_supabase()
         supabase.table('transcripts').insert({
             'meeting_id': meeting_id,
             'user_id': user_id,
             'speaker': speaker,
-            'text': text,
+            'text': normalized_text,
             'timestamp': datetime.utcnow().isoformat()
         }).execute()
-        print(f"💾 Saved transcript: {speaker}: {text[:50]}...")
+        print(f"💾 Saved transcript: {speaker}: {normalized_text[:50]}...")
     except Exception as e:
         print(f"❌ Failed to save transcript: {e}")
 
@@ -180,9 +186,28 @@ async def websocket_endpoint(
                                 })
                 except Exception as e:
                     print(f"❌ Error in analysis: {e}")
+
+            elif message_type == 'canvas_sync':
+                workspace = message.get('workspace') or {}
+                if not isinstance(workspace, dict):
+                    continue
+
+                workspace['meeting_id'] = meeting_id
+                sync_message = {
+                    'type': 'canvas_sync',
+                    'data': workspace,
+                    'meeting_id': meeting_id,
+                    'user_id': user_id,
+                    'timestamp': datetime.utcnow().isoformat(),
+                }
+
+                await asyncio.gather(
+                    persist_canvas_workspace(meeting_id, workspace),
+                    broadcast_to_meeting(meeting_id, sync_message, exclude_user=user_id),
+                )
                     
-    except WebSocketDisconnect:
-        print(f"❌ User {user_id} disconnected from meeting {meeting_id}")
+    except WebSocketDisconnect as exc:
+        print(f"ℹ️ User {user_id} disconnected from meeting {meeting_id} (code={exc.code})")
         active_connections[meeting_id].remove(conn_info)
         
         if not active_connections[meeting_id]:
@@ -195,6 +220,6 @@ async def websocket_endpoint(
             'timestamp': datetime.utcnow().isoformat()
         })
     except Exception as e:
-        print(f"❌ WebSocket error: {e}")
+        print(f"❌ WebSocket error for meeting {meeting_id}, user {user_id}: {e}")
         if conn_info in active_connections.get(meeting_id, []):
             active_connections[meeting_id].remove(conn_info)

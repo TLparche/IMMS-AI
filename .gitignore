@@ -92,3 +92,5 @@ logs/
 
 # Lock files
 .run_dev.lock
+
+/proto

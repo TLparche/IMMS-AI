@@ -13,21 +13,35 @@ import copy
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+from supabase import Client, create_client
 
 from llm_client import get_client
 
 ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env", override=False)
+load_dotenv(ROOT / "gateway" / ".env", override=False)
 WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "large")
 SUMMARY_INTERVAL = 4
 SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
 LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
+RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
+RUNTIME_USER_STATE_TABLE = "meeting_user_states"
+
+_SUPABASE_CLIENT: Client | None = None
+_SUPABASE_CLIENT_INITIALIZED = False
+_SUPABASE_CLIENT_LOCK = threading.Lock()
+_SUPABASE_REQUEST_LOCK = threading.Lock()
+_RUNTIME_DB_DISABLED_TABLES: set[str] = set()
+_RUNTIME_DB_LOGGED_ERRORS: dict[str, float] = {}
+_RUNTIME_DB_STATE_LOCK = threading.Lock()
 
 STOPWORDS = {
     "그냥",
@@ -258,6 +272,579 @@ def _normalize_flow_type(raw: Any) -> str:
     if s in {"discussion", "decision", "action-planning"}:
         return s
     return "discussion"
+
+
+def _normalize_canvas_stage(raw: Any) -> str:
+    s = _safe_text(raw, "ideation").lower()
+    if s in {"ideation", "problem-definition", "solution"}:
+        return s
+    return "ideation"
+
+
+def _utc_iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _env_first(*keys: str) -> str:
+    for key in keys:
+        value = _safe_text(os.environ.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _get_supabase_service_client() -> Client | None:
+    global _SUPABASE_CLIENT, _SUPABASE_CLIENT_INITIALIZED
+
+    with _SUPABASE_CLIENT_LOCK:
+        if _SUPABASE_CLIENT_INITIALIZED:
+            return _SUPABASE_CLIENT
+
+        _SUPABASE_CLIENT_INITIALIZED = True
+        supabase_url = _env_first("SUPABASE_URL", "supabase_url", "NEXT_PUBLIC_SUPABASE_URL")
+        supabase_service_role_key = _env_first(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "supabase_service_role_key",
+        )
+        if not supabase_url or not supabase_service_role_key:
+            return None
+
+        try:
+            _SUPABASE_CLIENT = create_client(supabase_url, supabase_service_role_key)
+        except Exception as exc:
+            print(f"❌ Failed to initialize Supabase client: {exc}")
+            _SUPABASE_CLIENT = None
+        return _SUPABASE_CLIENT
+
+
+def _runtime_db_table_is_disabled(table_name: str) -> bool:
+    with _RUNTIME_DB_STATE_LOCK:
+        return table_name in _RUNTIME_DB_DISABLED_TABLES
+
+
+def _log_runtime_db_error(key: str, message: str, cooldown_sec: float = 10.0) -> None:
+    now = time.time()
+    with _RUNTIME_DB_STATE_LOCK:
+        last_logged_at = _RUNTIME_DB_LOGGED_ERRORS.get(key, 0.0)
+        if now - last_logged_at < cooldown_sec:
+            return
+        _RUNTIME_DB_LOGGED_ERRORS[key] = now
+    print(message)
+
+
+def _handle_runtime_db_exception(table_name: str, action: str, exc: Exception) -> None:
+    raw = str(exc)
+    if "PGRST205" in raw and table_name in raw:
+        with _RUNTIME_DB_STATE_LOCK:
+            _RUNTIME_DB_DISABLED_TABLES.add(table_name)
+        _log_runtime_db_error(
+            f"{table_name}:missing",
+            f"⚠️ Supabase 테이블 `{table_name}` 이 없어 runtime DB 저장을 비활성화합니다. "
+            "supabase_schema.sql 적용 후 backend를 재시작하세요.",
+            cooldown_sec=3600.0,
+        )
+        return
+
+    _log_runtime_db_error(
+        f"{table_name}:{action}:{raw}",
+        f"❌ Failed to {action} using Supabase table `{table_name}`: {raw}",
+        cooldown_sec=15.0,
+    )
+
+
+def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
+        "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
+        "imported_state": copy.deepcopy(workspace.get("imported_state"))
+        if isinstance(workspace.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(workspace.get("saved_at")),
+    }
+
+
+def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    shared_state = row.get("shared_state")
+    if not isinstance(shared_state, dict):
+        shared_state = {}
+    llm_cache = row.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        llm_cache = {}
+
+    return {
+        "meeting_id": _safe_text(meeting_id),
+        "stage": _normalize_canvas_stage(shared_state.get("stage")),
+        "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
+        "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
+        "imported_state": copy.deepcopy(shared_state.get("imported_state"))
+        if isinstance(shared_state.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(shared_state.get("saved_at") or row.get("updated_at")),
+        "llm_cache": copy.deepcopy(llm_cache),
+    }
+
+
+def _normalize_canvas_workspace_problem_groups(
+    groups: list[CanvasWorkspaceProblemGroupInput] | None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "group_id": _safe_text(group.group_id),
+            "topic": _safe_text(group.topic),
+            "insight_lens": _safe_text(group.insight_lens),
+            "insight_user_edited": bool(group.insight_user_edited),
+            "keywords": [_safe_text(item) for item in (group.keywords or []) if _safe_text(item)],
+            "agenda_ids": [_safe_text(item) for item in (group.agenda_ids or []) if _safe_text(item)],
+            "agenda_titles": [_safe_text(item) for item in (group.agenda_titles or []) if _safe_text(item)],
+            "ideas": [
+                {
+                    "id": _safe_text(idea.id),
+                    "kind": _safe_text(idea.kind, "note"),
+                    "title": _safe_text(idea.title),
+                    "body": _safe_text(idea.body),
+                }
+                for idea in (group.ideas or [])
+                if _safe_text(idea.id) or _safe_text(idea.title) or _safe_text(idea.body)
+            ],
+            "source_summary_items": [
+                _safe_text(item) for item in (group.source_summary_items or []) if _safe_text(item)
+            ],
+            "conclusion": _safe_text(group.conclusion),
+            "conclusion_user_edited": bool(group.conclusion_user_edited),
+            "status": _safe_text(group.status, "draft"),
+        }
+        for group in (groups or [])
+        if _safe_text(group.group_id) and _safe_text(group.topic)
+    ]
+
+
+def _normalize_canvas_workspace_solution_topics(
+    topics: list[CanvasWorkspaceSolutionTopicInput] | None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "group_id": _safe_text(topic.group_id),
+            "topic_no": int(topic.topic_no or 0),
+            "topic": _safe_text(topic.topic),
+            "conclusion": _safe_text(topic.conclusion),
+            "ideas": [_safe_text(item) for item in (topic.ideas or []) if _safe_text(item)],
+            "status": _safe_text(topic.status, "draft"),
+            "problem_topic": _safe_text(topic.problem_topic),
+            "problem_insight": _safe_text(topic.problem_insight),
+            "problem_conclusion": _safe_text(topic.problem_conclusion),
+            "problem_keywords": [_safe_text(item) for item in (topic.problem_keywords or []) if _safe_text(item)],
+            "agenda_titles": [_safe_text(item) for item in (topic.agenda_titles or []) if _safe_text(item)],
+            "ai_suggestions": [
+                {
+                    "id": _safe_text(item.get("id")),
+                    "text": _safe_text(item.get("text")),
+                    "status": _safe_text(item.get("status"), "draft"),
+                }
+                for item in (topic.ai_suggestions or [])
+                if isinstance(item, dict) and (_safe_text(item.get("id")) or _safe_text(item.get("text")))
+            ],
+            "notes": [
+                {
+                    "id": _safe_text(item.get("id")),
+                    "text": _safe_text(item.get("text")),
+                    "source": _safe_text(item.get("source"), "user"),
+                    "source_ai_id": _safe_text(item.get("source_ai_id")),
+                    "is_final_candidate": bool(item.get("is_final_candidate")),
+                    "final_comment": _safe_text(item.get("final_comment")),
+                }
+                for item in (topic.notes or [])
+                if isinstance(item, dict) and (_safe_text(item.get("id")) or _safe_text(item.get("text")))
+            ],
+        }
+        for topic in (topics or [])
+        if _safe_text(topic.group_id) and _safe_text(topic.topic)
+    ]
+
+
+def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], saved_at: str) -> dict[str, Any]:
+    return {
+        "meeting_id": _safe_text(meeting_id),
+        "stage": _normalize_canvas_stage(source.get("stage")),
+        "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
+        "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
+        "imported_state": copy.deepcopy(source.get("imported_state"))
+        if isinstance(source.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(saved_at),
+        "llm_cache": copy.deepcopy(source.get("llm_cache") or {})
+        if isinstance(source.get("llm_cache"), dict)
+        else {},
+    }
+
+
+def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "meeting_id": _safe_text(workspace.get("meeting_id")),
+        "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
+        "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
+        "imported_state": copy.deepcopy(workspace.get("imported_state"))
+        if isinstance(workspace.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(workspace.get("saved_at")),
+    }
+
+
+def _load_canvas_workspace_from_db(meeting_id: str) -> dict[str, Any] | None:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    if client is None or not normalized_meeting_id:
+        return None
+    if _runtime_db_table_is_disabled(RUNTIME_SHARED_STATE_TABLE):
+        return None
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            response = (
+                client.table(RUNTIME_SHARED_STATE_TABLE)
+                .select("meeting_id,shared_state,llm_cache,updated_at")
+                .eq("meeting_id", normalized_meeting_id)
+                .limit(1)
+                .execute()
+            )
+        rows = response.data or []
+        if not rows:
+            return None
+        first_row = rows[0] if isinstance(rows[0], dict) else {}
+        if not isinstance(first_row, dict):
+            return None
+        return _workspace_from_storage_row(normalized_meeting_id, first_row)
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_SHARED_STATE_TABLE, "load", exc)
+        return None
+
+
+def _save_canvas_workspace_to_db(meeting_id: str, workspace: dict[str, Any]) -> bool:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    if client is None or not normalized_meeting_id:
+        return False
+    if _runtime_db_table_is_disabled(RUNTIME_SHARED_STATE_TABLE):
+        return False
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            client.table(RUNTIME_SHARED_STATE_TABLE).upsert(
+                {
+                    "meeting_id": normalized_meeting_id,
+                    "shared_state": _workspace_payload_from_runtime_workspace(workspace),
+                    "llm_cache": copy.deepcopy(workspace.get("llm_cache") or {}),
+                    "updated_at": _utc_iso_now(),
+                },
+                on_conflict="meeting_id",
+            ).execute()
+        return True
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_SHARED_STATE_TABLE, "save", exc)
+        return False
+
+
+def _load_canvas_personal_notes_from_db(meeting_id: str, user_id: str) -> list[dict[str, Any]] | None:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return None
+    if _runtime_db_table_is_disabled(RUNTIME_USER_STATE_TABLE):
+        return None
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            response = (
+                client.table(RUNTIME_USER_STATE_TABLE)
+                .select("meeting_id,user_id,personal_state,updated_at")
+                .eq("meeting_id", normalized_meeting_id)
+                .eq("user_id", normalized_user_id)
+                .limit(1)
+                .execute()
+            )
+        rows = response.data or []
+        if not rows:
+            return None
+        first_row = rows[0] if isinstance(rows[0], dict) else {}
+        if not isinstance(first_row, dict):
+            return None
+        personal_state = first_row.get("personal_state")
+        if not isinstance(personal_state, dict):
+            personal_state = {}
+        notes = personal_state.get("personal_notes")
+        if not isinstance(notes, list):
+            return []
+        return copy.deepcopy([item for item in notes if isinstance(item, dict)])
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_USER_STATE_TABLE, "load", exc)
+        return None
+
+
+def _save_canvas_personal_notes_to_db(
+    meeting_id: str,
+    user_id: str,
+    personal_notes: list[dict[str, Any]],
+) -> bool:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return False
+    if _runtime_db_table_is_disabled(RUNTIME_USER_STATE_TABLE):
+        return False
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            client.table(RUNTIME_USER_STATE_TABLE).upsert(
+                {
+                    "meeting_id": normalized_meeting_id,
+                    "user_id": normalized_user_id,
+                    "personal_state": {"personal_notes": copy.deepcopy(personal_notes or [])},
+                    "updated_at": _utc_iso_now(),
+                },
+                on_conflict="meeting_id,user_id",
+            ).execute()
+        return True
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_USER_STATE_TABLE, "save", exc)
+        return False
+
+
+def _warm_canvas_workspace_cache(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return {}
+
+    with rt.lock:
+        cached = copy.deepcopy(rt.canvas_workspace_by_meeting.get(normalized_meeting_id) or {})
+        if cached:
+            return cached
+
+    loaded = _load_canvas_workspace_from_db(normalized_meeting_id)
+    if loaded:
+        with rt.lock:
+            rt.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(loaded)
+        return copy.deepcopy(loaded)
+
+    with rt.lock:
+        return copy.deepcopy(_ensure_canvas_workspace_entry(rt, normalized_meeting_id))
+
+
+def _payload_to_primitive(payload: Any) -> Any:
+    if hasattr(payload, "model_dump"):
+        try:
+            return payload.model_dump()
+        except Exception:
+            pass
+    if hasattr(payload, "dict"):
+        try:
+            return payload.dict()
+        except Exception:
+            pass
+    return payload
+
+
+def _canvas_llm_signature(payload: Any) -> str:
+    return json.dumps(
+        _payload_to_primitive(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return {}
+
+    workspace = rt.canvas_workspace_by_meeting.get(normalized_meeting_id)
+    if not isinstance(workspace, dict):
+        workspace = {}
+    workspace.setdefault("meeting_id", normalized_meeting_id)
+    workspace.setdefault("stage", "ideation")
+    workspace.setdefault("problem_groups", [])
+    workspace.setdefault("solution_topics", [])
+    workspace.setdefault("node_positions", {})
+    workspace.setdefault("imported_state", None)
+    workspace.setdefault("saved_at", "")
+    workspace.setdefault("llm_cache", {})
+    rt.canvas_workspace_by_meeting[normalized_meeting_id] = workspace
+    return workspace
+
+
+def _get_canvas_llm_cached_result(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+) -> dict[str, Any] | None:
+    workspace = _ensure_canvas_workspace_entry(rt, meeting_id)
+    if not workspace:
+        return None
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        return None
+    cached = llm_cache.get(cache_key)
+    if not isinstance(cached, dict):
+        return None
+    if _safe_text(cached.get("signature")) != _safe_text(signature):
+        return None
+    result = cached.get("result")
+    if not isinstance(result, dict):
+        return None
+    return copy.deepcopy(result)
+
+
+def _set_canvas_llm_cached_result(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    result: dict[str, Any],
+) -> None:
+    workspace = _ensure_canvas_workspace_entry(rt, meeting_id)
+    if not workspace:
+        return
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        llm_cache = {}
+        workspace["llm_cache"] = llm_cache
+    llm_cache[cache_key] = {
+        "signature": _safe_text(signature),
+        "generated_at": _now_ts(),
+        "result": copy.deepcopy(result),
+    }
+
+
+def _get_canvas_llm_inflight_entry(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    meeting_entries = rt.canvas_llm_inflight_by_meeting.get(_safe_text(meeting_id))
+    if not isinstance(meeting_entries, dict):
+        return None
+    entry = meeting_entries.get(_safe_text(cache_key))
+    return entry if isinstance(entry, dict) else None
+
+
+def _run_canvas_llm_cached_request(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    compute: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_cache_key = _safe_text(cache_key)
+    normalized_signature = _safe_text(signature)
+    if not normalized_meeting_id or not normalized_cache_key or not normalized_signature:
+        return compute()
+
+    _warm_canvas_workspace_cache(rt, normalized_meeting_id)
+
+    while True:
+        wait_event: threading.Event | None = None
+        wait_error = ""
+        should_compute = False
+
+        with rt.lock:
+            cached = _get_canvas_llm_cached_result(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+            )
+            if cached:
+                return cached
+
+            meeting_entries = rt.canvas_llm_inflight_by_meeting.setdefault(normalized_meeting_id, {})
+            inflight = meeting_entries.get(normalized_cache_key)
+            if (
+                isinstance(inflight, dict)
+                and _safe_text(inflight.get("signature")) == normalized_signature
+                and isinstance(inflight.get("event"), threading.Event)
+            ):
+                wait_event = inflight["event"]
+                wait_error = _safe_text(inflight.get("error"))
+            else:
+                wait_event = threading.Event()
+                meeting_entries[normalized_cache_key] = {
+                    "signature": normalized_signature,
+                    "event": wait_event,
+                    "error": "",
+                }
+                should_compute = True
+
+        if not should_compute and wait_event is not None:
+            wait_event.wait(timeout=90.0)
+            with rt.lock:
+                cached = _get_canvas_llm_cached_result(
+                    rt,
+                    normalized_meeting_id,
+                    normalized_cache_key,
+                    normalized_signature,
+                )
+                if cached:
+                    return cached
+
+                inflight = _get_canvas_llm_inflight_entry(rt, normalized_meeting_id, normalized_cache_key)
+                if (
+                    isinstance(inflight, dict)
+                    and _safe_text(inflight.get("signature")) == normalized_signature
+                    and isinstance(inflight.get("event"), threading.Event)
+                    and not inflight["event"].is_set()
+                ):
+                    continue
+                wait_error = _safe_text((inflight or {}).get("error"), wait_error)
+
+            if wait_error:
+                raise RuntimeError(wait_error)
+            continue
+
+        try:
+            with rt.canvas_llm_request_lock:
+                result = compute()
+        except Exception as exc:
+            with rt.lock:
+                meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+                inflight = meeting_entries.pop(normalized_cache_key, None)
+                if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
+                    inflight["error"] = str(exc)
+                    inflight["event"].set()
+                if not meeting_entries:
+                    rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+            raise
+
+        workspace_snapshot: dict[str, Any] | None = None
+        with rt.lock:
+            _set_canvas_llm_cached_result(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+                result,
+            )
+            workspace_snapshot = copy.deepcopy(
+                _ensure_canvas_workspace_entry(rt, normalized_meeting_id),
+            )
+            meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+            inflight = meeting_entries.pop(normalized_cache_key, None)
+            if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
+                inflight["event"].set()
+            if not meeting_entries:
+                rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+        if workspace_snapshot:
+            _save_canvas_workspace_to_db(normalized_meeting_id, workspace_snapshot)
+        return copy.deepcopy(result)
 
 
 def _doc_freq(rows: list[dict[str, Any]]) -> Counter[str]:
@@ -660,9 +1247,174 @@ class ReplayStepInput(BaseModel):
     auto_analyze: bool = True
 
 
+class TranscriptSyncItemInput(BaseModel):
+    speaker: str = "화자"
+    text: str
+    timestamp: str | None = None
+
+
+class TranscriptSyncInput(BaseModel):
+    meeting_goal: str = ""
+    window_size: int = Field(default=12, ge=4, le=80)
+    reset_state: bool = True
+    auto_analyze: bool = True
+    transcript: list[TranscriptSyncItemInput] = Field(default_factory=list)
+
+
+class CanvasPlacementConfirmInput(BaseModel):
+    tool: str = "note"
+    ui_x: float = 0.0
+    ui_y: float = 0.0
+    flow_x: float = 0.0
+    flow_y: float = 0.0
+    agenda_id: str = ""
+    point_id: str = ""
+    title: str = ""
+    body: str = ""
+
+
+class ProblemDefinitionAgendaInput(BaseModel):
+    agenda_id: str
+    title: str
+    keywords: list[str] = Field(default_factory=list)
+    summary_bullets: list[str] = Field(default_factory=list)
+
+
+class ProblemDefinitionIdeaInput(BaseModel):
+    id: str
+    agenda_id: str
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class ProblemDefinitionGenerateInput(BaseModel):
+    meeting_id: str = ""
+    topic: str = ""
+    agendas: list[ProblemDefinitionAgendaInput] = Field(default_factory=list)
+    ideas: list[ProblemDefinitionIdeaInput] = Field(default_factory=list)
+
+
+class ProblemConclusionIdeaInput(BaseModel):
+    id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class ProblemConclusionGroupInput(BaseModel):
+    group_id: str = ""
+    topic: str = ""
+    insight_lens: str = ""
+    agenda_titles: list[str] = Field(default_factory=list)
+    source_summary_items: list[str] = Field(default_factory=list)
+    ideas: list[ProblemConclusionIdeaInput] = Field(default_factory=list)
+
+
+class ProblemConclusionGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    group: ProblemConclusionGroupInput
+
+
+class MeetingGoalGenerateInput(BaseModel):
+    meeting_id: str = ""
+    topic: str = ""
+
+
+class SolutionStageTopicInput(BaseModel):
+    group_id: str
+    topic_no: int = 0
+    topic: str
+    conclusion: str = ""
+
+
+class SolutionStageGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    topics: list[SolutionStageTopicInput] = Field(default_factory=list)
+
+
+class CanvasWorkspaceIdeaInput(BaseModel):
+    id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class CanvasPersonalNoteInput(BaseModel):
+    id: str = ""
+    agenda_id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class CanvasNodePositionInput(BaseModel):
+    x: float = 0
+    y: float = 0
+
+
+class CanvasWorkspaceProblemGroupInput(BaseModel):
+    group_id: str = ""
+    topic: str = ""
+    insight_lens: str = ""
+    insight_user_edited: bool = False
+    keywords: list[str] = Field(default_factory=list)
+    agenda_ids: list[str] = Field(default_factory=list)
+    agenda_titles: list[str] = Field(default_factory=list)
+    ideas: list[CanvasWorkspaceIdeaInput] = Field(default_factory=list)
+    source_summary_items: list[str] = Field(default_factory=list)
+    conclusion: str = ""
+    conclusion_user_edited: bool = False
+    status: str = "draft"
+
+
+class CanvasWorkspaceSolutionTopicInput(BaseModel):
+    group_id: str = ""
+    topic_no: int = 0
+    topic: str = ""
+    conclusion: str = ""
+    ideas: list[str] = Field(default_factory=list)
+    status: str = "draft"
+    problem_topic: str = ""
+    problem_insight: str = ""
+    problem_conclusion: str = ""
+    problem_keywords: list[str] = Field(default_factory=list)
+    agenda_titles: list[str] = Field(default_factory=list)
+    ai_suggestions: list[dict[str, Any]] = Field(default_factory=list)
+    notes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CanvasWorkspaceStateInput(BaseModel):
+    meeting_id: str = ""
+    stage: str = "ideation"
+    problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
+    solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
+    node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
+    imported_state: dict[str, Any] | None = None
+
+
+class CanvasWorkspacePatchInput(BaseModel):
+    meeting_id: str = ""
+    stage: str | None = None
+    problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
+    solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
+    node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
+    imported_state: dict[str, Any] | None = None
+
+
+class CanvasPersonalNotesStateInput(BaseModel):
+    meeting_id: str = ""
+    user_id: str = ""
+    personal_notes: list[CanvasPersonalNoteInput] = Field(default_factory=list)
+
+
 @dataclass
 class RuntimeStore:
     lock: threading.Lock = field(default_factory=threading.Lock)
+    llm_io_lock: threading.Lock = field(default_factory=threading.Lock)
+    canvas_llm_request_lock: threading.Lock = field(default_factory=threading.Lock)
     meeting_goal: str = ""
     window_size: int = 12
     transcript: list[dict[str, str]] = field(default_factory=list)
@@ -697,6 +1449,10 @@ class RuntimeStore:
     analysis_next_windowed_target: int = SUMMARY_INTERVAL
     llm_io_seq: int = 0
     llm_io_logs: list[dict[str, Any]] = field(default_factory=list)
+    canvas_last_placement: dict[str, Any] = field(default_factory=dict)
+    canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_personal_notes_by_meeting_user: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.meeting_goal = ""
@@ -732,6 +1488,10 @@ class RuntimeStore:
         self.analysis_next_windowed_target = SUMMARY_INTERVAL
         self.llm_io_seq = 0
         self.llm_io_logs = []
+        self.canvas_last_placement = {}
+        self.canvas_workspace_by_meeting = {}
+        self.canvas_llm_inflight_by_meeting = {}
+        self.canvas_personal_notes_by_meeting_user = {}
 
 
 RT = RuntimeStore()
@@ -767,19 +1527,20 @@ def _truncate_text(raw: Any, limit: int = LLM_IO_PREVIEW_MAX) -> str:
 
 
 def _append_llm_io_log(rt: RuntimeStore, direction: str, stage: str, payload: Any, meta: dict[str, Any] | None = None) -> None:
-    rt.llm_io_seq += 1
-    preview = _truncate_text(payload)
-    entry = {
-        "seq": int(rt.llm_io_seq),
-        "at": _now_ts(),
-        "direction": _safe_text(direction),
-        "stage": _safe_text(stage),
-        "payload": preview,
-        "meta": dict(meta or {}),
-    }
-    rt.llm_io_logs.append(entry)
-    if len(rt.llm_io_logs) > LLM_IO_LOG_MAX:
-        rt.llm_io_logs = rt.llm_io_logs[-LLM_IO_LOG_MAX:]
+    with rt.llm_io_lock:
+        rt.llm_io_seq += 1
+        preview = _truncate_text(payload)
+        entry = {
+            "seq": int(rt.llm_io_seq),
+            "at": _now_ts(),
+            "direction": _safe_text(direction),
+            "stage": _safe_text(stage),
+            "payload": preview,
+            "meta": dict(meta or {}),
+        }
+        rt.llm_io_logs.append(entry)
+        if len(rt.llm_io_logs) > LLM_IO_LOG_MAX:
+            rt.llm_io_logs = rt.llm_io_logs[-LLM_IO_LOG_MAX:]
 
 
 def _call_llm_json(
@@ -810,6 +1571,510 @@ def _call_llm_json(
     return parsed
 
 
+def _md_text(raw: Any) -> str:
+    return re.sub(r"\s+", " ", _safe_text(raw)).strip()
+
+
+def _build_problem_definition_groups_local(payload: ProblemDefinitionGenerateInput) -> list[dict[str, Any]]:
+    agendas = payload.agendas or []
+    ideas = payload.ideas or []
+    if not agendas:
+        return []
+
+    groups: list[dict[str, Any]] = []
+    for agenda in agendas:
+        agenda_keywords = [
+            tok
+            for tok in (
+                [_normalize_keyword_token(x) for x in (agenda.keywords or [])]
+                + _keyword_tokens(agenda.title)
+            )
+            if tok and not _is_title_keyword_noise(tok)
+        ]
+        dedup_keywords = list(dict.fromkeys(agenda_keywords))
+
+        best_group_idx = -1
+        best_score = 0
+        for idx, group in enumerate(groups):
+            overlap = len(set(dedup_keywords) & set(group.get("keywords") or []))
+            if overlap > best_score:
+                best_score = overlap
+                best_group_idx = idx
+
+        if best_group_idx < 0 or best_score == 0:
+            groups.append(
+                {
+                    "group_id": f"problem-group-{len(groups) + 1}",
+                    "topic": _safe_text(dedup_keywords[0] if dedup_keywords else agenda.title, agenda.title),
+                    "keywords": dedup_keywords[:8],
+                    "agenda_ids": [_safe_text(agenda.agenda_id)],
+                    "agenda_titles": [_safe_text(agenda.title)],
+                    "source_summary_items": [_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)],
+                }
+            )
+            continue
+
+        group = groups[best_group_idx]
+        group["agenda_ids"].append(_safe_text(agenda.agenda_id))
+        group["agenda_titles"].append(_safe_text(agenda.title))
+        group["keywords"] = list(dict.fromkeys([*(group.get("keywords") or []), *dedup_keywords]))[:8]
+        group["source_summary_items"] = [
+            *(group.get("source_summary_items") or []),
+            *[_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)],
+        ][:12]
+
+    idea_by_agenda: dict[str, list[dict[str, Any]]] = {}
+    for idea in ideas:
+        agenda_id = _safe_text(idea.agenda_id)
+        if not agenda_id:
+            continue
+        idea_by_agenda.setdefault(agenda_id, []).append(
+            {
+                "id": _safe_text(idea.id),
+                "kind": _safe_text(idea.kind, "note"),
+                "title": _safe_text(idea.title),
+                "body": _safe_text(idea.body),
+            }
+        )
+
+    out: list[dict[str, Any]] = []
+    for idx, group in enumerate(groups, start=1):
+        linked_ideas: list[dict[str, Any]] = []
+        for agenda_id in group.get("agenda_ids") or []:
+            linked_ideas.extend(idea_by_agenda.get(_safe_text(agenda_id), []))
+
+        topic = _safe_text(group.get("topic"), f"주제 {idx}")
+        summaries = [_safe_text(x) for x in (group.get("source_summary_items") or []) if _safe_text(x)]
+        out.append(
+            {
+                "group_id": _safe_text(group.get("group_id"), f"problem-group-{idx}"),
+                "topic": _normalize_problem_topic_label(topic, f"주제 {idx}"),
+                "insight_lens": "공통 행동과 니즈를 묶어 해석",
+                "keywords": [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)][:6],
+                "agenda_ids": [_safe_text(x) for x in (group.get("agenda_ids") or []) if _safe_text(x)],
+                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
+                "ideas": linked_ideas[:24],
+                "source_summary_items": summaries[:8],
+                "conclusion": _to_summary_point(summaries[0], max_len=None) if summaries else f"{_safe_text(topic)} 방향 구체화",
+            }
+        )
+    return out
+
+
+def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
+    text = _safe_text(raw, fallback)
+    parts = re.findall(r"[A-Za-z0-9가-힣]+", text)
+    cleaned: list[str] = []
+    for part in parts:
+        tok = _safe_text(part)
+        if not tok:
+            continue
+        lowered = tok.lower()
+        if lowered in STOPWORDS or _is_title_keyword_noise(tok):
+            continue
+        cleaned.append(tok)
+        if len(cleaned) >= 2:
+            break
+    if cleaned:
+        return " ".join(cleaned)
+    return _safe_text(fallback, "주제")
+
+
+def _build_meeting_goal_local(topic: str) -> str:
+    clean_topic = _safe_text(topic, "이번 회의").strip()
+    if not clean_topic:
+        return "이번 회의에서 실행 방향과 우선순위를 정리한다."
+    return f"{clean_topic}에 대해 실행 방향과 핵심 우선순위를 정리한다."
+
+
+def _build_meeting_goal_prompt(topic: str) -> str:
+    payload = {
+        "meeting_topic": _safe_text(topic),
+    }
+    return (
+        "너는 회의 제목을 보고 회의 목표를 한 문장으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- meeting_topic을 바탕으로 이번 회의가 무엇을 정리하거나 결정해야 하는지 한 문장으로 쓴다.\n"
+        "- 제목을 그대로 반복하지 말고, 회의에서 얻고 싶은 결과나 방향이 드러나게 쓴다.\n"
+        "- 너무 추상적이지 않게, 실행 또는 정리의 대상이 보이도록 쓴다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "goal": "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다."\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- goal은 한국어 1문장.\n"
+        "- 제목 복붙이 아니라 회의 목적이 드러나는 재작성 문장.\n"
+        "- 18~40자 정도의 짧고 분명한 문장.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_problem_definition_prompt(topic: str, groups: list[dict[str, Any]]) -> str:
+    prompt_groups: list[dict[str, Any]] = []
+    for group in groups:
+        prompt_groups.append(
+            {
+                "group_id": _safe_text(group.get("group_id")),
+                "draft_topic": _safe_text(group.get("topic")),
+                "draft_insight_lens": _safe_text(group.get("insight_lens"), "공통 행동과 니즈를 묶어 해석"),
+                "keywords": [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)],
+                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
+                "ideas": group.get("ideas") or [],
+                "source_summary_items": [_safe_text(x) for x in (group.get("source_summary_items") or []) if _safe_text(x)],
+            }
+        )
+    payload = {
+        "meeting_topic": _safe_text(topic),
+        "groups": prompt_groups,
+    }
+    return (
+        "너는 회의 아이디어를 문제 정의 단계용 주제 묶음으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 각 묶음의 draft_topic은 초안일 뿐이다. 이를 그대로 복사하지 말고, 묶음 전체를 더 잘 설명하는 최종 topic을 다시 정제해 작성한다.\n"
+        "- 유사한 안건/아이디어 묶음마다 '주제 결론'을 새로 작성한다.\n"
+        "- 주제 결론은 기존 문장을 그대로 복사하지 말고, 입력 내용을 종합해서 새 한국어 문장 1개로 재작성한다.\n"
+        "- topic은 너무 길지 않은 키워드/짧은 구 형태로 유지한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "groups": [\n'
+        "    {\n"
+        '      "group_id": "problem-group-1",\n'
+        '      "topic": "트렌드",\n'
+        '      "insight_lens": "사용자의 행동에서 드러난 숨은 니즈를 정리",\n'
+        '      "conclusion": "키링을 통해 자신을 표현하려는 수요가 강하게 드러난다."\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id는 입력값을 그대로 유지한다.\n"
+        "- topic은 draft_topic 재사용이 아니라, 묶음의 안건/아이디어/요약을 보고 다시 정제한 최종 주제명이어야 한다.\n"
+        "- insight_lens는 이 묶음의 인사이트를 어떤 관점으로 정리했는지 설명하는 짧은 문구다.\n"
+        "- insight_lens는 예를 들면 '행동에서 드러난 니즈', '의사결정 기준의 충돌', '실행 제약과 우선순위' 같은 식으로 쓴다.\n"
+        "- insight_lens는 반드시 8~20자 이내의 짧은 한국어 구로 쓴다.\n"
+        "- topic은 반드시 1~2단어만 사용한다.\n"
+        "- topic은 가급적 10자 이내의 짧은 명사구로 쓴다.\n"
+        "- topic은 너무 일반적인 표현(예: 기타, 논의, 안건, 주제)으로 쓰지 않는다.\n"
+        "- conclusion은 각 주제당 정확히 1문장.\n"
+        "- conclusion은 반드시 insight_lens의 관점으로 해석한 결과여야 한다.\n"
+        "- conclusion은 '이 그룹에서는', '~에서는', '~정리된다', '~필요가 있다' 같은 서술 틀로 시작하거나 끝내지 않는다.\n"
+        "- conclusion은 바로 핵심 결과 문장만 쓴다.\n"
+        "- conclusion은 요약문 재인용이 아니라 새로 쓴 문장.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_problem_group_conclusion_local(payload: ProblemConclusionGenerateInput) -> str:
+    summary_items = [_safe_text(item) for item in (payload.group.source_summary_items or []) if _safe_text(item)]
+    idea_bodies = [
+        _safe_text(item.body) or _safe_text(item.title)
+        for item in (payload.group.ideas or [])
+        if _safe_text(item.body) or _safe_text(item.title)
+    ]
+    evidence = summary_items + idea_bodies
+    if evidence:
+        anchor = _to_summary_point(evidence[0], max_len=None)
+        if anchor:
+            return anchor
+    agenda_titles = [_safe_text(item) for item in (payload.group.agenda_titles or []) if _safe_text(item)]
+    if agenda_titles:
+        return f"{agenda_titles[0]} 방향 구체화"
+    return f"{_safe_text(payload.group.topic, '주제')} 방향 구체화"
+
+
+def _build_problem_group_insight_lens_local(payload: ProblemConclusionGenerateInput) -> str:
+    existing = _safe_text(payload.group.insight_lens)
+    if existing:
+        return existing
+    if payload.group.ideas:
+        return "개인 메모와 요약을 함께 해석"
+    if payload.group.source_summary_items:
+        return "요약 흐름에서 공통 인사이트 도출"
+    if payload.group.agenda_titles:
+        return "안건 흐름에서 공통 방향 정리"
+    return "핵심 방향을 묶어 해석"
+
+
+def _build_problem_group_conclusion_prompt(payload: ProblemConclusionGenerateInput) -> str:
+    serialized = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "group": {
+            "group_id": _safe_text(payload.group.group_id),
+            "topic": _safe_text(payload.group.topic),
+            "draft_insight_lens": _safe_text(payload.group.insight_lens),
+            "agenda_titles": [_safe_text(item) for item in (payload.group.agenda_titles or []) if _safe_text(item)],
+            "source_summary_items": [
+                _safe_text(item) for item in (payload.group.source_summary_items or []) if _safe_text(item)
+            ],
+            "ideas": [
+                {
+                    "id": _safe_text(item.id),
+                    "kind": _safe_text(item.kind, "note"),
+                    "title": _safe_text(item.title),
+                    "body": _safe_text(item.body),
+                }
+                for item in (payload.group.ideas or [])
+                if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
+            ],
+        },
+    }
+    return (
+        "너는 문제정의 그룹의 현재 메모와 요약을 보고 결론 한 문장을 작성하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 먼저 이 그룹의 인사이트를 어떤 관점으로 정리할지 insight_lens를 정한다.\n"
+        "- group.topic, source_summary_items, ideas를 종합해 이 그룹의 결론을 한 문장으로 쓴다.\n"
+        "- 회의에서 드러난 핵심 인사이트나 방향이 드러나야 한다.\n"
+        "- 입력 문장을 그대로 복붙하지 말고 새로운 한국어 문장으로 정리한다.\n"
+        "- 너무 추상적이지 않게, 실제 논의된 흐름이 느껴지게 쓴다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(serialized, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "group_id": "problem-group-1",\n'
+        '  "insight_lens": "행동에서 드러난 숨은 니즈",\n'
+        '  "conclusion": "사용자의 표현 욕구를 반영한 방향으로 아이디어를 정리해야 한다."\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id는 입력값을 그대로 유지한다.\n"
+        "- insight_lens는 인사이트를 어떤 각도로 정리했는지 드러내는 8~20자 이내의 짧은 한국어 구다.\n"
+        "- insight_lens는 예를 들면 '행동에서 드러난 니즈', '의사결정 기준의 충돌', '실행 제약과 우선순위'처럼 쓴다.\n"
+        "- conclusion은 한국어 1문장.\n"
+        "- conclusion은 18~45자 정도의 짧고 분명한 문장.\n"
+        "- conclusion은 반드시 insight_lens 관점으로 해석한 결과여야 한다.\n"
+        "- conclusion은 '이 그룹에서는', '~에서는', '~정리된다', '~필요가 있다' 같은 틀을 쓰지 않는다.\n"
+        "- conclusion은 바로 핵심 결과 문장만 쓴다.\n"
+        "- topic을 반복만 하지 말고, 근거를 종합한 결과를 써야 한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_solution_stage_prompt(meeting_topic: str, topics: list[dict[str, Any]]) -> str:
+    payload = {
+        "meeting_topic": _safe_text(meeting_topic),
+        "topics": topics,
+    }
+    return (
+        "너는 회의 해결책 단계용 AI 아이디어 생성기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 각 topic마다 실행 가능한 해결책 아이디어를 여러 개 제안한다.\n"
+        "- 아이디어는 topic과 conclusion을 바탕으로 새로 작성한다.\n"
+        "- 기존 conclusion 문장을 그대로 반복하지 말고, 실제 시도 가능한 해결 방향으로 제안한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "topics": [\n'
+        "    {\n"
+        '      "group_id": "problem-group-1",\n'
+        '      "topic_no": 1,\n'
+        '      "topic": "트렌드",\n'
+        '      "ideas": ["아이디어 1", "아이디어 2", "아이디어 3"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id, topic_no, topic은 입력값을 그대로 유지한다.\n"
+        "- ideas는 topic마다 2~4개.\n"
+        "- 각 아이디어는 1문장 또는 짧은 명사구.\n"
+        "- 서로 중복되지 않게 작성한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_agenda_markdown(rt: RuntimeStore) -> str:
+    lines: list[str] = []
+    lines.append("# 회의 안건/발언 구조")
+    lines.append("")
+    lines.append(f"- 생성 시각: {_now_ts()}")
+    lines.append(f"- 회의 목표: {_safe_text(rt.meeting_goal, '-')}")
+    lines.append(f"- 전사 수: {len(rt.transcript)}")
+    lines.append(f"- 안건 수: {len(rt.agenda_outcomes)}")
+    lines.append("")
+
+    if not rt.agenda_outcomes:
+        lines.append("## 안건 없음")
+        lines.append("")
+        lines.append("현재 분석된 안건이 없습니다.")
+        return "\n".join(lines).strip() + "\n"
+
+    speaker_alias: dict[str, str] = {}
+    speaker_seq = 0
+    for turn in rt.transcript:
+        name = _safe_text(turn.get("speaker"), "화자")
+        if name in speaker_alias:
+            continue
+        speaker_seq += 1
+        speaker_alias[name] = f"화자{speaker_seq}"
+
+    lines.append("## 화자 약어")
+    lines.append("")
+    for name, alias in speaker_alias.items():
+        lines.append(f"- {alias}: {name}")
+    lines.append("")
+
+    total_turns = len(rt.transcript)
+    agenda_outline_rows: list[str] = []
+    for idx, row in enumerate(rt.agenda_outcomes, start=1):
+        agenda_id = _safe_text(row.get("agenda_id"), f"agenda-{idx}")
+        title = _safe_text(row.get("agenda_title"), "안건 제목 미정")
+        state = _normalize_agenda_state(row.get("agenda_state"))
+        flow = _normalize_flow_type(row.get("flow_type"))
+        start_id = int(row.get("start_turn_id") or row.get("_start_turn_id") or 0)
+        end_id = int(row.get("end_turn_id") or row.get("_end_turn_id") or 0)
+        if start_id <= 0:
+            start_id = 1
+        if end_id < start_id:
+            end_id = min(total_turns, start_id)
+        end_id = min(total_turns, end_id)
+
+        lines.append(f"## 안건 {idx}. {title}")
+        lines.append("")
+        lines.append(f"- agenda_id: `{agenda_id}`")
+        lines.append(f"- 상태: `{state}`")
+        lines.append(f"- 흐름: `{flow}`")
+        lines.append(f"- turn 범위: `{start_id} ~ {end_id}`")
+        summary = _md_text(row.get("summary"))
+        if summary:
+            lines.append(f"- 요약: {summary}")
+        lines.append("")
+        agenda_outline_rows.append(f"- 안건 {idx}: {title} (`{state}`, turn {start_id}~{end_id})")
+
+        utterances: list[tuple[int, dict[str, Any]]] = []
+        if 1 <= start_id <= end_id <= total_turns:
+            for turn_id in range(start_id, end_id + 1):
+                utterances.append((turn_id, rt.transcript[turn_id - 1]))
+        else:
+            seen_ids: set[int] = set()
+            for ref in list(row.get("summary_references") or []):
+                if not isinstance(ref, dict):
+                    continue
+                tid = int(ref.get("turn_id") or 0)
+                if tid <= 0 or tid > total_turns or tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                utterances.append((tid, rt.transcript[tid - 1]))
+            utterances.sort(key=lambda x: x[0])
+
+        lines.append(f"### 발언 ({len(utterances)})")
+        if not utterances:
+            lines.append("- 매핑된 발언이 없습니다.")
+        else:
+            for turn_id, turn in utterances:
+                speaker = _safe_text(turn.get("speaker"), "화자")
+                speaker_short = speaker_alias.get(speaker, "화자")
+                text = _md_text(turn.get("text"))
+                lines.append(f"- ({turn_id}) **{speaker_short}**: {text}")
+        lines.append("")
+
+    lines.append("## 안건 목록 요약")
+    lines.append("")
+    lines.extend(agenda_outline_rows if agenda_outline_rows else ["- 안건 없음"])
+    lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_agenda_snapshot(rt: RuntimeStore) -> dict[str, Any]:
+    return {
+        "snapshot_version": 1,
+        "exported_at": _now_ts(),
+        "meeting_goal": _safe_text(rt.meeting_goal),
+        "window_size": int(rt.window_size or 12),
+        "transcript": copy.deepcopy(list(rt.transcript)),
+        "agenda_outcomes": copy.deepcopy(list(rt.agenda_outcomes)),
+        "last_analyzed_count": int(rt.last_analyzed_count or len(rt.transcript)),
+        "analysis_runtime": {
+            "tick_mode": _safe_text(rt.last_tick_mode, "snapshot"),
+            "used_local_fallback": bool(rt.used_local_fallback),
+            "title_refine_attempts": int(rt.last_title_refine_attempts),
+            "title_refine_success": int(rt.last_title_refine_success),
+        },
+        "last_llm_json": copy.deepcopy(dict(rt.last_llm_parsed_json or {})),
+        "last_llm_parsed_at": _safe_text(rt.last_llm_parsed_at),
+    }
+
+
+def _load_agenda_snapshot(rt: RuntimeStore, payload: dict[str, Any], reset_state: bool = True) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("스냅샷 JSON 객체가 아닙니다.")
+
+    if reset_state:
+        rt.reset()
+    else:
+        rt.transcript = []
+        rt.agenda_outcomes = []
+        rt.last_analyzed_count = 0
+        rt.agenda_seq = 0
+        rt.used_local_fallback = False
+        rt.last_analysis_warning = ""
+        rt.last_tick_mode = "snapshot"
+        rt.last_title_refine_attempts = 0
+        rt.last_title_refine_success = 0
+        rt.last_llm_parsed_json = {}
+        rt.last_llm_parsed_at = ""
+        rt.replay_rows = []
+        rt.replay_index = 0
+        rt.replay_source = ""
+        rt.replay_loaded_at = ""
+        rt.analysis_task_seq = 0
+        rt.analysis_queued = 0
+        rt.analysis_inflight = False
+        rt.analysis_last_enqueued_at = ""
+        rt.analysis_last_started_at = ""
+        rt.analysis_last_done_at = ""
+        rt.analysis_last_error = ""
+        rt.analysis_last_enqueued_id = 0
+        rt.analysis_last_started_id = 0
+        rt.analysis_last_done_id = 0
+        rt.analysis_generation += 1
+        rt.transcript_version = 0
+        rt.analysis_next_windowed_target = SUMMARY_INTERVAL
+        rt.llm_io_seq = 0
+        rt.llm_io_logs = []
+        rt.canvas_last_placement = {}
+
+    transcript = payload.get("transcript") or []
+    if not isinstance(transcript, list):
+        raise ValueError("transcript 필드가 배열이 아닙니다.")
+
+    outcomes = payload.get("agenda_outcomes") or []
+    if not isinstance(outcomes, list):
+        raise ValueError("agenda_outcomes 필드가 배열이 아닙니다.")
+
+    rt.meeting_goal = _safe_text(payload.get("meeting_goal"))
+    rt.window_size = max(1, int(payload.get("window_size") or 12))
+    rt.transcript = []
+    for item in transcript:
+        if not isinstance(item, dict):
+            continue
+        rt.transcript.append(
+            {
+                "speaker": _safe_text(item.get("speaker"), "화자"),
+                "text": _safe_text(item.get("text")),
+                "timestamp": _safe_text(item.get("timestamp"), _now_ts()),
+            }
+        )
+
+    rt.agenda_outcomes = copy.deepcopy(outcomes)
+    rt.last_analyzed_count = max(0, min(int(payload.get("last_analyzed_count") or len(rt.transcript)), len(rt.transcript)))
+    rt.agenda_seq = len(rt.agenda_outcomes)
+    rt.last_tick_mode = _safe_text((payload.get("analysis_runtime") or {}).get("tick_mode"), "snapshot")
+    rt.used_local_fallback = bool((payload.get("analysis_runtime") or {}).get("used_local_fallback"))
+    rt.last_title_refine_attempts = int((payload.get("analysis_runtime") or {}).get("title_refine_attempts") or 0)
+    rt.last_title_refine_success = int((payload.get("analysis_runtime") or {}).get("title_refine_success") or 0)
+    rt.last_llm_parsed_json = copy.deepcopy(payload.get("last_llm_json") or {})
+    rt.last_llm_parsed_at = _safe_text(payload.get("last_llm_parsed_at"))
+    rt.last_analysis_warning = "agenda_snapshot_import"
+    rt.transcript_version += 1
+
+    return {
+        "meeting_goal": rt.meeting_goal,
+        "transcript_count": len(rt.transcript),
+        "agenda_count": len(rt.agenda_outcomes),
+    }
 def _snapshot_runtime_for_analysis(rt: RuntimeStore) -> RuntimeStore:
     snap = RuntimeStore()
     snap.meeting_goal = _safe_text(rt.meeting_goal)
@@ -1445,6 +2710,7 @@ def _sample_turns_for_title(seg_turns: list[dict[str, Any]], max_items: int = 14
 
 
 def _request_agenda_title_with_llm(
+    rt: RuntimeStore,
     client: Any,
     meeting_goal: str,
     turns: list[dict[str, Any]],
@@ -1550,6 +2816,7 @@ def _refresh_low_quality_titles_with_llm(
         if (not title) or _is_low_quality_title(title, rt.meeting_goal):
             attempts += 1
             regenerated = _request_agenda_title_with_llm(
+                rt=rt,
                 client=client,
                 meeting_goal=rt.meeting_goal,
                 turns=turns,
@@ -3015,6 +4282,60 @@ def _transcribe_with_whisper(data: bytes, suffix: str) -> str:
             pass
 
 
+def _ensure_llm_ready(rt: RuntimeStore) -> tuple[Any, bool, str]:
+    client = get_client()
+    if bool(rt.llm_enabled) and bool(client.connected):
+        return client, True, ""
+
+    if not _safe_text(getattr(client, "api_key", "")):
+        rt.llm_enabled = False
+        return client, False, "LLM API 키가 없어 로컬 결과를 사용했습니다."
+
+    try:
+        result = client.connect()
+        rt.llm_enabled = bool(result.get("ok"))
+        if rt.llm_enabled and client.connected:
+            return client, True, ""
+        return client, False, _safe_text(result.get("message"), "LLM 연결 실패로 로컬 결과를 사용했습니다.")
+    except Exception as exc:
+        rt.llm_enabled = False
+        return client, False, f"LLM 자동 연결 실패: {exc}"
+
+
+def _normalize_canvas_node_positions(
+    payload: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, dict[str, float]]]:
+    normalized: dict[str, dict[str, dict[str, float]]] = {}
+    if not isinstance(payload, dict):
+        return normalized
+
+    for raw_stage, raw_nodes in payload.items():
+        stage = _normalize_canvas_stage(_safe_text(raw_stage))
+        if stage not in {"ideation", "problem-definition", "solution"}:
+            continue
+        if not isinstance(raw_nodes, dict):
+            continue
+
+        stage_nodes: dict[str, dict[str, float]] = {}
+        for raw_node_id, raw_position in raw_nodes.items():
+            node_id = _safe_text(raw_node_id)
+            if not node_id or not isinstance(raw_position, dict):
+                continue
+
+            try:
+                x = float(raw_position.get("x", 0) or 0)
+                y = float(raw_position.get("y", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+            stage_nodes[node_id] = {"x": x, "y": y}
+
+        if stage_nodes:
+            normalized[stage] = stage_nodes
+
+    return normalized
+
+
 app = FastAPI(title="Meeting STT + Agenda MVP")
 app.add_middleware(
     CORSMiddleware,
@@ -3110,6 +4431,40 @@ def post_transcript_manual(payload: UtteranceInput):
     with RT.lock:
         _append_turn(RT, payload.speaker, payload.text, payload.timestamp)
         _enqueue_windowed_with_backpressure(RT, source="manual_turn")
+        return _state_response(RT)
+
+
+@app.post("/api/transcript/sync")
+def post_transcript_sync(payload: TranscriptSyncInput):
+    with RT.lock:
+        if payload.reset_state:
+            RT.reset()
+
+        RT.meeting_goal = _safe_text(payload.meeting_goal)
+        RT.window_size = int(payload.window_size)
+        RT.transcript = []
+        for row in payload.transcript:
+            text = _safe_text(row.text)
+            if not text:
+                continue
+            RT.transcript.append(
+                {
+                    "speaker": _safe_text(row.speaker, "화자"),
+                    "text": text,
+                    "timestamp": _safe_text(row.timestamp, _now_ts()),
+                }
+            )
+
+        RT.transcript_version += 1
+        RT.last_analyzed_count = 0 if payload.auto_analyze else len(RT.transcript)
+        RT.last_analysis_warning = "meeting_transcript_sync"
+        RT.analysis_next_windowed_target = SUMMARY_INTERVAL
+
+        if payload.auto_analyze and RT.transcript:
+            ok = _run_analysis(RT, force=True, mode="full_document")
+            if not ok:
+                RT.last_analysis_warning = "meeting_sync_analyze_failed"
+
         return _state_response(RT)
 
 
@@ -3367,6 +4722,30 @@ def post_analysis_tick():
         return _state_response(RT)
 
 
+@app.post("/api/canvas/placement-confirm")
+def post_canvas_placement_confirm(payload: CanvasPlacementConfirmInput):
+    with RT.lock:
+        saved_at = _now_ts()
+        RT.canvas_last_placement = {
+            "tool": _safe_text(payload.tool, "note"),
+            "ui_x": float(payload.ui_x or 0.0),
+            "ui_y": float(payload.ui_y or 0.0),
+            "flow_x": float(payload.flow_x or 0.0),
+            "flow_y": float(payload.flow_y or 0.0),
+            "agenda_id": _safe_text(payload.agenda_id),
+            "point_id": _safe_text(payload.point_id),
+            "title": _safe_text(payload.title),
+            "body": _safe_text(payload.body),
+            "saved_at": saved_at,
+        }
+        return {
+            "ok": True,
+            "saved_at": saved_at,
+            "draft": copy.deepcopy(RT.canvas_last_placement),
+            "state": _state_response(RT),
+        }
+
+
 @app.get("/api/analysis/last-llm-json")
 def get_last_llm_json():
     with RT.lock:
@@ -3375,6 +4754,460 @@ def get_last_llm_json():
             "received_at": _safe_text(RT.last_llm_parsed_at),
             "has_json": bool(RT.last_llm_parsed_json),
             "json": RT.last_llm_parsed_json if isinstance(RT.last_llm_parsed_json, dict) else {},
+        }
+
+
+@app.post("/api/canvas/problem-definition")
+def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        groups = _build_problem_definition_groups_local(payload)
+        used_llm = False
+        warning = ""
+
+        if groups:
+            client, llm_ready, llm_note = _ensure_llm_ready(RT)
+            if llm_ready:
+                try:
+                    prompt = _build_problem_definition_prompt(payload.topic, groups)
+                    parsed = _call_llm_json(
+                        RT,
+                        client,
+                        prompt=prompt,
+                        stage="canvas_problem_definition",
+                        temperature=0.2,
+                        max_tokens=1200,
+                    )
+                    parsed_groups = parsed.get("groups") if isinstance(parsed, dict) else None
+                    if isinstance(parsed_groups, list):
+                        by_id = {
+                            _safe_text(item.get("group_id")): item
+                            for item in parsed_groups
+                            if isinstance(item, dict) and _safe_text(item.get("group_id"))
+                        }
+                        for group in groups:
+                            llm_item = by_id.get(_safe_text(group.get("group_id")))
+                            if not llm_item:
+                                continue
+                            llm_topic = _normalize_problem_topic_label(llm_item.get("topic"), _safe_text(group.get("topic"), "주제"))
+                            llm_insight_lens = _safe_text(llm_item.get("insight_lens"))
+                            llm_conclusion = _safe_text(llm_item.get("conclusion"))
+                            if llm_topic:
+                                group["topic"] = llm_topic
+                            if llm_insight_lens:
+                                group["insight_lens"] = llm_insight_lens
+                            if llm_conclusion:
+                                group["conclusion"] = llm_conclusion
+                        used_llm = True
+                        RT.last_llm_parsed_json = {
+                            "stage": "canvas_problem_definition",
+                            "groups": copy.deepcopy(groups),
+                        }
+                        RT.last_llm_parsed_at = _now_ts()
+                    else:
+                        warning = "LLM JSON 형식이 예상과 달라 로컬 결과를 사용했습니다."
+                except Exception as exc:
+                    warning = f"문제 정의 LLM 생성 실패: {exc}"
+            else:
+                warning = llm_note or "LLM 미연결 상태로 로컬 문제 정의 묶음을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "groups": groups,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "problem_definition",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/problem-conclusion")
+def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    group_id = _safe_text(payload.group.group_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        conclusion = _build_problem_group_conclusion_local(payload)
+        insight_lens = _build_problem_group_insight_lens_local(payload)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_problem_group_conclusion_prompt(payload),
+                    stage="canvas_problem_conclusion",
+                    temperature=0.2,
+                    max_tokens=260,
+                )
+                candidate = _safe_text(parsed.get("conclusion")) if isinstance(parsed, dict) else ""
+                candidate_lens = _safe_text(parsed.get("insight_lens")) if isinstance(parsed, dict) else ""
+                if candidate:
+                    conclusion = candidate
+                    if candidate_lens:
+                        insight_lens = candidate_lens
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_problem_conclusion",
+                        "group_id": group_id,
+                        "insight_lens": insight_lens,
+                        "conclusion": conclusion,
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 결론을 사용했습니다."
+            except Exception as exc:
+                warning = f"결론 LLM 생성 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 결론을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "group_id": group_id,
+            "insight_lens": insight_lens,
+            "conclusion": conclusion,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        f"problem_conclusion:{group_id}",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/meeting-goal")
+def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    topic = _safe_text(payload.topic)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        goal = _build_meeting_goal_local(topic)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if topic and llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_meeting_goal_prompt(topic),
+                    stage="canvas_meeting_goal",
+                    temperature=0.2,
+                    max_tokens=220,
+                )
+                candidate = _safe_text(parsed.get("goal")) if isinstance(parsed, dict) else ""
+                if candidate:
+                    goal = candidate
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_meeting_goal",
+                        "topic": topic,
+                        "goal": goal,
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 회의 목표를 사용했습니다."
+            except Exception as exc:
+                warning = f"회의 목표 LLM 생성 실패: {exc}"
+        elif topic:
+            warning = llm_note or "LLM 미연결 상태로 로컬 회의 목표를 사용했습니다."
+        else:
+            warning = "회의 제목이 없어 기본 회의 목표를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "topic": topic,
+            "goal": goal,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "meeting_goal",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/solution-stage")
+def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        topics = [
+            {
+                "group_id": _safe_text(item.group_id),
+                "topic_no": int(item.topic_no or 0),
+                "topic": _safe_text(item.topic),
+                "conclusion": _safe_text(item.conclusion),
+                "ideas": [
+                    f"{_safe_text(item.topic, '주제')} 관련 핵심 가설을 빠르게 검증할 실험안을 설계한다.",
+                    f"{_safe_text(item.topic, '주제')}에 대한 사용자 반응을 비교할 시범안을 만든다.",
+                ],
+            }
+            for item in (payload.topics or [])
+            if _safe_text(item.topic)
+        ]
+        used_llm = False
+        warning = ""
+
+        if topics:
+            client, llm_ready, llm_note = _ensure_llm_ready(RT)
+            if llm_ready:
+                try:
+                    prompt = _build_solution_stage_prompt(payload.meeting_topic, topics)
+                    parsed = _call_llm_json(
+                        RT,
+                        client,
+                        prompt=prompt,
+                        stage="canvas_solution_stage",
+                        temperature=0.3,
+                        max_tokens=1400,
+                    )
+                    parsed_topics = parsed.get("topics") if isinstance(parsed, dict) else None
+                    if isinstance(parsed_topics, list):
+                        by_id = {
+                            _safe_text(item.get("group_id")): item
+                            for item in parsed_topics
+                            if isinstance(item, dict) and _safe_text(item.get("group_id"))
+                        }
+                        for topic in topics:
+                            llm_item = by_id.get(_safe_text(topic.get("group_id")))
+                            if not llm_item:
+                                continue
+                            llm_ideas = llm_item.get("ideas")
+                            if isinstance(llm_ideas, list):
+                                topic["ideas"] = [_safe_text(x) for x in llm_ideas if _safe_text(x)][:4]
+                        used_llm = True
+                        RT.last_llm_parsed_json = {
+                            "stage": "canvas_solution_stage",
+                            "topics": copy.deepcopy(topics),
+                        }
+                        RT.last_llm_parsed_at = _now_ts()
+                    else:
+                        warning = "LLM JSON 형식이 예상과 달라 로컬 해결책을 사용했습니다."
+                except Exception as exc:
+                    warning = f"해결책 단계 LLM 생성 실패: {exc}"
+            else:
+                warning = llm_note or "LLM 미연결 상태로 로컬 해결책 아이디어를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "topics": topics,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "solution_stage",
+        signature,
+        _compute,
+    )
+
+
+@app.get("/api/canvas/personal-notes")
+def get_canvas_personal_notes(meeting_id: str, user_id: str):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    loaded_notes = _load_canvas_personal_notes_from_db(normalized_meeting_id, normalized_user_id)
+    with RT.lock:
+        meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        if loaded_notes is not None:
+            meeting_notes[normalized_user_id] = copy.deepcopy(loaded_notes)
+        personal_notes = copy.deepcopy(meeting_notes.get(normalized_user_id) or [])
+        return {
+            "ok": True,
+            "meeting_id": normalized_meeting_id,
+            "user_id": normalized_user_id,
+            "personal_notes": personal_notes,
+            "saved_at": _safe_text((RT.canvas_workspace_by_meeting.get(normalized_meeting_id) or {}).get("saved_at")),
+        }
+
+
+@app.post("/api/canvas/personal-notes")
+def post_canvas_personal_notes(payload: CanvasPersonalNotesStateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    normalized_user_id = _safe_text(payload.user_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    saved_at = _now_ts()
+    normalized_notes = [
+        {
+            "id": _safe_text(note.id),
+            "agenda_id": _safe_text(note.agenda_id),
+            "kind": _safe_text(note.kind, "note"),
+            "title": _safe_text(note.title),
+            "body": _safe_text(note.body),
+        }
+        for note in (payload.personal_notes or [])
+        if _safe_text(note.id) or _safe_text(note.title) or _safe_text(note.body)
+    ]
+
+    with RT.lock:
+        meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_notes[normalized_user_id] = copy.deepcopy(normalized_notes)
+
+    _save_canvas_personal_notes_to_db(normalized_meeting_id, normalized_user_id, normalized_notes)
+
+    return {
+        "ok": True,
+        "meeting_id": normalized_meeting_id,
+        "user_id": normalized_user_id,
+        "personal_notes": copy.deepcopy(normalized_notes),
+        "saved_at": saved_at,
+    }
+
+
+@app.get("/api/canvas/workspace-state")
+def get_canvas_workspace_state(meeting_id: str):
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    saved = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    return _canvas_workspace_response(saved)
+
+
+@app.post("/api/canvas/workspace-state")
+def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    saved_at = _now_ts()
+    previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
+    workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
+    workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
+    workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
+    workspace["imported_state"] = (
+        copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
+    )
+    with RT.lock:
+        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
+
+    _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+
+    return _canvas_workspace_response(workspace)
+
+
+@app.post("/api/canvas/workspace-patch")
+def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    saved_at = _now_ts()
+    previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
+    provided_fields = set(getattr(payload, "model_fields_set", set()))
+
+    if "stage" in provided_fields:
+        workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    if "problem_groups" in provided_fields:
+        workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
+    if "solution_topics" in provided_fields:
+        workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
+    if "node_positions" in provided_fields:
+        workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions or {})
+    if "imported_state" in provided_fields:
+        workspace["imported_state"] = (
+            copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
+        )
+
+    with RT.lock:
+        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
+
+    _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    return _canvas_workspace_response(workspace)
+
+
+@app.get("/api/export/agenda-markdown")
+def get_export_agenda_markdown():
+    with RT.lock:
+        markdown = _build_agenda_markdown(RT)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        return {
+            "ok": True,
+            "filename": f"agenda_export_{stamp}.md",
+            "agenda_count": len(RT.agenda_outcomes),
+            "transcript_count": len(RT.transcript),
+            "markdown": markdown,
+        }
+
+
+@app.get("/api/export/agenda-snapshot")
+def get_export_agenda_snapshot():
+    with RT.lock:
+        snapshot = _build_agenda_snapshot(RT)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        return {
+            "ok": True,
+            "filename": f"agenda_snapshot_{stamp}.json",
+            "agenda_count": len(RT.agenda_outcomes),
+            "transcript_count": len(RT.transcript),
+            "snapshot": snapshot,
+        }
+
+
+@app.post("/api/import/agenda-snapshot")
+async def post_import_agenda_snapshot(
+    file: UploadFile = File(...),
+    reset_state: str = Form(default="true"),
+):
+    raw = await file.read()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"스냅샷 JSON 파싱 실패: {exc}") from exc
+
+    with RT.lock:
+        try:
+            loaded = _load_agenda_snapshot(RT, payload, reset_state=_boolify(reset_state, True))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"스냅샷 복원 실패: {exc}") from exc
+        return {
+            "ok": True,
+            "state": _state_response(RT),
+            "import_debug": {
+                "filename": _safe_text(getattr(file, "filename", ""), "agenda_snapshot.json"),
+                "meeting_goal": loaded["meeting_goal"],
+                "transcript_count": int(loaded["transcript_count"]),
+                "agenda_count": int(loaded["agenda_count"]),
+                "reset_state": _boolify(reset_state, True),
+            },
         }
 
 
