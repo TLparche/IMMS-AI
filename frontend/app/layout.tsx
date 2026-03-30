@@ -8,6 +8,8 @@ export const metadata: Metadata = {
   description: "Meeting workspace dashboard with agenda-aware transcript and summaries.",
 };
 
+export const dynamic = "force-dynamic";
+
 interface RootLayoutProps {
   children: ReactNode;
 }
