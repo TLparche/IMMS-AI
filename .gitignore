@@ -94,3 +94,4 @@ logs/
 .run_dev.lock
 
 /proto
+deploy/.env.production
