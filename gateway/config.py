@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     
     # CORS
     cors_origins: list = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"]
+    ip_whitelist: str = ""
     
     class Config:
         env_file = str(Path(__file__).parent / ".env")

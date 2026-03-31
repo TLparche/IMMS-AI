@@ -17,11 +17,13 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
 from llm_client import get_client
+from security_utils import extract_client_ip, is_ip_allowed, parse_ip_whitelist
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
@@ -34,6 +36,7 @@ LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
+IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
 
 _SUPABASE_CLIENT: Client | None = None
 _SUPABASE_CLIENT_INITIALIZED = False
@@ -4345,6 +4348,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 _ensure_analysis_worker_started()
+
+
+@app.middleware("http")
+async def enforce_ip_whitelist(request, call_next):
+    client_ip = extract_client_ip(request.headers, request.client.host if request.client else None)
+    if not is_ip_allowed(client_ip, IP_WHITELIST):
+        return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
+    return await call_next(request)
 
 
 @app.get("/api/health")

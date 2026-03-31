@@ -10,6 +10,7 @@ import json
 import base64
 from datetime import datetime
 from ..config import get_supabase, settings
+from security_utils import extract_client_ip, is_ip_allowed, parse_ip_whitelist
 
 router = APIRouter()
 
@@ -18,6 +19,7 @@ active_connections: Dict[str, List[Dict]] = {}
 
 # AI 백엔드 URL
 AI_BACKEND_URL = settings.ai_module_url.rstrip("/")
+IP_WHITELIST = parse_ip_whitelist(settings.ip_whitelist)
 
 
 async def persist_canvas_workspace(meeting_id: str, workspace: dict[str, Any]):
@@ -83,6 +85,11 @@ async def websocket_endpoint(
     meeting_id: str,
     user_id: str = Query(...)
 ):
+    client_ip = extract_client_ip(websocket.headers, websocket.client.host if websocket.client else None)
+    if not is_ip_allowed(client_ip, IP_WHITELIST):
+        await websocket.close(code=1008, reason="IP not allowed")
+        return
+
     await websocket.accept()
     print(f"✅ User {user_id} connected to meeting {meeting_id}")
     
