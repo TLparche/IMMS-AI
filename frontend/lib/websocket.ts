@@ -90,7 +90,20 @@ export class WebSocketClient {
     this.messageHandlers.set(eventType, handler)
   }
 
-  sendAudioChunk(audioBlob: Blob, speaker: string) {
+  sendAudioChunk(
+    audioBlob: Blob,
+    speaker: string,
+    audioMeta?: {
+      startedAt: string
+      endedAt: string
+      durationMs: number
+      rms: number
+      peak: number
+      speechRatio: number
+      zeroCrossingRate: number
+      noiseFloor: number
+    },
+  ) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('⚠️ WebSocket not connected, cannot send audio')
       return
@@ -106,7 +119,8 @@ export class WebSocketClient {
         user_id: this.userId,
         speaker,
         audio_data: base64Audio,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        audio_meta: audioMeta
       }
 
       this.ws?.send(JSON.stringify(message))

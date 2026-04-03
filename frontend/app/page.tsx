@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useAuth } from "@/contexts/AuthContext";
 import { useRouter, useSearchParams } from "next/navigation";
 import { WebSocketClient } from "@/lib/websocket";
-import { AudioRecorder } from "@/lib/audio-recorder";
+import { AudioRecorder, type RecordedAudioChunk } from "@/lib/audio-recorder";
 import { supabase } from "@/lib/supabase";
 import { syncTranscript } from "@/lib/api";
 import type { CanvasRealtimeSyncPayload, MeetingState } from "@/lib/types";
@@ -38,6 +38,31 @@ interface ActionItem {
 }
 
 type WorkspaceTab = "meeting" | "canvas";
+type CalibrationState = "idle" | "running" | "done";
+
+interface CalibrationAccumulator {
+  chunks: number;
+  sumRms: number;
+  sumPeak: number;
+  sumSpeechRatio: number;
+  sumNoiseFloor: number;
+}
+
+interface LiveSpeechPreview {
+  speaker: string;
+  text: string;
+  timestamp: string;
+}
+
+function createCalibrationAccumulator(): CalibrationAccumulator {
+  return {
+    chunks: 0,
+    sumRms: 0,
+    sumPeak: 0,
+    sumSpeechRatio: 0,
+    sumNoiseFloor: 0,
+  };
+}
 
 function dedupeTranscripts(rows: Transcript[]) {
   const seen = new Set<string>();
@@ -100,6 +125,12 @@ function HomeContent() {
   const [autoSyncing, setAutoSyncing] = useState(false);
   const [canvasViewportHeight, setCanvasViewportHeight] = useState<number | null>(null);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
+  const [calibrationState, setCalibrationState] = useState<CalibrationState>("idle");
+  const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(0);
+  const [fusionSelectedUserId, setFusionSelectedUserId] = useState<string | null>(null);
+  const [fusionSelectedSpeaker, setFusionSelectedSpeaker] = useState<string>("");
+  const [deviceCalibrated, setDeviceCalibrated] = useState(false);
+  const [liveSpeechPreview, setLiveSpeechPreview] = useState<LiveSpeechPreview | null>(null);
 
   const wsClientRef = useRef<WebSocketClient | null>(null);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
@@ -109,6 +140,11 @@ function HomeContent() {
   const autoSyncInFlightRef = useRef(false);
   const queuedSyncSignatureRef = useRef("");
   const lastSyncedSignatureRef = useRef("");
+  const calibrationFinishTimerRef = useRef<number | null>(null);
+  const calibrationCountdownTimerRef = useRef<number | null>(null);
+  const calibrationAccumulatorRef = useRef<CalibrationAccumulator>(createCalibrationAccumulator());
+  const calibrationActiveRef = useRef(false);
+  const liveSpeechClearTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     meetingTitleRef.current = meetingTitle;
@@ -117,6 +153,41 @@ function HomeContent() {
   useEffect(() => {
     transcriptsRef.current = transcripts;
   }, [transcripts]);
+
+  const showLiveSpeechPreview = useCallback((speaker: string, text: string, timestamp: string) => {
+    const trimmedText = text.trim();
+    if (!trimmedText) return;
+
+    setLiveSpeechPreview({
+      speaker: speaker || "알 수 없음",
+      text: trimmedText,
+      timestamp,
+    });
+
+    if (liveSpeechClearTimerRef.current !== null) {
+      window.clearTimeout(liveSpeechClearTimerRef.current);
+    }
+
+    liveSpeechClearTimerRef.current = window.setTimeout(() => {
+      setLiveSpeechPreview(null);
+      liveSpeechClearTimerRef.current = null;
+    }, 5200);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (calibrationFinishTimerRef.current !== null) {
+        window.clearTimeout(calibrationFinishTimerRef.current);
+      }
+      if (calibrationCountdownTimerRef.current !== null) {
+        window.clearInterval(calibrationCountdownTimerRef.current);
+      }
+      if (liveSpeechClearTimerRef.current !== null) {
+        window.clearTimeout(liveSpeechClearTimerRef.current);
+      }
+      audioRecorderRef.current?.cleanup();
+    };
+  }, []);
 
   useEffect(() => {
     const updateCanvasViewport = () => {
@@ -192,6 +263,7 @@ function HomeContent() {
 
     wsClient.on("transcript", (message: any) => {
       const payload = message?.data ?? message;
+      const nextTimestamp = payload.timestamp || new Date().toISOString();
       setTranscripts((prev) =>
         dedupeTranscripts([
           ...prev,
@@ -199,10 +271,11 @@ function HomeContent() {
             id: `${Date.now()}-${Math.random()}`,
             speaker: payload.speaker || "알 수 없음",
             text: payload.text || "",
-            timestamp: payload.timestamp || new Date().toISOString(),
+            timestamp: nextTimestamp,
           },
         ]),
       );
+      showLiveSpeechPreview(payload.speaker || "알 수 없음", payload.text || "", nextTimestamp);
     });
 
     wsClient.on("analysis_update", (message: any) => {
@@ -224,6 +297,13 @@ function HomeContent() {
       setIncomingCanvasSync(payload);
     });
 
+    wsClient.on("audio_selection", (message: any) => {
+      const payload = message?.data ?? message;
+      if (!payload || payload.meeting_id !== meetingId) return;
+      setFusionSelectedUserId(payload.selected_user_id || null);
+      setFusionSelectedSpeaker(payload.speaker || "");
+    });
+
     wsClient.connect();
     setWsConnected(true);
 
@@ -231,7 +311,75 @@ function HomeContent() {
       wsClient.disconnect();
       setWsConnected(false);
     };
-  }, [user, meetingId]);
+  }, [user, meetingId, showLiveSpeechPreview]);
+
+  const finishCalibration = useCallback(() => {
+    if (!user) return;
+
+    if (calibrationFinishTimerRef.current !== null) {
+      window.clearTimeout(calibrationFinishTimerRef.current);
+      calibrationFinishTimerRef.current = null;
+    }
+    if (calibrationCountdownTimerRef.current !== null) {
+      window.clearInterval(calibrationCountdownTimerRef.current);
+      calibrationCountdownTimerRef.current = null;
+    }
+
+    const stats = calibrationAccumulatorRef.current;
+    calibrationActiveRef.current = false;
+    if (stats.chunks > 0 && wsClientRef.current?.isConnected()) {
+      const avgRms = stats.sumRms / stats.chunks;
+      const avgPeak = stats.sumPeak / stats.chunks;
+      const avgSpeechRatio = stats.sumSpeechRatio / stats.chunks;
+      const avgNoiseFloor = stats.sumNoiseFloor / stats.chunks;
+
+      wsClientRef.current.sendMessage("mic_calibration", {
+        profile: {
+          rms: avgRms,
+          peak: avgPeak,
+          speech_ratio: avgSpeechRatio,
+          noise_floor: avgNoiseFloor,
+          sample_count: stats.chunks,
+        },
+      });
+      setDeviceCalibrated(true);
+    }
+
+    setCalibrationState("done");
+    setCalibrationSecondsLeft(0);
+  }, [user]);
+
+  const beginCalibration = useCallback(() => {
+    if (calibrationFinishTimerRef.current !== null) {
+      window.clearTimeout(calibrationFinishTimerRef.current);
+    }
+    if (calibrationCountdownTimerRef.current !== null) {
+      window.clearInterval(calibrationCountdownTimerRef.current);
+    }
+
+    calibrationAccumulatorRef.current = createCalibrationAccumulator();
+    calibrationActiveRef.current = true;
+    setCalibrationState("running");
+    setCalibrationSecondsLeft(4);
+    setDeviceCalibrated(false);
+
+    calibrationCountdownTimerRef.current = window.setInterval(() => {
+      setCalibrationSecondsLeft((prev) => {
+        if (prev <= 1) {
+          if (calibrationCountdownTimerRef.current !== null) {
+            window.clearInterval(calibrationCountdownTimerRef.current);
+            calibrationCountdownTimerRef.current = null;
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    calibrationFinishTimerRef.current = window.setTimeout(() => {
+      finishCalibration();
+    }, 4000);
+  }, [finishCalibration]);
 
   const syncBackendFromMeeting = async (analyze = true) => {
     const currentMeetingTitle = meetingTitleRef.current;
@@ -339,6 +487,7 @@ function HomeContent() {
 
     if (isRecording) {
       audioRecorderRef.current?.stop();
+      finishCalibration();
       setIsRecording(false);
       return;
     }
@@ -353,9 +502,17 @@ function HomeContent() {
       audioRecorderRef.current = recorder;
     }
 
-    audioRecorderRef.current.start((audioBlob: Blob) => {
+    beginCalibration();
+    audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
+      if (calibrationActiveRef.current || !deviceCalibrated) {
+        calibrationAccumulatorRef.current.chunks += 1;
+        calibrationAccumulatorRef.current.sumRms += metrics.rms;
+        calibrationAccumulatorRef.current.sumPeak += metrics.peak;
+        calibrationAccumulatorRef.current.sumSpeechRatio += metrics.speechRatio;
+        calibrationAccumulatorRef.current.sumNoiseFloor += metrics.noiseFloor;
+      }
       if (wsClientRef.current?.isConnected()) {
-        wsClientRef.current.sendAudioChunk(audioBlob, user.email || "Unknown");
+        wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);
       }
     });
     setIsRecording(true);
@@ -439,6 +596,32 @@ function HomeContent() {
                 <p className="text-sm text-gray-600">Meeting ID: {meetingId.substring(0, 8)}...</p>
                 <span className={`inline-block w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
                 <span className="text-xs text-gray-500">{wsConnected ? "WebSocket 연결됨" : "WebSocket 연결 안 됨"}</span>
+                <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
+                  calibrationState === "running"
+                    ? "bg-amber-100 text-amber-800"
+                    : deviceCalibrated
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-slate-100 text-slate-600"
+                }`}>
+                  {calibrationState === "running"
+                    ? `마이크 캘리브레이션 ${calibrationSecondsLeft}s`
+                    : deviceCalibrated
+                    ? "캘리브레이션 완료"
+                    : "캘리브레이션 대기"}
+                </span>
+                <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
+                  fusionSelectedUserId === user.id
+                    ? "bg-blue-100 text-blue-800"
+                    : fusionSelectedUserId
+                    ? "bg-gray-100 text-gray-700"
+                    : "bg-slate-100 text-slate-600"
+                }`}>
+                  {fusionSelectedUserId === user.id
+                    ? "내 마이크가 현재 선택됨"
+                    : fusionSelectedUserId
+                    ? `${fusionSelectedSpeaker || "다른 화자"} 마이크 선택 중`
+                    : "선택된 마이크 없음"}
+                </span>
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -493,6 +676,15 @@ function HomeContent() {
                   )}
                 </div>
                 <div className="mt-6 pt-6 border-t border-gray-200">
+                  <div className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    {calibrationState === "running"
+                      ? `현재 ${calibrationSecondsLeft}초 동안 주 화자 기준을 학습하고 있습니다. 마이크 가까이에서 자연스럽게 말해 주세요.`
+                      : fusionSelectedUserId === user.id
+                      ? "현재 내 기기의 입력이 프로젝트 단일 스트림에 채택되고 있습니다."
+                      : fusionSelectedUserId
+                      ? `${fusionSelectedSpeaker || "다른 화자"} 입력이 현재 선택되고 있습니다.`
+                      : "주 화자 선택 정보를 기다리는 중입니다."}
+                  </div>
                   <button
                     onClick={() => void toggleRecording()}
                     className={`w-full px-4 py-3 rounded-lg font-semibold transition ${
@@ -597,6 +789,19 @@ function HomeContent() {
           </>
         )}
       </main>
+      {liveSpeechPreview ? (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-slate-200/80 bg-white/95 px-4 py-3 shadow-lg backdrop-blur">
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
+            현재 발언 STT
+          </div>
+          <p className="mt-2 text-xs font-semibold text-slate-600">{liveSpeechPreview.speaker}</p>
+          <p className="mt-1 line-clamp-3 text-sm leading-5 text-slate-900">{liveSpeechPreview.text}</p>
+          <p className="mt-2 text-[11px] text-slate-400">
+            {new Date(liveSpeechPreview.timestamp).toLocaleTimeString("ko-KR")}
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

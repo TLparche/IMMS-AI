@@ -1086,6 +1086,7 @@ export default function MeetingCanvasTab({
   const [solutionStagePending, setSolutionStagePending] = useState(false);
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
+  const [importOverrideActive, setImportOverrideActive] = useState(false);
   const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -1108,8 +1109,25 @@ export default function MeetingCanvasTab({
   const lastIncomingSharedSyncIdRef = useRef("");
   const lastSharedSyncSignatureRef = useRef("");
   const localNodeOverridesRef = useRef(createLocalNodeOverrideMap());
+  const analysisSignatureAtImportRef = useRef("");
 
-  const effectiveState = importedState ?? analysisState;
+  const analysisStateSignature = useMemo(
+    () =>
+      analysisState
+        ? JSON.stringify({
+            transcript: (analysisState.transcript || []).map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`),
+            agendas: (analysisState.analysis?.agenda_outcomes || []).map((row) => ({
+              id: row.agenda_id,
+              title: row.agenda_title,
+              start: row.start_turn_id,
+              end: row.end_turn_id,
+            })),
+          })
+        : "",
+    [analysisState],
+  );
+
+  const effectiveState = importOverrideActive && importedState ? importedState : analysisState ?? importedState;
   const agendaModels = useMemo(() => buildAgendaModels(effectiveState, agendas, transcripts), [effectiveState, agendas, transcripts]);
   const meetingGoalTopic = useMemo(
     () => meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim(),
@@ -1134,6 +1152,8 @@ export default function MeetingCanvasTab({
     lastWorkspaceFieldSignaturesRef.current = createWorkspaceFieldSignatures();
     workspaceLoadedRef.current = false;
     workspaceHydratingRef.current = false;
+    analysisSignatureAtImportRef.current = "";
+    setImportOverrideActive(false);
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
@@ -1147,6 +1167,20 @@ export default function MeetingCanvasTab({
       sharedSyncTimerRef.current = null;
     }
   }, [meetingId]);
+
+  useEffect(() => {
+    if (!importOverrideActive) {
+      return;
+    }
+
+    if (!analysisSignatureAtImportRef.current) {
+      return;
+    }
+
+    if (analysisStateSignature && analysisStateSignature !== analysisSignatureAtImportRef.current) {
+      setImportOverrideActive(false);
+    }
+  }, [analysisStateSignature, importOverrideActive]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1404,7 +1438,7 @@ export default function MeetingCanvasTab({
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
         node_positions: overrides?.nodePositions ?? nodePositions,
-        imported_state: overrides?.importedState ?? importedState,
+        imported_state: overrides?.importedState ?? analysisState ?? importedState,
       };
 
       lastSharedSyncSignatureRef.current = buildSharedCanvasSignature(snapshot);
@@ -1421,6 +1455,7 @@ export default function MeetingCanvasTab({
       });
     },
     [
+      analysisState,
       importedState,
       meetingId,
       nodePositions,
@@ -1740,9 +1775,9 @@ export default function MeetingCanvasTab({
       problem_groups: serializeSharedProblemGroups(problemGroups),
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
       node_positions: nodePositions,
-      imported_state: importedState,
+      imported_state: analysisState ?? importedState,
     }),
-    [importedState, nodePositions, problemGroups, solutionTopics, stage],
+    [analysisState, importedState, nodePositions, problemGroups, solutionTopics, stage],
   );
 
   const sharedCanvasSignature = useMemo(
@@ -2863,6 +2898,8 @@ export default function MeetingCanvasTab({
                   if (file) {
                     void importAgendaSnapshot({ file, reset_state: true }).then((result) => {
                       setImportedState(result.state);
+                      analysisSignatureAtImportRef.current = analysisStateSignature;
+                      setImportOverrideActive(true);
                       setProblemGroups([]);
                       setSolutionTopics([]);
                       setNodePositions({});
