@@ -50,6 +50,7 @@ export class AudioRecorder {
   private chunkStartedAt: number | null = null
   private chunkMetrics: ChunkMetricsAccumulator = createAccumulator()
   private learnedNoiseFloor = 0.0025
+  private teardownPromise: Promise<void> | null = null
 
   private consumeMetrics = (event: MessageEvent) => {
     const data = event.data as {
@@ -175,9 +176,7 @@ export class AudioRecorder {
     }
   }
 
-  cleanup() {
-    this.stop()
-
+  private async releaseResources() {
     if (this.metricsNode) {
       this.metricsNode.port.onmessage = null
       try {
@@ -201,7 +200,9 @@ export class AudioRecorder {
     }
 
     if (this.audioContext) {
-      void this.audioContext.close()
+      try {
+        await this.audioContext.close()
+      } catch {}
       this.audioContext = null
     }
 
@@ -211,9 +212,42 @@ export class AudioRecorder {
     }
 
     this.mediaRecorder = null
+    this.onChunkReady = null
     this.chunkMetrics = createAccumulator()
     this.chunkStartedAt = null
+    this.teardownPromise = null
     console.log('🧹 Audio recorder cleaned up')
+  }
+
+  async stopAndCleanup() {
+    if (this.teardownPromise) {
+      await this.teardownPromise
+      return
+    }
+
+    const recorder = this.mediaRecorder
+    if (!recorder || recorder.state === 'inactive') {
+      await this.releaseResources()
+      return
+    }
+
+    this.teardownPromise = new Promise<void>((resolve) => {
+      const finalize = () => {
+        window.setTimeout(() => {
+          void this.releaseResources().finally(resolve)
+        }, 0)
+      }
+
+      recorder.addEventListener('stop', finalize, { once: true })
+      recorder.addEventListener('error', finalize, { once: true })
+      this.stop()
+    })
+
+    await this.teardownPromise
+  }
+
+  cleanup() {
+    void this.stopAndCleanup()
   }
 
   isRecording(): boolean {

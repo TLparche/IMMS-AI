@@ -40,6 +40,7 @@ import type {
   MeetingState,
   TranscriptUtterance,
 } from "@/lib/types";
+import type { LiveSpeechPreview } from "@/app/page";
 
 export type MeetingTranscript = {
   id: string;
@@ -198,6 +199,7 @@ type MeetingCanvasTabProps = {
   onSharedCanvasSync: (payload: CanvasRealtimeSyncPayload) => void;
   syncStatusText: string;
   autoSyncing: boolean;
+  liveSpeechPreview: LiveSpeechPreview | null;
 };
 
 function stageLabel(stage: CanvasStage) {
@@ -1051,6 +1053,7 @@ export default function MeetingCanvasTab({
   onSharedCanvasSync,
   syncStatusText,
   autoSyncing,
+  liveSpeechPreview,
 }: MeetingCanvasTabProps) {
   const [stage, setStage] = useState<CanvasStage>("ideation");
   const [composerTool, setComposerTool] = useState<ComposerTool>("note");
@@ -3578,6 +3581,30 @@ export default function MeetingCanvasTab({
                 <MiniMap zoomable pannable />
                 <Controls />
               </ReactFlow>
+            </div>
+
+            <div className="pointer-events-none absolute bottom-24 right-5 z-[8] w-[min(24rem,calc(100%-2.5rem))] xl:right-6">
+              <div className="min-h-[126px] rounded-2xl border border-slate-200/85 bg-white/96 px-4 py-3 shadow-xl shadow-slate-200/80 backdrop-blur">
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                  <span className={`inline-block h-2 w-2 rounded-full ${liveSpeechPreview ? "bg-emerald-500" : "bg-slate-300"}`} />
+                  현재 발언 STT
+                </div>
+                {liveSpeechPreview ? (
+                  <>
+                    <p className="mt-2 text-xs font-semibold text-slate-600">{liveSpeechPreview.speaker}</p>
+                    <p className="mt-1 line-clamp-3 text-sm leading-6 text-slate-900">{liveSpeechPreview.text}</p>
+                    <p className="mt-2 text-[11px] text-slate-400">
+                      {new Date(liveSpeechPreview.timestamp).toLocaleTimeString("ko-KR")}
+                    </p>
+                  </>
+                ) : (
+                  <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50/90 px-4 py-5">
+                    <p className="text-sm leading-6 text-slate-500">
+                      현재 인식된 발언이 들어오면 이 영역에 바로 표시됩니다.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
 
             {stage === "problem-definition" && problemGroups.length === 0 ? (

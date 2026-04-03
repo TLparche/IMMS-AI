@@ -48,7 +48,7 @@ interface CalibrationAccumulator {
   sumNoiseFloor: number;
 }
 
-interface LiveSpeechPreview {
+export interface LiveSpeechPreview {
   speaker: string;
   text: string;
   timestamp: string;
@@ -486,7 +486,9 @@ function HomeContent() {
     if (!user) return;
 
     if (isRecording) {
-      audioRecorderRef.current?.stop();
+      const recorder = audioRecorderRef.current;
+      audioRecorderRef.current = null;
+      await recorder?.stopAndCleanup();
       finishCalibration();
       setIsRecording(false);
       return;
@@ -536,7 +538,9 @@ function HomeContent() {
     if (!confirm("회의를 종료하시겠습니까?")) return;
 
     if (isRecording) {
-      audioRecorderRef.current?.stop();
+      const recorder = audioRecorderRef.current;
+      audioRecorderRef.current = null;
+      await recorder?.stopAndCleanup();
       setIsRecording(false);
     }
 
@@ -654,6 +658,7 @@ function HomeContent() {
               onSharedCanvasSync={broadcastCanvasSync}
               syncStatusText={canvasSyncStatus}
               autoSyncing={autoSyncing}
+              liveSpeechPreview={liveSpeechPreview}
             />
           </div>
         ) : (
@@ -789,19 +794,6 @@ function HomeContent() {
           </>
         )}
       </main>
-      {liveSpeechPreview ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-slate-200/80 bg-white/95 px-4 py-3 shadow-lg backdrop-blur">
-          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-            <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-            현재 발언 STT
-          </div>
-          <p className="mt-2 text-xs font-semibold text-slate-600">{liveSpeechPreview.speaker}</p>
-          <p className="mt-1 line-clamp-3 text-sm leading-5 text-slate-900">{liveSpeechPreview.text}</p>
-          <p className="mt-2 text-[11px] text-slate-400">
-            {new Date(liveSpeechPreview.timestamp).toLocaleTimeString("ko-KR")}
-          </p>
-        </div>
-      ) : null}
     </div>
   );
 }
