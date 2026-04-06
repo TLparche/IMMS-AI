@@ -200,6 +200,10 @@ type MeetingCanvasTabProps = {
   syncStatusText: string;
   autoSyncing: boolean;
   liveSpeechPreview: LiveSpeechPreview | null;
+  onImportAudioFile: (file: File) => Promise<void>;
+  audioImportBusy: boolean;
+  audioImportStatusText: string;
+  audioImportRevision: number;
 };
 
 function stageLabel(stage: CanvasStage) {
@@ -216,6 +220,11 @@ function toolLabel(tool: ComposerTool) {
   if (tool === "note") return "메모";
   if (tool === "comment") return "코멘트";
   return "주제";
+}
+
+function isAudioImportFile(file: File) {
+  const suffix = file.name.split(".").pop()?.toLowerCase() || "";
+  return ["wav", "mp3", "m4a", "webm"].includes(suffix);
 }
 
 function buildFallbackMeetingGoal(topic: string) {
@@ -1054,6 +1063,10 @@ export default function MeetingCanvasTab({
   syncStatusText,
   autoSyncing,
   liveSpeechPreview,
+  onImportAudioFile,
+  audioImportBusy,
+  audioImportStatusText,
+  audioImportRevision,
 }: MeetingCanvasTabProps) {
   const [stage, setStage] = useState<CanvasStage>("ideation");
   const [composerTool, setComposerTool] = useState<ComposerTool>("note");
@@ -1307,6 +1320,26 @@ export default function MeetingCanvasTab({
       cancelled = true;
     };
   }, [meetingId, userId]);
+
+  useEffect(() => {
+    if (audioImportRevision <= 0) {
+      return;
+    }
+
+    setImportedState(null);
+    setImportOverrideActive(false);
+    setProblemGroups([]);
+    setSolutionTopics([]);
+    setNodePositions({});
+    setStage("ideation");
+    setSelectedProblemGroupId("");
+    setSelectedSolutionTopicId("");
+    setSelectedNodeId("");
+    setEditingProblemGroupId("");
+    setEditingSolutionTopicId("");
+    setLeftPanelTab("detail");
+    setActivityMessage("새 오디오 전사를 기준으로 canvas를 초기화했습니다.");
+  }, [audioImportRevision]);
 
   useEffect(() => {
     if (problemGroups.length === 0) {
@@ -2862,7 +2895,9 @@ export default function MeetingCanvasTab({
               <div className="min-w-0 max-w-3xl">
                 <p className="text-xs font-semibold uppercase tracking-[0.22em] text-blue-100">Group Canvas</p>
                 <h2 className="mt-2 text-lg font-semibold sm:text-xl">{meetingTitle || "회의 그룹 보드"}</h2>
-                {activityMessage ? <p className="mt-1 text-xs text-slate-300">{activityMessage}</p> : null}
+                {activityMessage || audioImportStatusText ? (
+                  <p className="mt-1 text-xs text-slate-300">{activityMessage || audioImportStatusText}</p>
+                ) : null}
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 <button
@@ -2886,7 +2921,12 @@ export default function MeetingCanvasTab({
                 >
                   {syncModeLabel(sharedSyncEnabled)}
                 </button>
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="min-h-[42px] rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15">
+                <button
+                  type="button"
+                  disabled={audioImportBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="min-h-[42px] rounded-xl border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur-md hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-60"
+                >
                   불러오기
                 </button>
               </div>
@@ -2895,25 +2935,31 @@ export default function MeetingCanvasTab({
                 ref={fileInputRef}
                 type="file"
                 className="hidden"
-                accept="application/json"
+                accept="application/json,.wav,.mp3,.m4a,.webm,audio/wav,audio/mpeg,audio/mp4,audio/webm"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (file) {
-                    void importAgendaSnapshot({ file, reset_state: true }).then((result) => {
-                      setImportedState(result.state);
-                      analysisSignatureAtImportRef.current = analysisStateSignature;
-                      setImportOverrideActive(true);
-                      setProblemGroups([]);
-                      setSolutionTopics([]);
-                      setNodePositions({});
-                      setStage("ideation");
-                      setSelectedProblemGroupId("");
-                      setSelectedSolutionTopicId("");
-                      setSelectedNodeId("");
-                      setEditingProblemGroupId("");
-                      setEditingSolutionTopicId("");
-                      setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
-                    });
+                    if (isAudioImportFile(file)) {
+                      void onImportAudioFile(file).then(() => {
+                        setActivityMessage(`오디오 파일 불러오기를 시작했습니다: ${file.name}`);
+                      });
+                    } else {
+                      void importAgendaSnapshot({ file, reset_state: true }).then((result) => {
+                        setImportedState(result.state);
+                        analysisSignatureAtImportRef.current = analysisStateSignature;
+                        setImportOverrideActive(true);
+                        setProblemGroups([]);
+                        setSolutionTopics([]);
+                        setNodePositions({});
+                        setStage("ideation");
+                        setSelectedProblemGroupId("");
+                        setSelectedSolutionTopicId("");
+                        setSelectedNodeId("");
+                        setEditingProblemGroupId("");
+                        setEditingSolutionTopicId("");
+                        setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
+                      });
+                    }
                   }
                   event.currentTarget.value = "";
                 }}

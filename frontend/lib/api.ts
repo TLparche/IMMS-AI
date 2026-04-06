@@ -2,6 +2,8 @@ import type {
   AgendaMarkdownExportResponse,
   AgendaSnapshotExportResponse,
   AgendaSnapshotImportResponse,
+  AudioImportJobStartResponse,
+  AudioImportJobStatusResponse,
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasPersonalNotesStateResponse,
@@ -278,6 +280,34 @@ export async function importAgendaSnapshot(payload: {
   return requestJson<AgendaSnapshotImportResponse>("/api/import/agenda-snapshot", {
     method: "POST",
     body: form,
+  });
+}
+
+export async function startAudioImportJob(payload: {
+  meeting_id: string;
+  meeting_goal?: string;
+  user_id: string;
+  file: File;
+  reset_state?: boolean;
+  window_size?: number;
+}): Promise<AudioImportJobStartResponse> {
+  const form = new FormData();
+  form.append("meeting_id", payload.meeting_id);
+  form.append("meeting_goal", payload.meeting_goal || "");
+  form.append("user_id", payload.user_id);
+  form.append("window_size", String(payload.window_size ?? 12));
+  form.append("reset_state", String(payload.reset_state ?? true));
+  form.append("file", payload.file, payload.file.name);
+
+  return requestJson<AudioImportJobStartResponse>("/api/import/audio-file/start", {
+    method: "POST",
+    body: form,
+  });
+}
+
+export async function getAudioImportJobStatus(jobId: string): Promise<AudioImportJobStatusResponse> {
+  return requestJson<AudioImportJobStatusResponse>(`/api/import/audio-file/jobs/${encodeURIComponent(jobId)}`, {
+    cache: "no-store",
   });
 }
 

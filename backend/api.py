@@ -5,15 +5,19 @@ import os
 import platform
 import queue
 import re
+import subprocess
 import tempfile
 import threading
 import time
+import wave
 import importlib.util
 import copy
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 load_dotenv(ROOT / "gateway" / ".env", override=False)
 WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "large")
+PYANNOTE_DIARIZATION_MODEL = os.environ.get("PYANNOTE_DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 SUMMARY_INTERVAL = 4
 SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
@@ -37,6 +42,7 @@ LLM_IO_PREVIEW_MAX = 6000
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
 IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
+AUDIO_IMPORT_ALLOWED_SUFFIXES = {".wav", ".mp3", ".m4a", ".webm"}
 
 _SUPABASE_CLIENT: Client | None = None
 _SUPABASE_CLIENT_INITIALIZED = False
@@ -1497,9 +1503,33 @@ class RuntimeStore:
         self.canvas_personal_notes_by_meeting_user = {}
 
 
+@dataclass
+class AudioImportJob:
+    job_id: str
+    meeting_id: str
+    user_id: str
+    filename: str
+    status: str = "queued"
+    progress: float = 0.0
+    step: str = "queued"
+    detail: str = ""
+    created_at: str = field(default_factory=lambda: _now_ts())
+    updated_at: str = field(default_factory=lambda: _now_ts())
+    transcript_count: int = 0
+    speaker_count: int = 0
+    used_diarization: bool = False
+    warning: str = ""
+    error: str = ""
+    state: dict[str, Any] | None = None
+
+
 RT = RuntimeStore()
 ANALYSIS_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=2048)
 ANALYSIS_WORKER_STARTED = False
+_PYANNOTE_PIPELINE = None
+_PYANNOTE_LOCK = threading.Lock()
+_AUDIO_IMPORT_JOBS: dict[str, AudioImportJob] = {}
+_AUDIO_IMPORT_JOBS_LOCK = threading.Lock()
 
 
 def _analysis_worker_status(rt: RuntimeStore) -> dict[str, Any]:
@@ -4243,6 +4273,135 @@ async def _collect_rows_from_uploads(files: list[UploadFile]) -> dict[str, Any]:
     }
 
 
+def _serialize_audio_import_job(job: AudioImportJob) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "job_id": _safe_text(job.job_id),
+        "meeting_id": _safe_text(job.meeting_id),
+        "filename": _safe_text(job.filename),
+        "status": _safe_text(job.status, "queued"),
+        "progress": max(0.0, min(float(job.progress), 100.0)),
+        "step": _safe_text(job.step, "queued"),
+        "detail": _safe_text(job.detail),
+        "created_at": _safe_text(job.created_at),
+        "updated_at": _safe_text(job.updated_at),
+        "transcript_count": int(job.transcript_count),
+        "speaker_count": int(job.speaker_count),
+        "used_diarization": bool(job.used_diarization),
+        "warning": _safe_text(job.warning),
+        "error": _safe_text(job.error),
+        "state": copy.deepcopy(job.state) if isinstance(job.state, dict) else None,
+    }
+
+
+def _create_audio_import_job(meeting_id: str, user_id: str, filename: str) -> AudioImportJob:
+    job = AudioImportJob(
+        job_id=str(uuid4()),
+        meeting_id=_safe_text(meeting_id),
+        user_id=_safe_text(user_id),
+        filename=_safe_text(filename, "audio"),
+    )
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        _AUDIO_IMPORT_JOBS[job.job_id] = job
+        stale = list(_AUDIO_IMPORT_JOBS.keys())[:-24]
+        for key in stale:
+            _AUDIO_IMPORT_JOBS.pop(key, None)
+    return job
+
+
+def _get_audio_import_job(job_id: str) -> AudioImportJob | None:
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        job = _AUDIO_IMPORT_JOBS.get(_safe_text(job_id))
+        return copy.deepcopy(job) if job else None
+
+
+def _update_audio_import_job(job_id: str, **changes: Any) -> AudioImportJob | None:
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        job = _AUDIO_IMPORT_JOBS.get(_safe_text(job_id))
+        if not job:
+            return None
+        for key, value in changes.items():
+            if hasattr(job, key):
+                setattr(job, key, value)
+        job.updated_at = _now_ts()
+        return copy.deepcopy(job)
+
+
+def _run_ffmpeg_to_mono_wav(source_path: Path, target_path: Path) -> None:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(target_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not target_path.exists():
+        raise RuntimeError((result.stderr or result.stdout or "ffmpeg normalize failed").strip())
+
+
+def _measure_wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate() or 16000
+        return max(float(frames) / float(rate), 0.0)
+
+
+def _load_pyannote_pipeline():
+    global _PYANNOTE_PIPELINE
+    token = _env_first("HUGGINGFACE_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN이 없어 diarization을 실행할 수 없습니다.")
+
+    with _PYANNOTE_LOCK:
+        if _PYANNOTE_PIPELINE is not None:
+            return _PYANNOTE_PIPELINE
+
+        try:
+            from pyannote.audio import Pipeline
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("pyannote.audio 패키지가 없습니다. diarization 의존성을 설치하세요.") from exc
+
+        pipeline = Pipeline.from_pretrained(PYANNOTE_DIARIZATION_MODEL, use_auth_token=token)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                pipeline.to(torch.device("cuda"))
+        except Exception:
+            pass
+
+        _PYANNOTE_PIPELINE = pipeline
+        return _PYANNOTE_PIPELINE
+
+
+def _diarize_audio_file(path: Path) -> list[dict[str, Any]]:
+    pipeline = _load_pyannote_pipeline()
+    diarization = pipeline(str(path))
+    rows: list[dict[str, Any]] = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        start = max(0.0, float(turn.start))
+        end = max(start, float(turn.end))
+        rows.append(
+            {
+                "start": start,
+                "end": end,
+                "speaker": _safe_text(speaker, "SPEAKER_00"),
+            }
+        )
+    return rows
+
+
 def _load_whisper_model():
     try:
         import whisper
@@ -4283,6 +4442,376 @@ def _transcribe_with_whisper(data: bytes, suffix: str) -> str:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def _transcribe_file_with_whisper_segments(path: Path) -> dict[str, Any]:
+    model = _get_whisper_model()
+    kwargs = {"language": "ko", "task": "transcribe", "verbose": False}
+    try:
+        import torch
+
+        kwargs["fp16"] = bool(torch.cuda.is_available())
+    except Exception:
+        kwargs["fp16"] = False
+
+    result = model.transcribe(str(path), **kwargs) or {}
+    segments: list[dict[str, Any]] = []
+    for segment in result.get("segments") or []:
+        text = _safe_text(segment.get("text"))
+        if not text:
+            continue
+        start = max(0.0, float(segment.get("start") or 0.0))
+        end = max(start, float(segment.get("end") or start))
+        segments.append({"start": start, "end": end, "text": text})
+    return {
+        "text": _safe_text(result.get("text")),
+        "segments": segments,
+    }
+
+
+def _speaker_with_max_overlap(
+    start_sec: float,
+    end_sec: float,
+    diarization_rows: list[dict[str, Any]],
+    last_speaker: str,
+) -> str:
+    if not diarization_rows:
+        return _safe_text(last_speaker, "화자 1")
+
+    best_speaker = ""
+    best_overlap = 0.0
+    for row in diarization_rows:
+        overlap = min(end_sec, float(row.get("end") or 0.0)) - max(start_sec, float(row.get("start") or 0.0))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = _safe_text(row.get("speaker"))
+
+    if best_speaker:
+        return best_speaker
+    return _safe_text(last_speaker, "화자 1")
+
+
+def _ends_like_sentence(text: str) -> bool:
+    return bool(re.search(r"[.!?。！？…]$|습니다$|입니다$|어요$|예요$|했어요$|했습니다$", _safe_text(text)))
+
+
+def _split_sentence_by_length(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", _safe_text(text)).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_chars:
+        return [clean]
+
+    parts: list[str] = []
+    remaining = clean
+    while len(remaining) > max_chars:
+        candidate = remaining[: max_chars + 1]
+        split_at = max(candidate.rfind(marker) for marker in (" ", ",", "·", " / ", " - "))
+        if split_at < max_chars // 2:
+            split_at = candidate.rfind(" ")
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip(" ,·-/")
+        if chunk:
+            parts.append(chunk)
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _split_text_naturally(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", _safe_text(text)).strip()
+    if not clean:
+        return []
+
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?。！？])\s+", clean) if segment.strip()]
+    if not sentences:
+        sentences = [clean]
+
+    parts: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not current:
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                parts.extend(_split_sentence_by_length(sentence, max_chars=max_chars))
+        elif len(current) + 1 + len(sentence) <= max_chars:
+            current = f"{current} {sentence}"
+        else:
+            parts.append(current)
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                parts.extend(_split_sentence_by_length(sentence, max_chars=max_chars))
+                current = ""
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _segment_timestamp(base_time: datetime, offset_sec: float) -> str:
+    return (base_time + timedelta(seconds=max(offset_sec, 0.0))).isoformat()
+
+
+def _build_import_utterances(
+    whisper_segments: list[dict[str, Any]],
+    diarization_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], int]:
+    base_time = datetime.now(timezone.utc)
+    speaker_aliases: dict[str, str] = {}
+    atomic_rows: list[dict[str, Any]] = []
+    last_speaker = "SPEAKER_00"
+
+    for segment in whisper_segments:
+        raw_text = _safe_text(segment.get("text"))
+        if not raw_text:
+            continue
+        seg_start = max(0.0, float(segment.get("start") or 0.0))
+        seg_end = max(seg_start, float(segment.get("end") or seg_start))
+        parts = _split_text_naturally(raw_text)
+        if not parts:
+            continue
+
+        duration = max(seg_end - seg_start, 0.001)
+        total_weight = max(sum(max(len(item), 1) for item in parts), 1)
+        cursor = seg_start
+        remaining = duration
+        remaining_weight = total_weight
+
+        for index, part in enumerate(parts):
+            weight = max(len(part), 1)
+            if index == len(parts) - 1 or remaining_weight <= weight:
+                piece_duration = remaining
+            else:
+                piece_duration = duration * (weight / total_weight)
+                piece_duration = min(piece_duration, remaining)
+            piece_end = max(cursor, min(seg_end, cursor + piece_duration))
+            raw_speaker = _speaker_with_max_overlap(cursor, piece_end, diarization_rows, last_speaker)
+            last_speaker = raw_speaker
+            speaker_label = speaker_aliases.setdefault(raw_speaker, f"화자 {len(speaker_aliases) + 1}")
+            atomic_rows.append(
+                {
+                    "speaker": speaker_label,
+                    "text": part,
+                    "timestamp": _segment_timestamp(base_time, cursor),
+                }
+            )
+            remaining -= max(piece_end - cursor, 0.0)
+            remaining_weight -= weight
+            cursor = piece_end
+
+    utterances: list[dict[str, str]] = []
+    for row in atomic_rows:
+        body = _safe_text(row.get("text"))
+        speaker = _safe_text(row.get("speaker"), "화자 1")
+        timestamp = _safe_text(row.get("timestamp"), _now_ts())
+        if not body:
+            continue
+
+        if (
+            utterances
+            and utterances[-1]["speaker"] == speaker
+            and len(utterances[-1]["text"]) + 1 + len(body) <= 120
+            and not _ends_like_sentence(utterances[-1]["text"])
+        ):
+            utterances[-1]["text"] = f"{utterances[-1]['text']} {body}".strip()
+        else:
+            utterances.append({"speaker": speaker, "text": body, "timestamp": timestamp})
+
+    return utterances, max(len(speaker_aliases), 1 if utterances else 0)
+
+
+def _create_working_runtime_for_audio_import(meeting_goal: str, window_size: int, reset_state: bool) -> RuntimeStore:
+    with RT.lock:
+        llm_enabled = bool(RT.llm_enabled)
+        if not reset_state:
+            seeded = _snapshot_runtime_for_analysis(RT)
+            seeded.meeting_goal = _safe_text(meeting_goal, seeded.meeting_goal)
+            seeded.window_size = int(window_size)
+            return seeded
+
+    working = RuntimeStore()
+    working.llm_enabled = llm_enabled
+    working.meeting_goal = _safe_text(meeting_goal)
+    working.window_size = int(window_size)
+    return working
+
+
+def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> None:
+    llm_enabled = bool(rt.llm_enabled)
+    canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
+    canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
+    canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
+
+    rt.reset()
+    rt.llm_enabled = llm_enabled
+    rt.meeting_goal = _safe_text(source.meeting_goal)
+    rt.window_size = int(source.window_size)
+    rt.transcript = [dict(row) for row in source.transcript]
+    rt.transcript_version = int(source.transcript_version)
+    rt.analysis_next_windowed_target = int(source.analysis_next_windowed_target)
+    _apply_analysis_result(rt, source)
+    rt.canvas_last_placement = canvas_last_placement
+    rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
+    rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
+
+
+def _persist_imported_transcripts_to_db(
+    meeting_id: str,
+    user_id: str,
+    rows: list[dict[str, str]],
+    reset_state: bool,
+) -> None:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return
+
+    normalized_rows = [
+        {
+            "meeting_id": normalized_meeting_id,
+            "user_id": normalized_user_id,
+            "speaker": _safe_text(row.get("speaker"), "화자 1"),
+            "text": _safe_text(row.get("text")),
+            "timestamp": _safe_text(row.get("timestamp"), _now_ts()),
+            "turn_id": idx,
+        }
+        for idx, row in enumerate(rows, start=1)
+        if _safe_text(row.get("text"))
+    ]
+
+    if not normalized_rows:
+        return
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            if reset_state:
+                client.table("transcripts").delete().eq("meeting_id", normalized_meeting_id).execute()
+            for start in range(0, len(normalized_rows), 200):
+                batch = normalized_rows[start : start + 200]
+                client.table("transcripts").insert(batch).execute()
+    except Exception as exc:
+        _log_runtime_db_error(
+            f"transcripts:audio-import:{normalized_meeting_id}",
+            f"❌ Failed to persist imported transcripts to Supabase: {exc}",
+            cooldown_sec=10.0,
+        )
+
+
+def _run_audio_import_job(
+    job_id: str,
+    source_path: Path,
+    filename: str,
+    meeting_id: str,
+    meeting_goal: str,
+    user_id: str,
+    reset_state: bool,
+    window_size: int,
+) -> None:
+    normalized_path = source_path.with_suffix(".normalized.wav")
+    try:
+        _update_audio_import_job(job_id, status="processing", progress=4.0, step="normalizing", detail="오디오를 분석용 wav로 변환하는 중입니다.")
+        _run_ffmpeg_to_mono_wav(source_path, normalized_path)
+        duration_sec = _measure_wav_duration_seconds(normalized_path)
+
+        diarization_rows: list[dict[str, Any]] = []
+        used_diarization = False
+        diarization_warning = ""
+        try:
+            _update_audio_import_job(job_id, progress=18.0, step="diarization", detail="화자 분리 구간을 계산하는 중입니다.")
+            diarization_rows = _diarize_audio_file(normalized_path)
+            used_diarization = len(diarization_rows) > 0
+        except Exception as exc:
+            diarization_warning = str(exc)
+            _update_audio_import_job(job_id, progress=18.0, step="diarization", detail="화자 분리를 건너뛰고 단일 화자 기준으로 계속 진행합니다.", warning=diarization_warning)
+
+        _update_audio_import_job(job_id, progress=42.0, step="transcribing", detail="Whisper로 전체 음성을 전사하는 중입니다.", used_diarization=used_diarization)
+        whisper_result = _transcribe_file_with_whisper_segments(normalized_path)
+        whisper_segments = whisper_result.get("segments") or []
+        if not whisper_segments:
+            raise RuntimeError("전사된 segment가 없습니다.")
+
+        _update_audio_import_job(job_id, progress=62.0, step="segmenting", detail="화자와 문장 흐름 기준으로 발화를 정리하는 중입니다.")
+        utterances, speaker_count = _build_import_utterances(whisper_segments, diarization_rows)
+        if not utterances:
+            raise RuntimeError("발화 단위로 정리된 결과가 없습니다.")
+
+        working_rt = _create_working_runtime_for_audio_import(
+            meeting_goal=meeting_goal or Path(filename).stem,
+            window_size=window_size,
+            reset_state=reset_state,
+        )
+        start_count = len(working_rt.transcript)
+        total_new = len(utterances)
+        _update_audio_import_job(
+            job_id,
+            progress=70.0,
+            step="analyzing",
+            detail="발화 4개 단위로 안건 분석을 진행하는 중입니다.",
+            transcript_count=start_count + total_new,
+            speaker_count=speaker_count,
+        )
+
+        appended = 0
+        for row in utterances:
+            _append_turn(working_rt, row.get("speaker", "화자 1"), row.get("text", ""), row.get("timestamp"))
+            appended += 1
+            total_count = len(working_rt.transcript)
+            if total_count % SUMMARY_INTERVAL == 0:
+                _run_analysis(working_rt, force=False, mode="windowed", skip_interval=True)
+            progress = 70.0 + (22.0 * (appended / max(total_new, 1)))
+            _update_audio_import_job(
+                job_id,
+                progress=progress,
+                step="analyzing",
+                detail=f"발화 {appended}/{total_new}개를 반영했습니다.",
+                transcript_count=total_count,
+                speaker_count=speaker_count,
+            )
+
+        if len(working_rt.transcript) > int(working_rt.last_analyzed_count):
+            _run_analysis(working_rt, force=False, mode="windowed", skip_interval=True)
+
+        _update_audio_import_job(job_id, progress=94.0, step="persisting", detail="회의 상태와 전사를 저장하는 중입니다.")
+        with RT.lock:
+            _apply_import_runtime_to_live(RT, working_rt)
+            live_state = _state_response(RT)
+
+        _persist_imported_transcripts_to_db(meeting_id, user_id, working_rt.transcript, reset_state=reset_state)
+
+        _update_audio_import_job(
+            job_id,
+            status="completed",
+            progress=100.0,
+            step="completed",
+            detail=f"{len(working_rt.transcript)}개 발화를 불러왔습니다.",
+            transcript_count=len(working_rt.transcript),
+            speaker_count=speaker_count,
+            used_diarization=used_diarization,
+            warning=diarization_warning,
+            state=live_state,
+        )
+    except Exception as exc:
+        _update_audio_import_job(
+            job_id,
+            status="error",
+            progress=100.0,
+            step="error",
+            detail="오디오 파일 처리에 실패했습니다.",
+            error=str(exc),
+        )
+    finally:
+        for target in (source_path, normalized_path):
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
 
 
 def _ensure_llm_ready(rt: RuntimeStore) -> tuple[Any, bool, str]:
@@ -5220,6 +5749,83 @@ async def post_import_agenda_snapshot(
                 "reset_state": _boolify(reset_state, True),
             },
         }
+
+
+@app.post("/api/import/audio-file/start")
+async def post_import_audio_file_start(
+    file: UploadFile = File(...),
+    meeting_id: str = Form(...),
+    user_id: str = Form(...),
+    meeting_goal: str = Form(default=""),
+    reset_state: str = Form(default="true"),
+    window_size: str = Form(default="12"),
+):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    filename = _safe_text(getattr(file, "filename", ""), "audio")
+    suffix = Path(filename).suffix.lower()
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if suffix not in AUDIO_IMPORT_ALLOWED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 오디오 형식입니다. 허용 형식: {', '.join(sorted(AUDIO_IMPORT_ALLOWED_SUFFIXES))}",
+        )
+
+    try:
+        blob = await file.read()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"오디오 파일 읽기에 실패했습니다: {exc}") from exc
+    if not blob:
+        raise HTTPException(status_code=400, detail="비어 있는 오디오 파일입니다.")
+
+    try:
+        normalized_window_size = max(4, min(int(window_size), 80))
+    except Exception:
+        normalized_window_size = 12
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="imms-audio-import-"))
+    source_path = temp_dir / f"source{suffix}"
+    source_path.write_bytes(blob)
+
+    job = _create_audio_import_job(normalized_meeting_id, normalized_user_id, filename)
+    _update_audio_import_job(
+        job.job_id,
+        status="queued",
+        progress=1.0,
+        step="queued",
+        detail="오디오 파일 처리 작업을 준비하는 중입니다.",
+    )
+
+    worker = threading.Thread(
+        target=_run_audio_import_job,
+        args=(
+            job.job_id,
+            source_path,
+            filename,
+            normalized_meeting_id,
+            _safe_text(meeting_goal),
+            normalized_user_id,
+            _boolify(reset_state, True),
+            normalized_window_size,
+        ),
+        daemon=True,
+        name=f"audio-import-{job.job_id[:8]}",
+    )
+    worker.start()
+
+    current_job = _get_audio_import_job(job.job_id)
+    return _serialize_audio_import_job(current_job or job)
+
+
+@app.get("/api/import/audio-file/jobs/{job_id}")
+def get_audio_import_job_status(job_id: str):
+    job = _get_audio_import_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="audio import job not found")
+    return _serialize_audio_import_job(job)
 
 
 @app.post("/api/reset")

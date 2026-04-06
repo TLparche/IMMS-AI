@@ -6,8 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { WebSocketClient } from "@/lib/websocket";
 import { AudioRecorder, type RecordedAudioChunk } from "@/lib/audio-recorder";
 import { supabase } from "@/lib/supabase";
-import { syncTranscript } from "@/lib/api";
-import type { CanvasRealtimeSyncPayload, MeetingState } from "@/lib/types";
+import { getAudioImportJobStatus, startAudioImportJob, syncTranscript } from "@/lib/api";
+import type { AudioImportJobStatusResponse, CanvasRealtimeSyncPayload, MeetingState } from "@/lib/types";
 import MeetingCanvasTab, { type MeetingAgenda as CanvasAgenda, type MeetingTranscript as CanvasTranscript } from "@/components/MeetingCanvasTab";
 
 interface Transcript {
@@ -74,6 +74,21 @@ function dedupeTranscripts(rows: Transcript[]) {
   });
 }
 
+function buildTranscriptSyncSignature(meetingGoal: string, rows: Transcript[]) {
+  return [meetingGoal, ...rows.map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`)].join("\u0002");
+}
+
+function mapMeetingStateToTranscriptRows(state: MeetingState): Transcript[] {
+  return dedupeTranscripts(
+    (state.transcript || []).map((row, index) => ({
+      id: `import-${index}-${row.timestamp || Date.now()}`,
+      speaker: row.speaker || "알 수 없음",
+      text: row.text || "",
+      timestamp: row.timestamp || new Date().toISOString(),
+    })),
+  );
+}
+
 function mapAnalysisToUi(state: MeetingState) {
   const outcomes = state.analysis?.agenda_outcomes || [];
   const agendas: Agenda[] = outcomes.map((outcome, index) => ({
@@ -131,6 +146,8 @@ function HomeContent() {
   const [fusionSelectedSpeaker, setFusionSelectedSpeaker] = useState<string>("");
   const [deviceCalibrated, setDeviceCalibrated] = useState(false);
   const [liveSpeechPreview, setLiveSpeechPreview] = useState<LiveSpeechPreview | null>(null);
+  const [audioImportJob, setAudioImportJob] = useState<AudioImportJobStatusResponse | null>(null);
+  const [audioImportRevision, setAudioImportRevision] = useState(0);
 
   const wsClientRef = useRef<WebSocketClient | null>(null);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
@@ -145,6 +162,7 @@ function HomeContent() {
   const calibrationAccumulatorRef = useRef<CalibrationAccumulator>(createCalibrationAccumulator());
   const calibrationActiveRef = useRef(false);
   const liveSpeechClearTimerRef = useRef<number | null>(null);
+  const audioImportPollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     meetingTitleRef.current = meetingTitle;
@@ -185,8 +203,26 @@ function HomeContent() {
       if (liveSpeechClearTimerRef.current !== null) {
         window.clearTimeout(liveSpeechClearTimerRef.current);
       }
+      if (audioImportPollTimerRef.current !== null) {
+        window.clearTimeout(audioImportPollTimerRef.current);
+      }
       audioRecorderRef.current?.cleanup();
     };
+  }, []);
+
+  const stopAudioImportPolling = useCallback(() => {
+    if (audioImportPollTimerRef.current !== null) {
+      window.clearTimeout(audioImportPollTimerRef.current);
+      audioImportPollTimerRef.current = null;
+    }
+  }, []);
+
+  const applyMeetingStateToUi = useCallback((state: MeetingState) => {
+    const mapped = mapAnalysisToUi(state);
+    setAnalysisState(state);
+    setAgendas(mapped.agendas);
+    setDecisions(mapped.decisions);
+    setActionItems(mapped.actionItems);
   }, []);
 
   useEffect(() => {
@@ -222,6 +258,9 @@ function HomeContent() {
     autoSyncInFlightRef.current = false;
     setIncomingCanvasSync(null);
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
+    setAudioImportJob(null);
+    setAudioImportRevision(0);
+    stopAudioImportPolling();
 
     const loadMeeting = async () => {
       setLoadingMeeting(true);
@@ -253,7 +292,7 @@ function HomeContent() {
     };
 
     void loadMeeting();
-  }, [user, meetingId]);
+  }, [user, meetingId, stopAudioImportPolling]);
 
   useEffect(() => {
     if (!user || !meetingId) return;
@@ -283,11 +322,7 @@ function HomeContent() {
       if (!payload) return;
       if (payload.agenda_outcomes || payload.analysis) {
         const normalizedState = payload.analysis ? payload : ({ analysis: payload } as MeetingState);
-        const mapped = mapAnalysisToUi(normalizedState);
-        setAnalysisState(normalizedState);
-        setAgendas(mapped.agendas);
-        setDecisions(mapped.decisions);
-        setActionItems(mapped.actionItems);
+        applyMeetingStateToUi(normalizedState);
       }
     });
 
@@ -311,7 +346,7 @@ function HomeContent() {
       wsClient.disconnect();
       setWsConnected(false);
     };
-  }, [user, meetingId, showLiveSpeechPreview]);
+  }, [user, meetingId, showLiveSpeechPreview, applyMeetingStateToUi]);
 
   const finishCalibration = useCallback(() => {
     if (!user) return;
@@ -395,23 +430,95 @@ function HomeContent() {
         timestamp: row.timestamp,
       })),
     });
-    setAnalysisState(state);
-    if (analyze) {
-      const mapped = mapAnalysisToUi(state);
-      setAgendas(mapped.agendas);
-      setDecisions(mapped.decisions);
-      setActionItems(mapped.actionItems);
-    }
+    applyMeetingStateToUi(state);
     return state;
   };
 
   const transcriptSyncSignature = useMemo(
-    () =>
-      [
-        meetingTitle,
-        ...transcripts.map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`),
-      ].join("\u0002"),
+    () => buildTranscriptSyncSignature(meetingTitle, transcripts),
     [meetingTitle, transcripts],
+  );
+
+  const pollAudioImportJob = useCallback(
+    async (jobId: string) => {
+      try {
+        const result = await getAudioImportJobStatus(jobId);
+        setAudioImportJob(result);
+
+        if (result.status === "completed") {
+          stopAudioImportPolling();
+          if (result.state) {
+            const nextTranscripts = mapMeetingStateToTranscriptRows(result.state);
+            setTranscripts(nextTranscripts);
+            applyMeetingStateToUi(result.state);
+            lastSyncedSignatureRef.current = buildTranscriptSyncSignature(meetingTitleRef.current, nextTranscripts);
+            queuedSyncSignatureRef.current = "";
+            setAudioImportRevision((prev) => prev + 1);
+            setCanvasSyncStatus(
+              `오디오 파일을 불러왔습니다. 발화 ${result.transcript_count || nextTranscripts.length}개가 반영되었습니다.`,
+            );
+          }
+          return;
+        }
+
+        if (result.status === "error") {
+          stopAudioImportPolling();
+          setCanvasSyncStatus(result.error || "오디오 파일 처리에 실패했습니다.");
+          return;
+        }
+
+        setCanvasSyncStatus(
+          result.detail || `오디오 파일 처리 중입니다. ${Math.round(result.progress || 0)}%`,
+        );
+        audioImportPollTimerRef.current = window.setTimeout(() => {
+          void pollAudioImportJob(jobId);
+        }, 1500);
+      } catch (error) {
+        console.error("Failed to poll audio import job:", error);
+        stopAudioImportPolling();
+        setCanvasSyncStatus("오디오 파일 처리 상태를 가져오지 못했습니다.");
+      }
+    },
+    [applyMeetingStateToUi, stopAudioImportPolling],
+  );
+
+  const handleAudioImport = useCallback(
+    async (file: File) => {
+      if (!user || !meetingId) return;
+      if (audioImportJob && (audioImportJob.status === "queued" || audioImportJob.status === "processing")) {
+        setCanvasSyncStatus("이미 다른 오디오 파일을 처리 중입니다. 완료 후 다시 시도해 주세요.");
+        return;
+      }
+
+      stopAudioImportPolling();
+      setAudioImportJob(null);
+      setCanvasSyncStatus(`오디오 파일을 업로드했습니다. ${file.name} 처리 작업을 시작합니다.`);
+
+      const started = await startAudioImportJob({
+        meeting_id: meetingId,
+        meeting_goal: meetingTitleRef.current,
+        user_id: user.id,
+        file,
+        reset_state: true,
+        window_size: 12,
+      });
+
+      setAudioImportJob({
+        ok: true,
+        job_id: started.job_id,
+        meeting_id: started.meeting_id,
+        filename: started.filename,
+        status: started.status,
+        progress: 1,
+        step: "queued",
+        created_at: started.created_at,
+        updated_at: started.created_at,
+      });
+      audioImportPollTimerRef.current = window.setTimeout(() => {
+        void pollAudioImportJob(started.job_id);
+      }, 600);
+    },
+    [audioImportJob, meetingId, pollAudioImportJob, stopAudioImportPolling, user],
   );
 
   const runAutoSync = async (signature: string) => {
@@ -577,6 +684,14 @@ function HomeContent() {
       workspace: payload,
     });
   }, []);
+  const audioImportBusy = audioImportJob?.status === "queued" || audioImportJob?.status === "processing";
+  const audioImportStatusText = audioImportJob
+    ? audioImportJob.status === "completed"
+      ? `오디오 불러오기 완료 · 발화 ${audioImportJob.transcript_count || 0}개`
+      : audioImportJob.status === "error"
+      ? `오디오 불러오기 실패 · ${audioImportJob.error || "처리 중 오류"}`
+      : `${audioImportJob.detail || "오디오 파일 처리 중"} · ${Math.round(audioImportJob.progress || 0)}%`
+    : "";
 
   if (authLoading || !user || !meetingId || loadingMeeting) {
     return (
@@ -627,6 +742,9 @@ function HomeContent() {
                     : "선택된 마이크 없음"}
                 </span>
               </div>
+              {audioImportStatusText ? (
+                <p className="mt-2 text-xs text-slate-500">{audioImportStatusText}</p>
+              ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
               <button onClick={() => setActiveTab("meeting")} className={`px-4 py-2 rounded-xl text-sm font-semibold transition ${activeTab === "meeting" ? "bg-blue-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}>
@@ -659,6 +777,10 @@ function HomeContent() {
               syncStatusText={canvasSyncStatus}
               autoSyncing={autoSyncing}
               liveSpeechPreview={liveSpeechPreview}
+              onImportAudioFile={handleAudioImport}
+              audioImportBusy={audioImportBusy}
+              audioImportStatusText={audioImportStatusText}
+              audioImportRevision={audioImportRevision}
             />
           </div>
         ) : (
