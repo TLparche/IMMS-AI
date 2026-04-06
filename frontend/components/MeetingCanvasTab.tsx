@@ -180,6 +180,12 @@ type AgendaViewModel = {
   actionItems: AgendaActionItemDetail[];
 };
 
+type AgendaOverride = {
+  title?: string;
+  keywords?: string[];
+  summaryBullets?: string[];
+};
+
 type ProblemGroupDisplayCard = {
   id: string;
   title: string;
@@ -1076,6 +1082,15 @@ export default function MeetingCanvasTab({
   const [activityMessage, setActivityMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [personalNotes, setPersonalNotes] = useState<PersonalNote[]>([]);
+  const [agendaOverrides, setAgendaOverrides] = useState<Record<string, AgendaOverride>>({});
+  const [editingAgendaId, setEditingAgendaId] = useState("");
+  const [agendaDraftTitle, setAgendaDraftTitle] = useState("");
+  const [agendaDraftKeywords, setAgendaDraftKeywords] = useState("");
+  const [agendaDraftSummary, setAgendaDraftSummary] = useState("");
+  const [editingPersonalNoteId, setEditingPersonalNoteId] = useState("");
+  const [personalNoteDraftAgendaId, setPersonalNoteDraftAgendaId] = useState("");
+  const [personalNoteDraftTitle, setPersonalNoteDraftTitle] = useState("");
+  const [personalNoteDraftBody, setPersonalNoteDraftBody] = useState("");
   const [problemGroups, setProblemGroups] = useState<ProblemGroupViewModel[]>([]);
   const [solutionTopics, setSolutionTopics] = useState<SolutionTopicViewModel[]>([]);
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
@@ -1144,7 +1159,22 @@ export default function MeetingCanvasTab({
   );
 
   const effectiveState = importOverrideActive && importedState ? importedState : analysisState ?? importedState;
-  const agendaModels = useMemo(() => buildAgendaModels(effectiveState, agendas, transcripts), [effectiveState, agendas, transcripts]);
+  const agendaModels = useMemo(() => {
+    const baseModels = buildAgendaModels(effectiveState, agendas, transcripts);
+    return baseModels.map((agenda) => {
+      const override = agendaOverrides[agenda.id];
+      if (!override) {
+        return agenda;
+      }
+
+      return {
+        ...agenda,
+        title: override.title || agenda.title,
+        keywords: override.keywords || agenda.keywords,
+        summaryBullets: override.summaryBullets || agenda.summaryBullets,
+      };
+    });
+  }, [effectiveState, agendas, transcripts, agendaOverrides]);
   const meetingGoalTopic = useMemo(
     () => meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim(),
     [effectiveState?.meeting_goal, meetingTitle],
@@ -1170,6 +1200,9 @@ export default function MeetingCanvasTab({
     workspaceHydratingRef.current = false;
     analysisSignatureAtImportRef.current = "";
     setImportOverrideActive(false);
+    setAgendaOverrides({});
+    setEditingAgendaId("");
+    setEditingPersonalNoteId("");
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
       workspaceSaveTimerRef.current = null;
@@ -1337,6 +1370,9 @@ export default function MeetingCanvasTab({
     setSelectedNodeId("");
     setEditingProblemGroupId("");
     setEditingSolutionTopicId("");
+    setAgendaOverrides({});
+    setEditingAgendaId("");
+    setEditingPersonalNoteId("");
     setLeftPanelTab("detail");
     setActivityMessage("새 오디오 전사를 기준으로 canvas를 초기화했습니다.");
   }, [audioImportRevision]);
@@ -2251,6 +2287,10 @@ export default function MeetingCanvasTab({
     stage === "problem-definition" &&
     Boolean(selectedProblemGroup) &&
     editingProblemGroupId === selectedProblemGroup?.group_id;
+  const isEditingSelectedAgenda =
+    stage === "ideation" &&
+    Boolean(selectedAgenda) &&
+    editingAgendaId === selectedAgenda?.id;
   const isEditingSelectedSolutionTopic =
     stage === "solution" &&
     Boolean(selectedSolutionTopic) &&
@@ -2664,6 +2704,92 @@ export default function MeetingCanvasTab({
 
   const handleDeletePersonalNote = (noteId: string) => {
     setPersonalNotes((prev) => prev.filter((item) => item.id !== noteId));
+    if (editingPersonalNoteId === noteId) {
+      setEditingPersonalNoteId("");
+      setPersonalNoteDraftAgendaId("");
+      setPersonalNoteDraftTitle("");
+      setPersonalNoteDraftBody("");
+    }
+  };
+
+  const handleStartAgendaEdit = () => {
+    if (!selectedAgenda) return;
+    setEditingAgendaId(selectedAgenda.id);
+    setAgendaDraftTitle(selectedAgenda.title);
+    setAgendaDraftKeywords((selectedAgenda.keywords || []).join(", "));
+    setAgendaDraftSummary((selectedAgenda.summaryBullets || []).join("\n"));
+  };
+
+  const handleCancelAgendaEdit = () => {
+    setEditingAgendaId("");
+    setAgendaDraftTitle("");
+    setAgendaDraftKeywords("");
+    setAgendaDraftSummary("");
+  };
+
+  const handleSaveAgendaEdit = () => {
+    if (!selectedAgenda) return;
+
+    const nextTitle = agendaDraftTitle.trim() || selectedAgenda.title;
+    const nextKeywords = agendaDraftKeywords
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const nextSummaryBullets = agendaDraftSummary
+      .split("\n")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    setAgendaOverrides((prev) => ({
+      ...prev,
+      [selectedAgenda.id]: {
+        title: nextTitle,
+        keywords: nextKeywords,
+        summaryBullets:
+          nextSummaryBullets.length > 0
+            ? nextSummaryBullets
+            : selectedAgenda.summaryBullets,
+      },
+    }));
+    setEditingAgendaId("");
+    setAgendaDraftTitle("");
+    setAgendaDraftKeywords("");
+    setAgendaDraftSummary("");
+    setActivityMessage("안건 메모 내용을 수정했습니다.");
+  };
+
+  const handleStartPersonalNoteEdit = (note: PersonalNote) => {
+    setEditingPersonalNoteId(note.id);
+    setPersonalNoteDraftAgendaId(note.agendaId);
+    setPersonalNoteDraftTitle(note.title);
+    setPersonalNoteDraftBody(note.body);
+  };
+
+  const handleCancelPersonalNoteEdit = () => {
+    setEditingPersonalNoteId("");
+    setPersonalNoteDraftAgendaId("");
+    setPersonalNoteDraftTitle("");
+    setPersonalNoteDraftBody("");
+  };
+
+  const handleSavePersonalNoteEdit = (noteId: string) => {
+    setPersonalNotes((prev) =>
+      prev.map((note) =>
+        note.id === noteId
+          ? {
+              ...note,
+              agendaId: personalNoteDraftAgendaId || note.agendaId,
+              title: personalNoteDraftTitle.trim() || note.title,
+              body: personalNoteDraftBody.trim() || note.body,
+            }
+          : note,
+      ),
+    );
+    setEditingPersonalNoteId("");
+    setPersonalNoteDraftAgendaId("");
+    setPersonalNoteDraftTitle("");
+    setPersonalNoteDraftBody("");
+    setActivityMessage("개인 메모를 수정했습니다.");
   };
 
   const handleStartProblemGroupEdit = () => {
@@ -3104,14 +3230,20 @@ export default function MeetingCanvasTab({
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Detail</p>
-                          {isEditingSelectedProblemGroup || isEditingSelectedSolutionTopic ? (
+                          {isEditingSelectedAgenda || isEditingSelectedProblemGroup || isEditingSelectedSolutionTopic ? (
                             <input
                               value={
-                                isEditingSelectedProblemGroup
+                                isEditingSelectedAgenda
+                                  ? agendaDraftTitle
+                                  : isEditingSelectedProblemGroup
                                   ? problemGroupDraftTopic
                                   : solutionTopicDraftTitle
                               }
                               onChange={(event) => {
+                                if (isEditingSelectedAgenda) {
+                                  setAgendaDraftTitle(event.target.value);
+                                  return;
+                                }
                                 if (isEditingSelectedProblemGroup) {
                                   setProblemGroupDraftTopic(event.target.value);
                                   return;
@@ -3125,7 +3257,36 @@ export default function MeetingCanvasTab({
                           )}
                           <p className="mt-2 text-base text-slate-500">{leftPanelDetail.subtitle}</p>
                         </div>
-                        {stage === "problem-definition" && selectedProblemGroup ? (
+                        {stage === "ideation" && selectedAgenda ? (
+                          <div className="flex shrink-0 gap-2">
+                            {isEditingSelectedAgenda ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={handleCancelAgendaEdit}
+                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                                >
+                                  취소
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleSaveAgendaEdit}
+                                  className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                                >
+                                  저장
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={handleStartAgendaEdit}
+                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                              >
+                                수정
+                              </button>
+                            )}
+                          </div>
+                        ) : stage === "problem-definition" && selectedProblemGroup ? (
                           <div className="flex shrink-0 gap-2">
                             {isEditingSelectedProblemGroup ? (
                               <>
@@ -3233,7 +3394,17 @@ export default function MeetingCanvasTab({
 
                     <section className="border-b border-slate-200/80 py-6">
                       <h4 className="text-lg font-semibold text-slate-900">키워드</h4>
-                      {leftPanelDetail.keywords.length > 0 ? (
+                      {isEditingSelectedAgenda ? (
+                        <>
+                          <input
+                            value={agendaDraftKeywords}
+                            onChange={(event) => setAgendaDraftKeywords(event.target.value)}
+                            placeholder="쉼표로 구분해 키워드를 입력합니다."
+                            className="mt-4 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base text-slate-700"
+                          />
+                          <p className="mt-3 text-sm leading-6 text-slate-500">예: 고객 경험, 협업 흐름, 실행 우선순위</p>
+                        </>
+                      ) : leftPanelDetail.keywords.length > 0 ? (
                         <div className="mt-4 flex flex-wrap gap-2">
                           {leftPanelDetail.keywords.map((keyword) => (
                             <span key={`${leftPanelDetail.title}-${keyword}`} className="rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
@@ -3279,29 +3450,45 @@ export default function MeetingCanvasTab({
                     {stage !== "solution" ? (
                     <section className="border-b border-slate-200/80 py-6">
                       <div className="flex items-center justify-between gap-3">
-                        <h4 className="text-lg font-semibold text-slate-900">결론</h4>
+                        <h4 className="text-lg font-semibold text-slate-900">
+                          {stage === "ideation" ? "요약" : "결론"}
+                        </h4>
                         {stage === "problem-definition" && selectedProblemGroup?.conclusion_user_edited ? (
                           <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
                             수동 수정됨
                           </span>
                         ) : null}
                       </div>
-                      <div className="mt-4 space-y-3">
-                        {leftPanelDetail.summaryItems.map((item, index) => (
-                          <div key={`${leftPanelDetail.title}-summary-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                            <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                            {stage === "problem-definition" && index === 0 && isEditingSelectedProblemGroup ? (
-                              <textarea
-                                value={problemGroupDraftConclusion}
-                                onChange={(event) => setProblemGroupDraftConclusion(event.target.value)}
-                                className="mt-2 min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                              />
-                            ) : (
-                              <p className="mt-1 text-base leading-7 text-slate-700">{item.value}</p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
+                      {stage === "ideation" && isEditingSelectedAgenda ? (
+                        <>
+                          <textarea
+                            value={agendaDraftSummary}
+                            onChange={(event) => setAgendaDraftSummary(event.target.value)}
+                            className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                            placeholder="한 줄에 하나씩 핵심 요약 또는 포인트를 입력합니다."
+                          />
+                          <p className="mt-3 text-sm leading-6 text-slate-500">
+                            줄 단위로 저장되며, ideation 안건 노드와 상세 포인트에 함께 반영됩니다.
+                          </p>
+                        </>
+                      ) : (
+                        <div className="mt-4 space-y-3">
+                          {leftPanelDetail.summaryItems.map((item, index) => (
+                            <div key={`${leftPanelDetail.title}-summary-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                              {stage === "problem-definition" && index === 0 && isEditingSelectedProblemGroup ? (
+                                <textarea
+                                  value={problemGroupDraftConclusion}
+                                  onChange={(event) => setProblemGroupDraftConclusion(event.target.value)}
+                                  className="mt-2 min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                                />
+                              ) : (
+                                <p className="mt-1 text-base leading-7 text-slate-700">{item.value}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {stage === "problem-definition" && isEditingSelectedProblemGroup ? (
                         <p className="mt-3 text-sm leading-6 text-slate-500">
                           저장하면 이 결론은 이후 AI 재생성으로 덮어쓰지 않습니다.
@@ -3861,36 +4048,87 @@ export default function MeetingCanvasTab({
                 {personalNotes.length === 0 ? (
                   <p className="text-base leading-7 text-slate-500">아직 저장한 개인 메모가 없습니다.</p>
                 ) : (
-                  personalNotes.map((note) => (
-                    <article
-                      key={note.id}
-                      draggable={stage === "problem-definition"}
-                      onDragStart={(event) => {
-                        if (stage !== "problem-definition") return;
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData("application/x-imms-note-id", note.id);
-                        event.dataTransfer.setData("text/plain", note.id);
-                        setDraggingPersonalNoteId(note.id);
-                      }}
-                      onDragEnd={() => {
-                        setDraggingPersonalNoteId("");
-                        setDropProblemGroupId("");
-                      }}
-                      className={`rounded-xl border border-slate-200 bg-[#fafafa] p-4 ${stage === "problem-definition" ? "cursor-grab active:cursor-grabbing" : ""} ${draggingPersonalNoteId === note.id ? "opacity-60" : ""}`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">{toolLabel(note.kind)}</p>
-                          <h4 className="mt-1 text-base font-semibold text-slate-900">{note.title}</h4>
+                  personalNotes.map((note) => {
+                    const isEditing = editingPersonalNoteId === note.id;
+
+                    return (
+                      <article
+                        key={note.id}
+                        draggable={stage === "problem-definition" && !isEditing}
+                        onDragStart={(event) => {
+                          if (stage !== "problem-definition" || isEditing) return;
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("application/x-imms-note-id", note.id);
+                          event.dataTransfer.setData("text/plain", note.id);
+                          setDraggingPersonalNoteId(note.id);
+                        }}
+                        onDragEnd={() => {
+                          setDraggingPersonalNoteId("");
+                          setDropProblemGroupId("");
+                        }}
+                        className={`rounded-xl border border-slate-200 bg-[#fafafa] p-4 ${stage === "problem-definition" && !isEditing ? "cursor-grab active:cursor-grabbing" : ""} ${draggingPersonalNoteId === note.id ? "opacity-60" : ""}`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">{toolLabel(note.kind)}</p>
+                            {isEditing ? (
+                              <input
+                                value={personalNoteDraftTitle}
+                                onChange={(event) => setPersonalNoteDraftTitle(event.target.value)}
+                                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-base font-semibold text-slate-900"
+                              />
+                            ) : (
+                              <h4 className="mt-1 text-base font-semibold text-slate-900">{note.title}</h4>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 gap-2">
+                            {isEditing ? (
+                              <>
+                                <button type="button" onClick={handleCancelPersonalNoteEdit} className="text-sm font-medium text-slate-500 hover:text-slate-700">
+                                  취소
+                                </button>
+                                <button type="button" onClick={() => handleSavePersonalNoteEdit(note.id)} className="text-sm font-medium text-slate-700 hover:text-slate-900">
+                                  저장
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button type="button" onClick={() => handleStartPersonalNoteEdit(note)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
+                                  수정
+                                </button>
+                                <button type="button" onClick={() => handleDeletePersonalNote(note.id)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
+                                  삭제
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </div>
-                        <button type="button" onClick={() => handleDeletePersonalNote(note.id)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
-                          삭제
-                        </button>
-                      </div>
-                      <p className="mt-2 text-base leading-7 text-slate-600">{note.body}</p>
-                      <p className="mt-3 text-sm text-slate-400">연결 그룹: {agendaModels.find((agenda) => agenda.id === note.agendaId)?.title || "미지정"}</p>
-                    </article>
-                  ))
+                        {isEditing ? (
+                          <>
+                            <select
+                              value={personalNoteDraftAgendaId}
+                              onChange={(event) => setPersonalNoteDraftAgendaId(event.target.value)}
+                              className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
+                            >
+                              {agendaModels.map((agenda) => (
+                                <option key={agenda.id} value={agenda.id}>
+                                  {agenda.title}
+                                </option>
+                              ))}
+                            </select>
+                            <textarea
+                              value={personalNoteDraftBody}
+                              onChange={(event) => setPersonalNoteDraftBody(event.target.value)}
+                              className="mt-3 min-h-[140px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                            />
+                          </>
+                        ) : (
+                          <p className="mt-2 text-base leading-7 text-slate-600">{note.body}</p>
+                        )}
+                        <p className="mt-3 text-sm text-slate-400">연결 그룹: {agendaModels.find((agenda) => agenda.id === (isEditing ? personalNoteDraftAgendaId : note.agendaId))?.title || "미지정"}</p>
+                      </article>
+                    );
+                  })
                 )}
               </div>
             </section>
