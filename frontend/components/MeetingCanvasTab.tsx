@@ -1474,7 +1474,12 @@ export default function MeetingCanvasTab({
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
         node_positions: overrides?.nodePositions ?? nodePositions,
-        imported_state: overrides?.importedState ?? analysisState ?? importedState,
+        imported_state:
+          overrides && "importedState" in overrides
+            ? (overrides.importedState ?? null)
+            : importOverrideActive && importedState
+              ? importedState
+              : analysisState ?? importedState,
       };
 
       lastSharedSyncSignatureRef.current = buildSharedCanvasSignature(snapshot);
@@ -1492,6 +1497,7 @@ export default function MeetingCanvasTab({
     },
     [
       analysisState,
+      importOverrideActive,
       importedState,
       meetingId,
       nodePositions,
@@ -1811,9 +1817,10 @@ export default function MeetingCanvasTab({
       problem_groups: serializeSharedProblemGroups(problemGroups),
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
       node_positions: nodePositions,
-      imported_state: analysisState ?? importedState,
+      imported_state:
+        importOverrideActive && importedState ? importedState : analysisState ?? importedState,
     }),
-    [analysisState, importedState, nodePositions, problemGroups, solutionTopics, stage],
+    [analysisState, importOverrideActive, importedState, nodePositions, problemGroups, solutionTopics, stage],
   );
 
   const sharedCanvasSignature = useMemo(
@@ -1870,9 +1877,16 @@ export default function MeetingCanvasTab({
             prev,
             incomingSharedCanvasSync.node_positions || {},
             localNodeOverridesRef.current,
-          ),
+        ),
     );
     setImportedState(incomingSharedCanvasSync.imported_state || null);
+    if (incomingSharedCanvasSync.imported_state) {
+      analysisSignatureAtImportRef.current = analysisStateSignature;
+      setImportOverrideActive(true);
+    } else {
+      analysisSignatureAtImportRef.current = "";
+      setImportOverrideActive(false);
+    }
     setStage(incomingStage);
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
       stage: incomingStage,
@@ -1902,7 +1916,7 @@ export default function MeetingCanvasTab({
     window.setTimeout(() => {
       applyingRemoteSharedSyncRef.current = false;
     }, 0);
-  }, [incomingSharedCanvasSync, meetingId, problemGroups, sharedSyncEnabled, solutionTopics, userId]);
+  }, [analysisStateSignature, incomingSharedCanvasSync, meetingId, problemGroups, sharedSyncEnabled, solutionTopics, userId]);
 
   useEffect(() => {
     if (
@@ -2546,6 +2560,8 @@ export default function MeetingCanvasTab({
   };
 
   const onNodesChange = (changes: NodeChange[]) => {
+    let nextPositionsSnapshot: CanvasNodePositionsByStage | null = null;
+
     setNodes((current) => applyNodeChanges(changes, current));
     setNodePositions((prev) => {
       const stagePositions = { ...(prev[stage] || {}) };
@@ -2578,11 +2594,54 @@ export default function MeetingCanvasTab({
         });
       }
 
-      return {
+      nextPositionsSnapshot = {
         ...prev,
         [stage]: stagePositions,
       };
+
+      return nextPositionsSnapshot;
     });
+
+    if (sharedSyncEnabled && nextPositionsSnapshot) {
+      forceBroadcastSharedCanvas({ nodePositions: nextPositionsSnapshot });
+    }
+  };
+
+  const onNodeDragStop = (_event: React.MouseEvent, node: Node) => {
+    let nextPositionsSnapshot: CanvasNodePositionsByStage | null = null;
+
+    setNodePositions((prev) => {
+      const stagePositions = { ...(prev[stage] || {}) };
+      const currentPosition = stagePositions[node.id];
+      if (
+        currentPosition &&
+        currentPosition.x === node.position.x &&
+        currentPosition.y === node.position.y
+      ) {
+        return prev;
+      }
+
+      if (!sharedSyncEnabled) {
+        localNodeOverridesRef.current[stage].add(node.id);
+      }
+
+      nextPositionsSnapshot = {
+        ...prev,
+        [stage]: {
+          ...stagePositions,
+          [node.id]: {
+            x: node.position.x,
+            y: node.position.y,
+          },
+        },
+      };
+
+      return nextPositionsSnapshot;
+    });
+
+    if (sharedSyncEnabled && nextPositionsSnapshot) {
+      forceBroadcastSharedCanvas({ nodePositions: nextPositionsSnapshot });
+    }
   };
 
   const onEdgesChange = (changes: EdgeChange[]) => {
@@ -2958,6 +3017,15 @@ export default function MeetingCanvasTab({
                         setEditingProblemGroupId("");
                         setEditingSolutionTopicId("");
                         setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
+                        if (sharedSyncEnabled) {
+                          forceBroadcastSharedCanvas({
+                            stage: "ideation",
+                            problemGroups: [],
+                            solutionTopics: [],
+                            nodePositions: {},
+                            importedState: result.state,
+                          });
+                        }
                       });
                     }
                   }
@@ -3616,6 +3684,7 @@ export default function MeetingCanvasTab({
                   }
                 }}
                 onNodesChange={onNodesChange}
+                onNodeDragStop={onNodeDragStop}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
                 minZoom={0.45}
