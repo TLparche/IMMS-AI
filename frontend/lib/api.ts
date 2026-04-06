@@ -4,6 +4,7 @@ import type {
   AgendaSnapshotImportResponse,
   AudioImportJobStartResponse,
   AudioImportJobStatusResponse,
+  CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasPersonalNotesStateResponse,
@@ -234,6 +235,33 @@ export async function saveCanvasWorkspacePatch(
   });
 }
 
+export function flushCanvasWorkspacePatch(payload: CanvasWorkspacePatchRequest): void {
+  const url = apiPath("/api/canvas/workspace-patch");
+  const body = JSON.stringify(payload);
+
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      const blob = new Blob([body], { type: "application/json" });
+      if (navigator.sendBeacon(url, blob)) {
+        return;
+      }
+    }
+  } catch {
+    // pagehide 시점에는 fallback fetch를 다시 시도한다.
+  }
+
+  try {
+    void fetch(url, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body,
+      keepalive: true,
+    });
+  } catch {
+    // unload 직전 실패는 다음 세션에서 다시 저장된다.
+  }
+}
+
 export async function getCanvasPersonalNotes(
   meetingId: string,
   userId: string,
@@ -254,12 +282,50 @@ export async function saveCanvasPersonalNotes(payload: {
     title: string;
     body: string;
   }>;
+  local_canvas_state?: CanvasLocalState | null;
 }): Promise<CanvasPersonalNotesStateResponse> {
   return requestJson<CanvasPersonalNotesStateResponse>("/api/canvas/personal-notes", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
   });
+}
+
+export function flushCanvasPersonalNotes(payload: {
+  meeting_id: string;
+  user_id: string;
+  personal_notes: Array<{
+    id: string;
+    agenda_id: string;
+    kind: string;
+    title: string;
+    body: string;
+  }>;
+}): void {
+  const url = apiPath("/api/canvas/personal-notes");
+  const body = JSON.stringify(payload);
+
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      const blob = new Blob([body], { type: "application/json" });
+      if (navigator.sendBeacon(url, blob)) {
+        return;
+      }
+    }
+  } catch {
+    // pagehide 시점에는 fallback fetch를 다시 시도한다.
+  }
+
+  try {
+    void fetch(url, {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body,
+      keepalive: true,
+    });
+  } catch {
+    // unload 직전 실패는 다음 세션에서 다시 저장된다.
+  }
 }
 
 export async function exportAgendaMarkdown(): Promise<AgendaMarkdownExportResponse> {

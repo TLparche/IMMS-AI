@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { WebSocketClient } from "@/lib/websocket";
 import { AudioRecorder, type RecordedAudioChunk } from "@/lib/audio-recorder";
 import { supabase } from "@/lib/supabase";
-import { getAudioImportJobStatus, startAudioImportJob, syncTranscript } from "@/lib/api";
+import { getAudioImportJobStatus, getCanvasWorkspaceState, startAudioImportJob, syncTranscript } from "@/lib/api";
 import type { AudioImportJobStatusResponse, CanvasRealtimeSyncPayload, MeetingState } from "@/lib/types";
 import MeetingCanvasTab, { type MeetingAgenda as CanvasAgenda, type MeetingTranscript as CanvasTranscript } from "@/components/MeetingCanvasTab";
 
@@ -140,6 +140,7 @@ function HomeContent() {
   const [autoSyncing, setAutoSyncing] = useState(false);
   const [canvasViewportHeight, setCanvasViewportHeight] = useState<number | null>(null);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
+  const [incomingCanvasStateRequestId, setIncomingCanvasStateRequestId] = useState("");
   const [calibrationState, setCalibrationState] = useState<CalibrationState>("idle");
   const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(0);
   const [fusionSelectedUserId, setFusionSelectedUserId] = useState<string | null>(null);
@@ -257,6 +258,7 @@ function HomeContent() {
     queuedSyncSignatureRef.current = "";
     autoSyncInFlightRef.current = false;
     setIncomingCanvasSync(null);
+    setIncomingCanvasStateRequestId("");
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
     setAudioImportJob(null);
     setAudioImportRevision(0);
@@ -265,25 +267,42 @@ function HomeContent() {
     const loadMeeting = async () => {
       setLoadingMeeting(true);
       try {
-        const [{ data: meetingData, error: meetingError }, { data: transcriptData, error: transcriptError }] = await Promise.all([
+        const [
+          { data: meetingData, error: meetingError },
+          { data: transcriptData, error: transcriptError },
+          workspaceState,
+        ] = await Promise.all([
           supabase.from("meetings").select("title").eq("id", meetingId).single(),
           supabase.from("transcripts").select("id, speaker, text, timestamp, created_at").eq("meeting_id", meetingId).order("created_at", { ascending: true }),
+          getCanvasWorkspaceState(meetingId).catch(() => null),
         ]);
 
         if (meetingError) throw meetingError;
         if (transcriptError) throw transcriptError;
 
-        setMeetingTitle(meetingData?.title || "회의 워크스페이스");
-        setTranscripts(
-          dedupeTranscripts(
-            (transcriptData || []).map((row) => ({
-              id: String(row.id),
-              speaker: row.speaker || "알 수 없음",
-              text: row.text || "",
-              timestamp: row.timestamp || row.created_at || new Date().toISOString(),
-            })),
-          ),
+        const nextMeetingTitle = meetingData?.title || "회의 워크스페이스";
+        const nextTranscripts = dedupeTranscripts(
+          (transcriptData || []).map((row) => ({
+            id: String(row.id),
+            speaker: row.speaker || "알 수 없음",
+            text: row.text || "",
+            timestamp: row.timestamp || row.created_at || new Date().toISOString(),
+          })),
         );
+
+        setMeetingTitle(nextMeetingTitle);
+        setTranscripts(nextTranscripts);
+
+        if (workspaceState?.imported_state) {
+          applyMeetingStateToUi(workspaceState.imported_state);
+          lastSyncedSignatureRef.current = buildTranscriptSyncSignature(nextMeetingTitle, nextTranscripts);
+        } else {
+          setAnalysisState(null);
+          setAgendas([]);
+          setDecisions([]);
+          setActionItems([]);
+          lastSyncedSignatureRef.current = "";
+        }
       } catch (error) {
         console.error("Failed to load meeting context:", error);
       } finally {
@@ -330,6 +349,13 @@ function HomeContent() {
       const payload = (message?.data ?? message?.workspace ?? message) as CanvasRealtimeSyncPayload | null;
       if (!payload || payload.meeting_id !== meetingId) return;
       setIncomingCanvasSync(payload);
+    });
+
+    wsClient.on("canvas_state_request", (message: any) => {
+      const payload = message?.data ?? message;
+      if (!payload || payload.meeting_id !== meetingId) return;
+      if (payload.requested_by === user.id) return;
+      setIncomingCanvasStateRequestId(String(payload.request_id || Date.now()));
     });
 
     wsClient.on("audio_selection", (message: any) => {
@@ -774,6 +800,7 @@ function HomeContent() {
               onSyncFromMeeting={syncBackendFromMeeting}
               incomingSharedCanvasSync={incomingCanvasSync}
               onSharedCanvasSync={broadcastCanvasSync}
+              incomingCanvasStateRequestId={incomingCanvasStateRequestId}
               syncStatusText={canvasSyncStatus}
               autoSyncing={autoSyncing}
               liveSpeechPreview={liveSpeechPreview}

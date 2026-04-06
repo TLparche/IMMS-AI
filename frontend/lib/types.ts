@@ -278,6 +278,14 @@ export interface CanvasWorkspaceStateResponse {
   ok: boolean;
   meeting_id: string;
   stage: "ideation" | "problem-definition" | "solution";
+  agenda_overrides?: Record<
+    string,
+    {
+      title?: string;
+      keywords?: string[];
+      summaryBullets?: string[];
+    }
+  >;
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
   node_positions?: CanvasNodePositionsByStage;
@@ -288,10 +296,36 @@ export interface CanvasWorkspaceStateResponse {
 export interface CanvasWorkspacePatchRequest {
   meeting_id: string;
   stage?: "ideation" | "problem-definition" | "solution";
+  agenda_overrides?: Record<
+    string,
+    {
+      title?: string;
+      keywords?: string[];
+      summaryBullets?: string[];
+    }
+  >;
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
+}
+
+export interface CanvasLocalState {
+  shared_sync_enabled?: boolean;
+  agenda_overrides?: Record<
+    string,
+    {
+      title?: string;
+      keywords?: string[];
+      summaryBullets?: string[];
+    }
+  >;
+  stage?: "ideation" | "problem-definition" | "solution";
+  problem_groups?: CanvasWorkspaceProblemGroup[];
+  solution_topics?: CanvasSolutionTopicResponse[];
+  node_positions?: CanvasNodePositionsByStage;
+  imported_state?: MeetingState | null;
+  import_override_active?: boolean;
 }
 
 export interface CanvasPersonalNotesStateResponse {
@@ -299,6 +333,7 @@ export interface CanvasPersonalNotesStateResponse {
   meeting_id: string;
   user_id: string;
   personal_notes: CanvasPersonalNote[];
+  local_canvas_state?: CanvasLocalState | null;
   saved_at?: string;
 }
 
@@ -308,6 +343,14 @@ export interface CanvasRealtimeSyncPayload {
   updated_by: string;
   updated_at: string;
   stage: "ideation" | "problem-definition" | "solution";
+  agenda_overrides?: Record<
+    string,
+    {
+      title?: string;
+      keywords?: string[];
+      summaryBullets?: string[];
+    }
+  >;
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
   node_positions: CanvasNodePositionsByStage;

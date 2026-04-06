@@ -8,6 +8,7 @@ import asyncio
 import httpx
 import json
 import base64
+import copy
 from datetime import datetime, timezone
 from ..config import get_supabase, settings
 from security_utils import extract_client_ip, is_ip_allowed, parse_ip_whitelist
@@ -16,6 +17,7 @@ router = APIRouter()
 
 # 회의방별 연결 관리
 active_connections: Dict[str, List[Dict]] = {}
+latest_canvas_workspace_by_meeting: Dict[str, Dict[str, Any]] = {}
 
 # AI 백엔드 URL
 AI_BACKEND_URL = settings.ai_module_url.rstrip("/")
@@ -203,6 +205,23 @@ async def persist_canvas_workspace(meeting_id: str, workspace: dict[str, Any]):
         print(f"❌ Failed to persist canvas workspace: {e}")
 
 
+async def fetch_canvas_workspace(meeting_id: str) -> dict[str, Any] | None:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                f"{AI_BACKEND_URL}/api/canvas/workspace-state",
+                params={"meeting_id": meeting_id},
+            )
+            if response.status_code >= 400:
+                print(f"❌ Failed to fetch canvas workspace: {response.status_code} {response.text[:200]}")
+                return None
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        print(f"❌ Failed to fetch canvas workspace: {e}")
+        return None
+
+
 async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str = None):
     """회의방의 모든 참가자에게 메시지 브로드캐스트"""
     if meeting_id not in active_connections:
@@ -267,6 +286,37 @@ async def websocket_endpoint(
         'user_id': user_id
     }
     active_connections[meeting_id].append(conn_info)
+
+    current_workspace = copy.deepcopy(latest_canvas_workspace_by_meeting.get(meeting_id))
+    if not isinstance(current_workspace, dict):
+        current_workspace = await fetch_canvas_workspace(meeting_id)
+        if isinstance(current_workspace, dict):
+            latest_canvas_workspace_by_meeting[meeting_id] = copy.deepcopy(current_workspace)
+    if current_workspace:
+        try:
+            await websocket.send_json({
+                'type': 'canvas_sync',
+                'sync_id': f"initial-{meeting_id}-{int(datetime.utcnow().timestamp() * 1000)}",
+                'meeting_id': meeting_id,
+                'updated_by': '__server__',
+                'updated_at': datetime.utcnow().isoformat(),
+                'stage': current_workspace.get('stage', 'ideation'),
+                'agenda_overrides': current_workspace.get('agenda_overrides') or {},
+                'problem_groups': current_workspace.get('problem_groups') or [],
+                'solution_topics': current_workspace.get('solution_topics') or [],
+                'node_positions': current_workspace.get('node_positions') or {},
+                'imported_state': current_workspace.get('imported_state'),
+            })
+        except Exception as e:
+            print(f"❌ Failed to send initial canvas sync to {user_id}: {e}")
+
+    await broadcast_to_meeting(meeting_id, {
+        'type': 'canvas_state_request',
+        'meeting_id': meeting_id,
+        'requested_by': user_id,
+        'request_id': f"{meeting_id}:{user_id}:{int(datetime.utcnow().timestamp() * 1000)}",
+        'timestamp': datetime.utcnow().isoformat(),
+    }, exclude_user=user_id)
     
     # 참가자 입장 알림
     await broadcast_to_meeting(meeting_id, {
@@ -344,6 +394,7 @@ async def websocket_endpoint(
                     continue
 
                 workspace['meeting_id'] = meeting_id
+                latest_canvas_workspace_by_meeting[meeting_id] = copy.deepcopy(workspace)
                 sync_message = {
                     'type': 'canvas_sync',
                     'data': workspace,
@@ -382,6 +433,7 @@ async def websocket_endpoint(
         if not active_connections[meeting_id]:
             del active_connections[meeting_id]
             fusion_states.pop(meeting_id, None)
+            latest_canvas_workspace_by_meeting.pop(meeting_id, None)
         
         # 참가자 퇴장 알림
         await broadcast_to_meeting(meeting_id, {
@@ -393,3 +445,7 @@ async def websocket_endpoint(
         print(f"❌ WebSocket error for meeting {meeting_id}, user {user_id}: {e}")
         if conn_info in active_connections.get(meeting_id, []):
             active_connections[meeting_id].remove(conn_info)
+        if meeting_id in active_connections and not active_connections[meeting_id]:
+            active_connections.pop(meeting_id, None)
+            fusion_states.pop(meeting_id, None)
+            latest_canvas_workspace_by_meeting.pop(meeting_id, None)

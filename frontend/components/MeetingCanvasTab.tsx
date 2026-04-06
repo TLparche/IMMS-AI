@@ -26,6 +26,8 @@ import {
   generateProblemGroupConclusion,
   generateCanvasProblemDefinition,
   generateCanvasSolutionStage,
+  flushCanvasPersonalNotes,
+  flushCanvasWorkspacePatch,
   importAgendaSnapshot,
   saveCanvasPersonalNotes,
   saveCanvasWorkspacePatch,
@@ -33,6 +35,7 @@ import {
 import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
+  CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
   CanvasRealtimeSyncPayload,
@@ -99,6 +102,7 @@ type SolutionTopicViewModel = CanvasSolutionTopicResponse & {
 
 type WorkspaceFieldSignatures = {
   stage: string;
+  agenda_overrides: string;
   problem_groups: string;
   solution_topics: string;
   node_positions: string;
@@ -108,6 +112,7 @@ type WorkspaceFieldSignatures = {
 function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
   return {
     stage: "",
+    agenda_overrides: "",
     problem_groups: "",
     solution_topics: "",
     node_positions: "",
@@ -152,6 +157,7 @@ function buildWorkspaceSolutionTopicsPayload(topics: SolutionTopicViewModel[]) {
 
 function buildWorkspaceFieldSignatures(input: {
   stage: CanvasStage;
+  agendaOverrides: Record<string, AgendaOverride>;
   problemGroups: ProblemGroupViewModel[];
   solutionTopics: SolutionTopicViewModel[];
   nodePositions: CanvasNodePositionsByStage;
@@ -159,11 +165,62 @@ function buildWorkspaceFieldSignatures(input: {
 }): WorkspaceFieldSignatures {
   return {
     stage: input.stage,
+    agenda_overrides: JSON.stringify(serializeAgendaOverrides(input.agendaOverrides)),
     problem_groups: JSON.stringify(buildWorkspaceProblemGroupsPayload(input.problemGroups)),
     solution_topics: JSON.stringify(buildWorkspaceSolutionTopicsPayload(input.solutionTopics)),
     node_positions: JSON.stringify(input.nodePositions || {}),
     imported_state: JSON.stringify(input.importedState || null),
   };
+}
+
+function buildCanvasPersonalNotesPayload(
+  meetingId: string,
+  userId: string,
+  personalNotes: PersonalNote[],
+) {
+  return {
+    meeting_id: meetingId,
+    user_id: userId,
+    personal_notes: personalNotes.map((note) => ({
+      id: note.id,
+      agenda_id: note.agendaId,
+      kind: note.kind,
+      title: note.title,
+      body: note.body,
+    })),
+  };
+}
+
+function buildMeetingStateSignature(state: MeetingState | null) {
+  if (!state) {
+    return "";
+  }
+
+  return JSON.stringify({
+    transcript: (state.transcript || []).map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`),
+    agendas: (state.analysis?.agenda_outcomes || []).map((row) => ({
+      id: row.agenda_id,
+      title: row.agenda_title,
+      start: row.start_turn_id,
+      end: row.end_turn_id,
+    })),
+  });
+}
+
+function serializeAgendaOverrides(overrides: Record<string, AgendaOverride>) {
+  return Object.fromEntries(
+    Object.entries(overrides).flatMap(([agendaId, override]) => {
+      const title = (override.title || "").trim();
+      const keywords = (override.keywords || []).map((item) => item.trim()).filter(Boolean);
+      const summaryBullets = (override.summaryBullets || []).map((item) => item.trim()).filter(Boolean);
+
+      if (!title && keywords.length === 0 && summaryBullets.length === 0) {
+        return [];
+      }
+
+      return [[agendaId, { title, keywords, summaryBullets }]];
+    }),
+  );
 }
 
 type SolutionAiSuggestionViewModel = SolutionTopicViewModel["ai_suggestions"][number];
@@ -203,6 +260,7 @@ type MeetingCanvasTabProps = {
   onSyncFromMeeting: (analyze?: boolean) => Promise<MeetingState | null>;
   incomingSharedCanvasSync: CanvasRealtimeSyncPayload | null;
   onSharedCanvasSync: (payload: CanvasRealtimeSyncPayload) => void;
+  incomingCanvasStateRequestId: string;
   syncStatusText: string;
   autoSyncing: boolean;
   liveSpeechPreview: LiveSpeechPreview | null;
@@ -936,6 +994,7 @@ function serializeSharedSolutionTopics(topics: SolutionTopicViewModel[]) {
 
 function buildSharedCanvasSignature(payload: {
   stage: CanvasStage;
+  agenda_overrides: Record<string, unknown>;
   problem_groups: unknown[];
   solution_topics: unknown[];
   node_positions: CanvasNodePositionsByStage;
@@ -1066,6 +1125,7 @@ export default function MeetingCanvasTab({
   onSyncFromMeeting,
   incomingSharedCanvasSync,
   onSharedCanvasSync,
+  incomingCanvasStateRequestId,
   syncStatusText,
   autoSyncing,
   liveSpeechPreview,
@@ -1143,19 +1203,12 @@ export default function MeetingCanvasTab({
   const analysisSignatureAtImportRef = useRef("");
 
   const analysisStateSignature = useMemo(
-    () =>
-      analysisState
-        ? JSON.stringify({
-            transcript: (analysisState.transcript || []).map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`),
-            agendas: (analysisState.analysis?.agenda_outcomes || []).map((row) => ({
-              id: row.agenda_id,
-              title: row.agenda_title,
-              start: row.start_turn_id,
-              end: row.end_turn_id,
-            })),
-          })
-        : "",
+    () => buildMeetingStateSignature(analysisState),
     [analysisState],
+  );
+  const persistedSharedImportedState = useMemo(
+    () => (importOverrideActive && importedState ? importedState : analysisState ?? importedState),
+    [analysisState, importOverrideActive, importedState],
   );
 
   const effectiveState = importOverrideActive && importedState ? importedState : analysisState ?? importedState;
@@ -1239,6 +1292,7 @@ export default function MeetingCanvasTab({
     setProblemGroups([]);
     setSolutionTopics([]);
     setPersonalNotes([]);
+    setAgendaOverrides({});
     setNodePositions({});
     setImportedState(null);
     setStage("ideation");
@@ -1263,12 +1317,12 @@ export default function MeetingCanvasTab({
       .then(([saved, savedPersonalNotes]) => {
         if (cancelled) return;
 
-        const nextGroups = hydrateProblemGroups(saved.problem_groups || []);
-        const nextStage =
+        const sharedGroups = hydrateProblemGroups(saved.problem_groups || []);
+        const sharedStage =
           saved.stage === "problem-definition" || saved.stage === "solution" || saved.stage === "ideation"
             ? saved.stage
             : "ideation";
-        const nextSolutionTopics = hydrateSolutionTopics(saved.solution_topics || [], nextGroups);
+        const sharedSolutionTopics = hydrateSolutionTopics(saved.solution_topics || [], sharedGroups);
         const nextPersonalNotes: PersonalNote[] = (savedPersonalNotes.personal_notes || []).map((note) => {
           const kind: ComposerTool =
             note.kind === "comment" || note.kind === "topic" || note.kind === "note"
@@ -1282,26 +1336,62 @@ export default function MeetingCanvasTab({
             body: note.body,
           };
         });
+        const savedLocalCanvasState = savedPersonalNotes.local_canvas_state || null;
+        const nextSharedSyncEnabled = savedLocalCanvasState?.shared_sync_enabled ?? true;
+        const shouldUseLocalCanvas = nextSharedSyncEnabled === false;
+        const nextAgendaOverrides = shouldUseLocalCanvas
+          ? savedLocalCanvasState?.agenda_overrides || {}
+          : saved.agenda_overrides || {};
+        const nextGroups = shouldUseLocalCanvas
+          ? hydrateProblemGroups(savedLocalCanvasState?.problem_groups || [], sharedGroups)
+          : sharedGroups;
+        const nextStage =
+          shouldUseLocalCanvas &&
+          (savedLocalCanvasState?.stage === "problem-definition" ||
+            savedLocalCanvasState?.stage === "solution" ||
+            savedLocalCanvasState?.stage === "ideation")
+            ? savedLocalCanvasState.stage
+            : sharedStage;
+        const nextSolutionTopics = shouldUseLocalCanvas
+          ? hydrateSolutionTopics(savedLocalCanvasState?.solution_topics || [], nextGroups, sharedSolutionTopics)
+          : sharedSolutionTopics;
+        const nextNodePositions = shouldUseLocalCanvas
+          ? savedLocalCanvasState?.node_positions || {}
+          : saved.node_positions || {};
+        const nextImportedState = shouldUseLocalCanvas
+          ? savedLocalCanvasState?.imported_state || null
+          : saved.imported_state || null;
+        const nextImportOverrideActive = shouldUseLocalCanvas
+          ? Boolean(savedLocalCanvasState?.import_override_active && nextImportedState)
+          : Boolean(saved.imported_state);
 
         setProblemGroups(nextGroups);
         setSolutionTopics(nextSolutionTopics);
         setPersonalNotes(nextPersonalNotes);
-        setNodePositions(saved.node_positions || {});
-        setImportedState(saved.imported_state || null);
+        setAgendaOverrides(nextAgendaOverrides);
+        setSharedSyncEnabled(nextSharedSyncEnabled);
+        setNodePositions(nextNodePositions);
+        setImportedState(nextImportedState);
+        analysisSignatureAtImportRef.current = nextImportedState
+          ? buildMeetingStateSignature(nextImportedState)
+          : analysisStateSignature;
+        setImportOverrideActive(nextImportOverrideActive);
         setStage(nextStage);
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           stage: nextStage,
+          agenda_overrides: nextAgendaOverrides,
           problem_groups: nextGroups,
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
-          node_positions: saved.node_positions || {},
-          imported_state: saved.imported_state || null,
+          node_positions: nextNodePositions,
+          imported_state: nextImportedState,
         });
         lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
           stage: nextStage,
+          agendaOverrides: nextAgendaOverrides,
           problemGroups: nextGroups,
           solutionTopics: nextSolutionTopics,
-          nodePositions: saved.node_positions || {},
-          importedState: saved.imported_state || null,
+          nodePositions: nextNodePositions,
+          importedState: nextImportedState,
         });
         setSelectedProblemGroupId(nextGroups[0]?.group_id || "");
         setSelectedSolutionTopicId(nextSolutionTopics[0]?.group_id || "");
@@ -1320,11 +1410,14 @@ export default function MeetingCanvasTab({
         setProblemGroups([]);
         setSolutionTopics([]);
         setPersonalNotes([]);
+        setAgendaOverrides({});
+        setSharedSyncEnabled(true);
         setNodePositions({});
         setImportedState(null);
         setStage("ideation");
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           stage: "ideation",
+          agenda_overrides: {},
           problem_groups: [],
           solution_topics: [],
           node_positions: {},
@@ -1332,6 +1425,7 @@ export default function MeetingCanvasTab({
         });
         lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
           stage: "ideation",
+          agendaOverrides: {},
           problemGroups: [],
           solutionTopics: [],
           nodePositions: {},
@@ -1359,6 +1453,7 @@ export default function MeetingCanvasTab({
       return;
     }
 
+    setAgendaOverrides({});
     setImportedState(null);
     setImportOverrideActive(false);
     setProblemGroups([]);
@@ -1496,6 +1591,7 @@ export default function MeetingCanvasTab({
   const forceBroadcastSharedCanvas = useCallback(
     (overrides?: {
       stage?: CanvasStage;
+      agendaOverrides?: Record<string, AgendaOverride>;
       problemGroups?: ProblemGroupViewModel[];
       solutionTopics?: SolutionTopicViewModel[];
       nodePositions?: CanvasNodePositionsByStage;
@@ -1507,15 +1603,14 @@ export default function MeetingCanvasTab({
 
       const snapshot = {
         stage: overrides?.stage ?? stage,
+        agenda_overrides: serializeAgendaOverrides(overrides?.agendaOverrides ?? agendaOverrides),
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
         node_positions: overrides?.nodePositions ?? nodePositions,
         imported_state:
           overrides && "importedState" in overrides
             ? (overrides.importedState ?? null)
-            : importOverrideActive && importedState
-              ? importedState
-              : analysisState ?? importedState,
+            : persistedSharedImportedState,
       };
 
       lastSharedSyncSignatureRef.current = buildSharedCanvasSignature(snapshot);
@@ -1525,6 +1620,7 @@ export default function MeetingCanvasTab({
         updated_by: userId,
         updated_at: new Date().toISOString(),
         stage: snapshot.stage,
+        agenda_overrides: snapshot.agenda_overrides,
         problem_groups: snapshot.problem_groups,
         solution_topics: snapshot.solution_topics,
         node_positions: snapshot.node_positions,
@@ -1532,12 +1628,11 @@ export default function MeetingCanvasTab({
       });
     },
     [
-      analysisState,
-      importOverrideActive,
-      importedState,
+      agendaOverrides,
       meetingId,
       nodePositions,
       onSharedCanvasSync,
+      persistedSharedImportedState,
       problemGroups,
       solutionTopics,
       stage,
@@ -1738,15 +1833,17 @@ export default function MeetingCanvasTab({
     const nextSolutionTopicsPayload = buildWorkspaceSolutionTopicsPayload(solutionTopics);
     const nextSignatures = buildWorkspaceFieldSignatures({
       stage,
+      agendaOverrides,
       problemGroups,
       solutionTopics,
       nodePositions,
-      importedState,
+      importedState: persistedSharedImportedState,
     });
     const previousSignatures = lastWorkspaceFieldSignaturesRef.current;
     const patch: {
       meeting_id: string;
       stage?: CanvasStage;
+      agenda_overrides?: ReturnType<typeof serializeAgendaOverrides>;
       problem_groups?: ReturnType<typeof buildWorkspaceProblemGroupsPayload>;
       solution_topics?: ReturnType<typeof buildWorkspaceSolutionTopicsPayload>;
       node_positions?: CanvasNodePositionsByStage;
@@ -1758,6 +1855,10 @@ export default function MeetingCanvasTab({
     let hasChanges = false;
     if (nextSignatures.stage !== previousSignatures.stage) {
       patch.stage = stage;
+      hasChanges = true;
+    }
+    if (nextSignatures.agenda_overrides !== previousSignatures.agenda_overrides) {
+      patch.agenda_overrides = serializeAgendaOverrides(agendaOverrides);
       hasChanges = true;
     }
     if (nextSignatures.problem_groups !== previousSignatures.problem_groups) {
@@ -1773,7 +1874,7 @@ export default function MeetingCanvasTab({
       hasChanges = true;
     }
     if (nextSignatures.imported_state !== previousSignatures.imported_state) {
-      patch.imported_state = importedState;
+      patch.imported_state = persistedSharedImportedState;
       hasChanges = true;
     }
 
@@ -1790,8 +1891,8 @@ export default function MeetingCanvasTab({
         .then(() => {
           lastWorkspaceFieldSignaturesRef.current = nextSignatures;
         })
-        .catch(() => {
-          // 저장 실패는 작업 흐름을 끊지 않고 다음 변경 시 다시 시도한다.
+        .catch((error) => {
+          console.error("Failed to save canvas workspace patch:", error);
         });
     }, 450);
 
@@ -1802,10 +1903,11 @@ export default function MeetingCanvasTab({
       }
     };
   }, [
+    agendaOverrides,
     conclusionBatchBusy,
-    importedState,
     meetingId,
     nodePositions,
+    persistedSharedImportedState,
     problemDefinitionStagePending,
     problemGroups,
     sharedSyncEnabled,
@@ -1813,6 +1915,35 @@ export default function MeetingCanvasTab({
     solutionTopics,
     stage,
   ]);
+
+  const localCanvasState = useMemo<CanvasLocalState>(
+    () =>
+      sharedSyncEnabled
+        ? {
+            shared_sync_enabled: true,
+            agenda_overrides: serializeAgendaOverrides(agendaOverrides),
+          }
+        : {
+            shared_sync_enabled: false,
+            agenda_overrides: serializeAgendaOverrides(agendaOverrides),
+            stage,
+            problem_groups: serializeSharedProblemGroups(problemGroups),
+            solution_topics: serializeSharedSolutionTopics(solutionTopics),
+            node_positions: nodePositions,
+            imported_state: persistedSharedImportedState,
+            import_override_active: importOverrideActive,
+          },
+    [
+      agendaOverrides,
+      importOverrideActive,
+      nodePositions,
+      persistedSharedImportedState,
+      problemGroups,
+      sharedSyncEnabled,
+      solutionTopics,
+      stage,
+    ],
+  );
 
   useEffect(() => {
     if (!meetingId || !userId || !workspaceLoadedRef.current || workspaceHydratingRef.current) {
@@ -1834,8 +1965,9 @@ export default function MeetingCanvasTab({
           title: note.title,
           body: note.body,
         })),
-      }).catch(() => {
-        // 개인 메모 저장 실패는 다음 변경 시 다시 시도한다.
+        local_canvas_state: localCanvasState,
+      }).catch((error) => {
+        console.error("Failed to save canvas personal notes:", error);
       });
     }, 300);
 
@@ -1845,24 +1977,93 @@ export default function MeetingCanvasTab({
         personalNotesSaveTimerRef.current = null;
       }
     };
-  }, [meetingId, personalNotes, userId]);
+  }, [localCanvasState, meetingId, personalNotes, userId]);
 
   const sharedCanvasSnapshot = useMemo(
     () => ({
       stage,
+      agenda_overrides: serializeAgendaOverrides(agendaOverrides),
       problem_groups: serializeSharedProblemGroups(problemGroups),
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
       node_positions: nodePositions,
-      imported_state:
-        importOverrideActive && importedState ? importedState : analysisState ?? importedState,
+      imported_state: persistedSharedImportedState,
     }),
-    [analysisState, importOverrideActive, importedState, nodePositions, problemGroups, solutionTopics, stage],
+    [agendaOverrides, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
   );
 
   const sharedCanvasSignature = useMemo(
     () => buildSharedCanvasSignature(sharedCanvasSnapshot),
     [sharedCanvasSnapshot],
   );
+
+  const currentWorkspacePatch = useMemo(() => {
+    if (
+      !meetingId ||
+      !sharedSyncEnabled ||
+      !workspaceLoadedRef.current ||
+      workspaceHydratingRef.current
+    ) {
+      return null;
+    }
+
+    const nextProblemGroupsPayload = buildWorkspaceProblemGroupsPayload(problemGroups);
+    const nextSolutionTopicsPayload = buildWorkspaceSolutionTopicsPayload(solutionTopics);
+    const nextSignatures = buildWorkspaceFieldSignatures({
+      stage,
+      agendaOverrides,
+      problemGroups,
+      solutionTopics,
+      nodePositions,
+      importedState: persistedSharedImportedState,
+    });
+    const previousSignatures = lastWorkspaceFieldSignaturesRef.current;
+    const patch: {
+      meeting_id: string;
+      stage?: CanvasStage;
+      agenda_overrides?: ReturnType<typeof serializeAgendaOverrides>;
+      problem_groups?: ReturnType<typeof buildWorkspaceProblemGroupsPayload>;
+      solution_topics?: ReturnType<typeof buildWorkspaceSolutionTopicsPayload>;
+      node_positions?: CanvasNodePositionsByStage;
+      imported_state?: MeetingState | null;
+    } = {
+      meeting_id: meetingId,
+    };
+
+    let hasChanges = false;
+    if (nextSignatures.stage !== previousSignatures.stage) {
+      patch.stage = stage;
+      hasChanges = true;
+    }
+    if (nextSignatures.agenda_overrides !== previousSignatures.agenda_overrides) {
+      patch.agenda_overrides = serializeAgendaOverrides(agendaOverrides);
+      hasChanges = true;
+    }
+    if (nextSignatures.problem_groups !== previousSignatures.problem_groups) {
+      patch.problem_groups = nextProblemGroupsPayload;
+      hasChanges = true;
+    }
+    if (nextSignatures.solution_topics !== previousSignatures.solution_topics) {
+      patch.solution_topics = nextSolutionTopicsPayload;
+      hasChanges = true;
+    }
+    if (nextSignatures.node_positions !== previousSignatures.node_positions) {
+      patch.node_positions = nodePositions;
+      hasChanges = true;
+    }
+    if (nextSignatures.imported_state !== previousSignatures.imported_state) {
+      patch.imported_state = persistedSharedImportedState;
+      hasChanges = true;
+    }
+
+    return hasChanges ? patch : null;
+  }, [agendaOverrides, meetingId, nodePositions, persistedSharedImportedState, problemGroups, sharedSyncEnabled, solutionTopics, stage]);
+
+  const currentPersonalNotesPayload = useMemo(() => {
+    if (!meetingId || !userId || !workspaceLoadedRef.current || workspaceHydratingRef.current) {
+      return null;
+    }
+    return buildCanvasPersonalNotesPayload(meetingId, userId, personalNotes);
+  }, [meetingId, personalNotes, userId]);
 
   useEffect(() => {
     if (!incomingSharedCanvasSync || incomingSharedCanvasSync.meeting_id !== meetingId) {
@@ -1885,6 +2086,7 @@ export default function MeetingCanvasTab({
         : "ideation";
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       stage: incomingStage,
+      agenda_overrides: incomingSharedCanvasSync.agenda_overrides || {},
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
       solution_topics: serializeSharedSolutionTopics(
         hydrateSolutionTopics(
@@ -1906,6 +2108,7 @@ export default function MeetingCanvasTab({
 
     setProblemGroups(nextProblemGroups);
     setSolutionTopics(nextSolutionTopics);
+    setAgendaOverrides(incomingSharedCanvasSync.agenda_overrides || {});
     setNodePositions((prev) =>
       sharedSyncEnabled
         ? incomingSharedCanvasSync.node_positions || {}
@@ -1917,7 +2120,7 @@ export default function MeetingCanvasTab({
     );
     setImportedState(incomingSharedCanvasSync.imported_state || null);
     if (incomingSharedCanvasSync.imported_state) {
-      analysisSignatureAtImportRef.current = analysisStateSignature;
+      analysisSignatureAtImportRef.current = buildMeetingStateSignature(incomingSharedCanvasSync.imported_state);
       setImportOverrideActive(true);
     } else {
       analysisSignatureAtImportRef.current = "";
@@ -1926,6 +2129,7 @@ export default function MeetingCanvasTab({
     setStage(incomingStage);
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
       stage: incomingStage,
+      agendaOverrides: incomingSharedCanvasSync.agenda_overrides || {},
       problemGroups: nextProblemGroups,
       solutionTopics: nextSolutionTopics,
       nodePositions: incomingSharedCanvasSync.node_positions || {},
@@ -1953,6 +2157,22 @@ export default function MeetingCanvasTab({
       applyingRemoteSharedSyncRef.current = false;
     }, 0);
   }, [analysisStateSignature, incomingSharedCanvasSync, meetingId, problemGroups, sharedSyncEnabled, solutionTopics, userId]);
+
+  useEffect(() => {
+    const flushPendingCanvasState = () => {
+      if (currentWorkspacePatch) {
+        flushCanvasWorkspacePatch(currentWorkspacePatch);
+      }
+      if (currentPersonalNotesPayload) {
+        flushCanvasPersonalNotes(currentPersonalNotesPayload);
+      }
+    };
+
+    window.addEventListener("pagehide", flushPendingCanvasState);
+    return () => {
+      window.removeEventListener("pagehide", flushPendingCanvasState);
+    };
+  }, [currentPersonalNotesPayload, currentWorkspacePatch]);
 
   useEffect(() => {
     if (
@@ -1983,6 +2203,7 @@ export default function MeetingCanvasTab({
         updated_by: userId,
         updated_at: new Date().toISOString(),
         stage: sharedCanvasSnapshot.stage,
+        agenda_overrides: sharedCanvasSnapshot.agenda_overrides,
         problem_groups: sharedCanvasSnapshot.problem_groups,
         solution_topics: sharedCanvasSnapshot.solution_topics,
         node_positions: sharedCanvasSnapshot.node_positions,
@@ -1997,6 +2218,20 @@ export default function MeetingCanvasTab({
       }
     };
   }, [meetingId, onSharedCanvasSync, sharedCanvasSignature, sharedCanvasSnapshot, sharedSyncEnabled, userId]);
+
+  useEffect(() => {
+    if (
+      !incomingCanvasStateRequestId ||
+      !sharedSyncEnabled ||
+      !workspaceLoadedRef.current ||
+      workspaceHydratingRef.current ||
+      applyingRemoteSharedSyncRef.current
+    ) {
+      return;
+    }
+
+    forceBroadcastSharedCanvas();
+  }, [forceBroadcastSharedCanvas, incomingCanvasStateRequestId, sharedSyncEnabled]);
 
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
@@ -2175,26 +2410,23 @@ export default function MeetingCanvasTab({
   }, [stage, agendaModels, dropProblemGroupId, loadingProblemGroupIds, nodePositions, problemGroups, selectedProblemGroupId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
+    if (!workspaceLoadedRef.current || workspaceHydratingRef.current) {
+      return;
+    }
+
     const stageKey = stage;
     setNodePositions((prev) => {
       const currentStagePositions = prev[stageKey] || {};
-      let changed = false;
-      const nextStagePositions = { ...currentStagePositions };
+      const validNodeIds = new Set(graphBlueprint.nodeDescriptors.map((descriptor) => descriptor.id));
+      const nextStageEntries = Object.entries(currentStagePositions).filter(([nodeId]) => validNodeIds.has(nodeId));
 
-      graphBlueprint.nodeDescriptors.forEach((descriptor) => {
-        if (!nextStagePositions[descriptor.id]) {
-          nextStagePositions[descriptor.id] = descriptor.position;
-          changed = true;
-        }
-      });
-
-      if (!changed) {
+      if (nextStageEntries.length === Object.keys(currentStagePositions).length) {
         return prev;
       }
 
       return {
         ...prev,
-        [stageKey]: nextStagePositions,
+        [stageKey]: Object.fromEntries(nextStageEntries),
       };
     });
   }, [graphBlueprint.layoutSignature, graphBlueprint.nodeDescriptors, stage]);
@@ -2600,7 +2832,10 @@ export default function MeetingCanvasTab({
   };
 
   const onNodesChange = (changes: NodeChange[]) => {
-    let nextPositionsSnapshot: CanvasNodePositionsByStage | null = null;
+    if (!workspaceLoadedRef.current || workspaceHydratingRef.current || applyingRemoteSharedSyncRef.current) {
+      setNodes((current) => applyNodeChanges(changes, current));
+      return;
+    }
 
     setNodes((current) => applyNodeChanges(changes, current));
     setNodePositions((prev) => {
@@ -2608,11 +2843,6 @@ export default function MeetingCanvasTab({
       let changed = false;
 
       changes.forEach((change) => {
-        if (change.type === "position" && change.position) {
-          stagePositions[change.id] = change.position;
-          changed = true;
-          return;
-        }
         if (change.type === "remove" && stagePositions[change.id]) {
           delete stagePositions[change.id];
           changed = true;
@@ -2625,29 +2855,24 @@ export default function MeetingCanvasTab({
 
       if (!sharedSyncEnabled) {
         changes.forEach((change) => {
-          if (change.type === "position" && change.position) {
-            localNodeOverridesRef.current[stage].add(change.id);
-          }
           if (change.type === "remove") {
             localNodeOverridesRef.current[stage].delete(change.id);
           }
         });
       }
 
-      nextPositionsSnapshot = {
+      return {
         ...prev,
         [stage]: stagePositions,
       };
-
-      return nextPositionsSnapshot;
     });
-
-    if (sharedSyncEnabled && nextPositionsSnapshot) {
-      forceBroadcastSharedCanvas({ nodePositions: nextPositionsSnapshot });
-    }
   };
 
   const onNodeDragStop = (_event: React.MouseEvent, node: Node) => {
+    if (!workspaceLoadedRef.current || workspaceHydratingRef.current || applyingRemoteSharedSyncRef.current) {
+      return;
+    }
+
     let nextPositionsSnapshot: CanvasNodePositionsByStage | null = null;
 
     setNodePositions((prev) => {
@@ -2681,6 +2906,16 @@ export default function MeetingCanvasTab({
 
     if (sharedSyncEnabled && nextPositionsSnapshot) {
       forceBroadcastSharedCanvas({ nodePositions: nextPositionsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          stage,
+          node_positions: nextPositionsSnapshot,
+          imported_state: persistedSharedImportedState,
+        }).catch((error) => {
+          console.error("Failed to save shared node positions:", error);
+        });
+      }
     }
   };
 
@@ -2740,21 +2975,36 @@ export default function MeetingCanvasTab({
       .map((item) => item.trim())
       .filter(Boolean);
 
-    setAgendaOverrides((prev) => ({
-      ...prev,
-      [selectedAgenda.id]: {
-        title: nextTitle,
-        keywords: nextKeywords,
-        summaryBullets:
-          nextSummaryBullets.length > 0
-            ? nextSummaryBullets
-            : selectedAgenda.summaryBullets,
-      },
-    }));
+    let nextAgendaOverridesSnapshot: Record<string, AgendaOverride> | null = null;
+    setAgendaOverrides((prev) => {
+      nextAgendaOverridesSnapshot = {
+        ...prev,
+        [selectedAgenda.id]: {
+          title: nextTitle,
+          keywords: nextKeywords,
+          summaryBullets:
+            nextSummaryBullets.length > 0
+              ? nextSummaryBullets
+              : selectedAgenda.summaryBullets,
+        },
+      };
+      return nextAgendaOverridesSnapshot;
+    });
     setEditingAgendaId("");
     setAgendaDraftTitle("");
     setAgendaDraftKeywords("");
     setAgendaDraftSummary("");
+    if (sharedSyncEnabled && nextAgendaOverridesSnapshot) {
+      forceBroadcastSharedCanvas({ agendaOverrides: nextAgendaOverridesSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          agenda_overrides: serializeAgendaOverrides(nextAgendaOverridesSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared agenda overrides:", error);
+        });
+      }
+    }
     setActivityMessage("안건 메모 내용을 수정했습니다.");
   };
 
@@ -3143,13 +3393,26 @@ export default function MeetingCanvasTab({
                         setEditingProblemGroupId("");
                         setEditingSolutionTopicId("");
                         setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
+                        analysisSignatureAtImportRef.current = buildMeetingStateSignature(result.state);
                         if (sharedSyncEnabled) {
                           forceBroadcastSharedCanvas({
                             stage: "ideation",
+                            agendaOverrides: {},
                             problemGroups: [],
                             solutionTopics: [],
                             nodePositions: {},
                             importedState: result.state,
+                          });
+                          void saveCanvasWorkspacePatch({
+                            meeting_id: meetingId,
+                            stage: "ideation",
+                            agenda_overrides: {},
+                            problem_groups: [],
+                            solution_topics: [],
+                            node_positions: {},
+                            imported_state: result.state,
+                          }).catch((error) => {
+                            console.error("Failed to save imported canvas snapshot:", error);
                           });
                         }
                       });

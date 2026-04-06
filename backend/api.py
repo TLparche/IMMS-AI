@@ -364,6 +364,7 @@ def _handle_runtime_db_exception(table_name: str, action: str, exc: Exception) -
 def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
     return {
         "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -385,6 +386,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
     return {
         "meeting_id": _safe_text(meeting_id),
         "stage": _normalize_canvas_stage(shared_state.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(shared_state.get("agenda_overrides")),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
         "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
@@ -473,10 +475,64 @@ def _normalize_canvas_workspace_solution_topics(
     ]
 
 
+def _normalize_canvas_agenda_overrides(
+    overrides: Any,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    if not isinstance(overrides, dict):
+        return normalized
+
+    for raw_agenda_id, raw_override in overrides.items():
+        agenda_id = _safe_text(raw_agenda_id)
+        if not agenda_id or not isinstance(raw_override, dict):
+            continue
+
+        title = _safe_text(raw_override.get("title"))
+        keywords = [_safe_text(item) for item in (raw_override.get("keywords") or []) if _safe_text(item)]
+        summary_bullets = [
+            _safe_text(item) for item in (raw_override.get("summaryBullets") or []) if _safe_text(item)
+        ]
+
+        if title or keywords or summary_bullets:
+            normalized[agenda_id] = {
+                "title": title,
+                "keywords": keywords,
+                "summaryBullets": summary_bullets,
+            }
+
+    return normalized
+
+
+def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    shared_sync_enabled = _boolify(payload.get("shared_sync_enabled"), True)
+    normalized: dict[str, Any] = {
+        "shared_sync_enabled": shared_sync_enabled,
+        "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
+    }
+
+    if not shared_sync_enabled:
+        normalized["stage"] = _normalize_canvas_stage(payload.get("stage"))
+        normalized["problem_groups"] = copy.deepcopy(payload.get("problem_groups") or [])
+        normalized["solution_topics"] = copy.deepcopy(payload.get("solution_topics") or [])
+        normalized["node_positions"] = _normalize_canvas_node_positions(payload.get("node_positions") or {})
+        normalized["imported_state"] = (
+            copy.deepcopy(payload.get("imported_state"))
+            if isinstance(payload.get("imported_state"), dict)
+            else None
+        )
+        normalized["import_override_active"] = bool(payload.get("import_override_active"))
+
+    return normalized
+
+
 def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], saved_at: str) -> dict[str, Any]:
     return {
         "meeting_id": _safe_text(meeting_id),
         "stage": _normalize_canvas_stage(source.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
@@ -495,6 +551,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "meeting_id": _safe_text(workspace.get("meeting_id")),
         "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -559,7 +616,10 @@ def _save_canvas_workspace_to_db(meeting_id: str, workspace: dict[str, Any]) -> 
         return False
 
 
-def _load_canvas_personal_notes_from_db(meeting_id: str, user_id: str) -> list[dict[str, Any]] | None:
+def _load_canvas_personal_notes_from_db(
+    meeting_id: str,
+    user_id: str,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     client = _get_supabase_service_client()
     normalized_meeting_id = _safe_text(meeting_id)
     normalized_user_id = _safe_text(user_id)
@@ -589,17 +649,24 @@ def _load_canvas_personal_notes_from_db(meeting_id: str, user_id: str) -> list[d
             personal_state = {}
         notes = personal_state.get("personal_notes")
         if not isinstance(notes, list):
-            return []
-        return copy.deepcopy([item for item in notes if isinstance(item, dict)])
+            notes = []
+        local_canvas_state = personal_state.get("local_canvas_state")
+        if not isinstance(local_canvas_state, dict):
+            local_canvas_state = None
+        return (
+            copy.deepcopy([item for item in notes if isinstance(item, dict)]),
+            copy.deepcopy(local_canvas_state) if isinstance(local_canvas_state, dict) else None,
+        )
     except Exception as exc:
         _handle_runtime_db_exception(RUNTIME_USER_STATE_TABLE, "load", exc)
-        return None
+        return None, None
 
 
 def _save_canvas_personal_notes_to_db(
     meeting_id: str,
     user_id: str,
     personal_notes: list[dict[str, Any]],
+    local_canvas_state: dict[str, Any] | None = None,
 ) -> bool:
     client = _get_supabase_service_client()
     normalized_meeting_id = _safe_text(meeting_id)
@@ -615,7 +682,12 @@ def _save_canvas_personal_notes_to_db(
                 {
                     "meeting_id": normalized_meeting_id,
                     "user_id": normalized_user_id,
-                    "personal_state": {"personal_notes": copy.deepcopy(personal_notes or [])},
+                    "personal_state": {
+                        "personal_notes": copy.deepcopy(personal_notes or []),
+                        "local_canvas_state": copy.deepcopy(local_canvas_state)
+                        if isinstance(local_canvas_state, dict)
+                        else {},
+                    },
                     "updated_at": _utc_iso_now(),
                 },
                 on_conflict="meeting_id,user_id",
@@ -679,6 +751,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
         workspace = {}
     workspace.setdefault("meeting_id", normalized_meeting_id)
     workspace.setdefault("stage", "ideation")
+    workspace.setdefault("agenda_overrides", {})
     workspace.setdefault("problem_groups", [])
     workspace.setdefault("solution_topics", [])
     workspace.setdefault("node_positions", {})
@@ -1398,6 +1471,7 @@ class CanvasWorkspaceSolutionTopicInput(BaseModel):
 class CanvasWorkspaceStateInput(BaseModel):
     meeting_id: str = ""
     stage: str = "ideation"
+    agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
@@ -1407,6 +1481,7 @@ class CanvasWorkspaceStateInput(BaseModel):
 class CanvasWorkspacePatchInput(BaseModel):
     meeting_id: str = ""
     stage: str | None = None
+    agenda_overrides: dict[str, dict[str, Any]] | None = None
     problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
@@ -1417,6 +1492,7 @@ class CanvasPersonalNotesStateInput(BaseModel):
     meeting_id: str = ""
     user_id: str = ""
     personal_notes: list[CanvasPersonalNoteInput] = Field(default_factory=list)
+    local_canvas_state: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1462,6 +1538,7 @@ class RuntimeStore:
     canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_personal_notes_by_meeting_user: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    canvas_local_state_by_meeting_user: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.meeting_goal = ""
@@ -1501,6 +1578,7 @@ class RuntimeStore:
         self.canvas_workspace_by_meeting = {}
         self.canvas_llm_inflight_by_meeting = {}
         self.canvas_personal_notes_by_meeting_user = {}
+        self.canvas_local_state_by_meeting_user = {}
 
 
 @dataclass
@@ -2676,6 +2754,75 @@ def _extract_actions_from_turns(turns: list[dict[str, Any]], max_items: int = 10
     return out
 
 
+def _agenda_turn_overlap_ratio(
+    left_start: int,
+    left_end: int,
+    right_start: int,
+    right_end: int,
+) -> float:
+    if left_start <= 0 or left_end < left_start or right_start <= 0 or right_end < right_start:
+        return 0.0
+    overlap = min(left_end, right_end) - max(left_start, right_start) + 1
+    if overlap <= 0:
+        return 0.0
+    base = max(1, min(left_end - left_start + 1, right_end - right_start + 1))
+    return float(overlap) / float(base)
+
+
+def _reuse_previous_agenda_ids(
+    previous_outcomes: list[dict[str, Any]],
+    cleaned_outcomes: list[dict[str, Any]],
+) -> list[str]:
+    assigned_ids: list[str] = []
+    used_prev_indexes: set[int] = set()
+
+    for row_idx, row in enumerate(cleaned_outcomes):
+        row_title = _safe_text(row.get("agenda_title"))
+        row_start = int(row.get("_start_turn_id") or 0)
+        row_end = int(row.get("_end_turn_id") or 0)
+        best_prev_idx = -1
+        best_score = 0.0
+
+        for prev_idx, prev in enumerate(previous_outcomes):
+            if prev_idx in used_prev_indexes:
+                continue
+
+            prev_id = _safe_text(prev.get("agenda_id"))
+            if not prev_id:
+                continue
+
+            prev_title = _safe_text(prev.get("agenda_title"))
+            prev_start = int(prev.get("start_turn_id") or 0)
+            prev_end = int(prev.get("end_turn_id") or 0)
+            title_score = 1.0 if row_title and row_title == prev_title else _text_similarity(row_title, prev_title)
+            overlap_score = _agenda_turn_overlap_ratio(row_start, row_end, prev_start, prev_end)
+            order_bonus = max(0.0, 0.25 - abs(prev_idx - row_idx) * 0.08)
+            score = (title_score * 0.65) + (overlap_score * 0.85) + order_bonus
+
+            if score > best_score:
+                best_score = score
+                best_prev_idx = prev_idx
+
+        if best_prev_idx >= 0 and best_score >= 0.45:
+            used_prev_indexes.add(best_prev_idx)
+            assigned_ids.append(_safe_text(previous_outcomes[best_prev_idx].get("agenda_id")))
+        else:
+            assigned_ids.append("")
+
+    return assigned_ids
+
+
+def _max_agenda_sequence(agenda_rows: list[dict[str, Any]]) -> int:
+    max_seq = 0
+    for row in agenda_rows:
+        agenda_id = _safe_text(row.get("agenda_id"))
+        match = re.match(r"^agenda-(\d+)$", agenda_id)
+        if not match:
+            continue
+        max_seq = max(max_seq, int(match.group(1)))
+    return max_seq
+
+
 def _dedup_preserve(items: list[str], limit: int = 10) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -3186,10 +3333,16 @@ def _apply_outcomes(rt: RuntimeStore, outcomes: list[dict[str, Any]]) -> None:
         else:
             row["agenda_state"] = _normalize_agenda_state(row.get("agenda_state"))
 
+    previous_outcomes = [copy.deepcopy(item) for item in rt.agenda_outcomes if isinstance(item, dict)]
+    reused_agenda_ids = _reuse_previous_agenda_ids(previous_outcomes, cleaned)
+
     rt.agenda_outcomes = []
     rt.agenda_seq = 0
-    for row in cleaned:
+    for row_idx, row in enumerate(cleaned):
         created = _create_agenda(rt, _safe_text(row.get("agenda_title"), "안건 제목 미정"), _normalize_agenda_state(row.get("agenda_state")))
+        reused_agenda_id = _safe_text(reused_agenda_ids[row_idx] if row_idx < len(reused_agenda_ids) else "")
+        if reused_agenda_id:
+            created["agenda_id"] = reused_agenda_id
         created["flow_type"] = _safe_text(row.get("flow_type"))
         created["key_utterances"] = _dedup_preserve(list(row.get("key_utterances") or []), limit=20)
         created["_summary_items"] = _dedup_preserve(list(row.get("_summary_items") or []), limit=20)
@@ -3201,6 +3354,7 @@ def _apply_outcomes(rt: RuntimeStore, outcomes: list[dict[str, Any]]) -> None:
         created["action_items"] = list(row.get("action_items") or [])
         created["start_turn_id"] = int(row.get("_start_turn_id") or 0)
         created["end_turn_id"] = int(row.get("_end_turn_id") or 0)
+    rt.agenda_seq = max(rt.agenda_seq, _max_agenda_sequence(rt.agenda_outcomes))
 
 
 def _to_ids(raw_ids: Any) -> list[int]:
@@ -4645,6 +4799,7 @@ def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> Non
     canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
     canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
     canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
+    canvas_local_state_by_meeting_user = copy.deepcopy(rt.canvas_local_state_by_meeting_user)
 
     rt.reset()
     rt.llm_enabled = llm_enabled
@@ -4658,6 +4813,7 @@ def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> Non
     rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
     rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
     rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
+    rt.canvas_local_state_by_meeting_user = canvas_local_state_by_meeting_user
 
 
 def _persist_imported_transcripts_to_db(
@@ -5577,17 +5733,25 @@ def get_canvas_personal_notes(meeting_id: str, user_id: str):
     if not normalized_user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
 
-    loaded_notes = _load_canvas_personal_notes_from_db(normalized_meeting_id, normalized_user_id)
+    loaded_notes, loaded_local_state = _load_canvas_personal_notes_from_db(
+        normalized_meeting_id,
+        normalized_user_id,
+    )
     with RT.lock:
         meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_local_state = RT.canvas_local_state_by_meeting_user.setdefault(normalized_meeting_id, {})
         if loaded_notes is not None:
             meeting_notes[normalized_user_id] = copy.deepcopy(loaded_notes)
+        if loaded_local_state is not None:
+            meeting_local_state[normalized_user_id] = copy.deepcopy(loaded_local_state)
         personal_notes = copy.deepcopy(meeting_notes.get(normalized_user_id) or [])
+        local_canvas_state = copy.deepcopy(meeting_local_state.get(normalized_user_id) or {})
         return {
             "ok": True,
             "meeting_id": normalized_meeting_id,
             "user_id": normalized_user_id,
             "personal_notes": personal_notes,
+            "local_canvas_state": local_canvas_state,
             "saved_at": _safe_text((RT.canvas_workspace_by_meeting.get(normalized_meeting_id) or {}).get("saved_at")),
         }
 
@@ -5613,18 +5777,27 @@ def post_canvas_personal_notes(payload: CanvasPersonalNotesStateInput):
         for note in (payload.personal_notes or [])
         if _safe_text(note.id) or _safe_text(note.title) or _safe_text(note.body)
     ]
+    normalized_local_canvas_state = _normalize_canvas_local_state(payload.local_canvas_state)
 
     with RT.lock:
         meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_local_state = RT.canvas_local_state_by_meeting_user.setdefault(normalized_meeting_id, {})
         meeting_notes[normalized_user_id] = copy.deepcopy(normalized_notes)
+        meeting_local_state[normalized_user_id] = copy.deepcopy(normalized_local_canvas_state)
 
-    _save_canvas_personal_notes_to_db(normalized_meeting_id, normalized_user_id, normalized_notes)
+    _save_canvas_personal_notes_to_db(
+        normalized_meeting_id,
+        normalized_user_id,
+        normalized_notes,
+        normalized_local_canvas_state,
+    )
 
     return {
         "ok": True,
         "meeting_id": normalized_meeting_id,
         "user_id": normalized_user_id,
         "personal_notes": copy.deepcopy(normalized_notes),
+        "local_canvas_state": copy.deepcopy(normalized_local_canvas_state),
         "saved_at": saved_at,
     }
 
@@ -5649,6 +5822,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
     workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
     workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
     workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
     workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
@@ -5676,6 +5850,8 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
 
     if "stage" in provided_fields:
         workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    if "agenda_overrides" in provided_fields:
+        workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
     if "problem_groups" in provided_fields:
         workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     if "solution_topics" in provided_fields:
