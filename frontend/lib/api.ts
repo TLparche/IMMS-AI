@@ -256,6 +256,8 @@ export function flushCanvasWorkspacePatch(payload: CanvasWorkspacePatchRequest):
       headers: JSON_HEADERS,
       body,
       keepalive: true,
+    }).catch(() => {
+      // unload 직전 네트워크 오류는 사용자 콘솔에 노출하지 않는다.
     });
   } catch {
     // unload 직전 실패는 다음 세션에서 다시 저장된다.

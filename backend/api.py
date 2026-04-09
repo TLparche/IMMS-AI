@@ -5074,6 +5074,40 @@ def _normalize_canvas_node_positions(
     return normalized
 
 
+def _summarize_canvas_node_positions_for_debug(
+    payload: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "ideation": 0,
+            "problem_definition": 0,
+            "solution": 0,
+            "sample_ideation": [],
+        }
+
+    ideation = payload.get("ideation") if isinstance(payload.get("ideation"), dict) else {}
+    problem_definition = (
+        payload.get("problem-definition")
+        if isinstance(payload.get("problem-definition"), dict)
+        else {}
+    )
+    solution = payload.get("solution") if isinstance(payload.get("solution"), dict) else {}
+    top_ideation_nodes = sorted(
+        ideation.items(),
+        key=lambda item: (
+            float(item[1].get("y", 0) or 0) if isinstance(item[1], dict) else 0.0,
+            float(item[1].get("x", 0) or 0) if isinstance(item[1], dict) else 0.0,
+        ),
+    )[:4]
+
+    return {
+        "ideation": len(ideation),
+        "problem_definition": len(problem_definition),
+        "solution": len(solution),
+        "top_ideation_nodes": top_ideation_nodes,
+    }
+
+
 app = FastAPI(title="Meeting STT + Agenda MVP")
 app.add_middleware(
     CORSMiddleware,
@@ -5859,6 +5893,15 @@ def get_canvas_workspace_state(meeting_id: str):
         raise HTTPException(status_code=400, detail="meeting_id is required")
 
     saved = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    print(
+        "[canvas workspace GET]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "stage": _safe_text(saved.get("stage")),
+            "canvas_items": len(saved.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(saved.get("node_positions")),
+        },
+    )
     return _canvas_workspace_response(saved)
 
 
@@ -5884,6 +5927,15 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 
     _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    print(
+        "[canvas workspace PUT]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "stage": _safe_text(workspace.get("stage")),
+            "canvas_items": len(workspace.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
+        },
+    )
 
     return _canvas_workspace_response(workspace)
 
@@ -5920,6 +5972,16 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 
     _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    print(
+        "[canvas workspace PATCH]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "fields": sorted(list(provided_fields)),
+            "stage": _safe_text(workspace.get("stage")),
+            "canvas_items": len(workspace.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
+        },
+    )
     return _canvas_workspace_response(workspace)
 
 
