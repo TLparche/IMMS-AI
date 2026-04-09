@@ -735,7 +735,7 @@ function HomeContent() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-gray-50">
+    <div className="flex h-screen flex-col overflow-hidden bg-gray-50">
       <header ref={headerRef} className="bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -791,9 +791,9 @@ function HomeContent() {
         </div>
       </header>
 
-      <main className={activeTab === "canvas" ? "flex-1 min-h-0 overflow-y-auto p-0 xl:overflow-hidden" : "max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8"}>
+      <main className={activeTab === "canvas" ? "flex-1 min-h-0 overflow-hidden p-0" : "max-w-7xl mx-auto w-full flex-1 overflow-y-auto px-4 py-8 sm:px-6 lg:px-8"}>
         {activeTab === "canvas" ? (
-          <div style={{ minHeight: canvasViewportHeight ?? 520, height: canvasViewportHeight ?? undefined }}>
+          <div className="min-h-0" style={{ height: canvasViewportHeight ?? undefined }}>
             <MeetingCanvasTab
               userId={user.id}
               meetingId={meetingId}
