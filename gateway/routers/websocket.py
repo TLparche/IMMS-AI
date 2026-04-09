@@ -302,6 +302,7 @@ async def websocket_endpoint(
                 'updated_at': datetime.utcnow().isoformat(),
                 'stage': current_workspace.get('stage', 'ideation'),
                 'agenda_overrides': current_workspace.get('agenda_overrides') or {},
+                'canvas_items': current_workspace.get('canvas_items') or [],
                 'problem_groups': current_workspace.get('problem_groups') or [],
                 'solution_topics': current_workspace.get('solution_topics') or [],
                 'node_positions': current_workspace.get('node_positions') or {},

@@ -1,17 +1,22 @@
 export class WebSocketClient {
   private ws: WebSocket | null = null
   private reconnectAttempts = 0
-  private maxReconnectAttempts = 5
   private reconnectDelay = 2000
+  private maxReconnectDelay = 15000
   private shouldReconnect = true
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private meetingId: string
   private userId: string
   private messageHandlers: Map<string, (data: any) => void> = new Map()
+  private connectionStateHandler: ((connected: boolean) => void) | null = null
 
   constructor(meetingId: string, userId: string) {
     this.meetingId = meetingId
     this.userId = userId
+  }
+
+  private emitConnectionState(connected: boolean) {
+    this.connectionStateHandler?.(connected)
   }
 
   connect() {
@@ -35,6 +40,7 @@ export class WebSocketClient {
     this.ws.onopen = () => {
       console.log('✅ WebSocket connected')
       this.reconnectAttempts = 0
+      this.emitConnectionState(true)
     }
 
     this.ws.onmessage = (event) => {
@@ -61,6 +67,7 @@ export class WebSocketClient {
     this.ws.onclose = () => {
       console.log('🔌 WebSocket disconnected')
       this.ws = null
+      this.emitConnectionState(false)
       if (this.shouldReconnect) {
         this.attemptReconnect()
       }
@@ -72,22 +79,27 @@ export class WebSocketClient {
       return
     }
 
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++
-      console.log(`🔄 Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`)
-      this.reconnectTimer = setTimeout(() => {
-        this.reconnectTimer = null
-        if (this.shouldReconnect) {
-          this.connect()
-        }
-      }, this.reconnectDelay)
-    } else {
-      console.error('❌ Max reconnect attempts reached')
+    if (this.reconnectTimer) {
+      return
     }
+
+    this.reconnectAttempts++
+    const delay = Math.min(this.reconnectDelay * 2 ** (this.reconnectAttempts - 1), this.maxReconnectDelay)
+    console.log(`🔄 Reconnecting in ${Math.round(delay / 1000)}s... (attempt ${this.reconnectAttempts})`)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (this.shouldReconnect) {
+        this.connect()
+      }
+    }, delay)
   }
 
   on(eventType: string, handler: (data: any) => void) {
     this.messageHandlers.set(eventType, handler)
+  }
+
+  onConnectionStateChange(handler: (connected: boolean) => void) {
+    this.connectionStateHandler = handler
   }
 
   sendAudioChunk(
@@ -155,6 +167,7 @@ export class WebSocketClient {
       this.ws.close()
       this.ws = null
     }
+    this.emitConnectionState(false)
   }
 
   isConnected(): boolean {

@@ -243,6 +243,17 @@ export interface CanvasProblemConclusionResponse {
   conclusion: string;
 }
 
+export interface CanvasWorkspaceItem {
+  id: string;
+  agenda_id: string;
+  point_id?: string;
+  kind: string;
+  title: string;
+  body: string;
+  x?: number;
+  y?: number;
+}
+
 export interface CanvasWorkspaceProblemGroup {
   group_id: string;
   topic: string;
@@ -286,6 +297,7 @@ export interface CanvasWorkspaceStateResponse {
       summaryBullets?: string[];
     }
   >;
+  canvas_items: CanvasWorkspaceItem[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
   node_positions?: CanvasNodePositionsByStage;
@@ -304,6 +316,7 @@ export interface CanvasWorkspacePatchRequest {
       summaryBullets?: string[];
     }
   >;
+  canvas_items?: CanvasWorkspaceItem[];
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
   node_positions?: CanvasNodePositionsByStage;
@@ -320,6 +333,7 @@ export interface CanvasLocalState {
       summaryBullets?: string[];
     }
   >;
+  canvas_items?: CanvasWorkspaceItem[];
   stage?: "ideation" | "problem-definition" | "solution";
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
@@ -351,6 +365,7 @@ export interface CanvasRealtimeSyncPayload {
       summaryBullets?: string[];
     }
   >;
+  canvas_items: CanvasWorkspaceItem[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
   node_positions: CanvasNodePositionsByStage;

@@ -365,6 +365,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
     return {
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -387,6 +388,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         "meeting_id": _safe_text(meeting_id),
         "stage": _normalize_canvas_stage(shared_state.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(shared_state.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(shared_state.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
         "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
@@ -475,6 +477,38 @@ def _normalize_canvas_workspace_solution_topics(
     ]
 
 
+def _normalize_canvas_workspace_items(
+    items: list[CanvasWorkspaceCanvasItemInput] | None,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+
+    for item in (items or []):
+        item_id = _safe_text(item.id)
+        if not item_id or not (_safe_text(item.title) or _safe_text(item.body)):
+            continue
+
+        payload: dict[str, Any] = {
+            "id": item_id,
+            "agenda_id": _safe_text(item.agenda_id),
+            "point_id": _safe_text(item.point_id),
+            "kind": _safe_text(item.kind, "note"),
+            "title": _safe_text(item.title),
+            "body": _safe_text(item.body),
+        }
+
+        try:
+            if item.x is not None:
+                payload["x"] = float(item.x)
+            if item.y is not None:
+                payload["y"] = float(item.y)
+        except (TypeError, ValueError):
+            pass
+
+        normalized.append(payload)
+
+    return normalized
+
+
 def _normalize_canvas_agenda_overrides(
     overrides: Any,
 ) -> dict[str, dict[str, Any]]:
@@ -511,6 +545,7 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
     normalized: dict[str, Any] = {
         "shared_sync_enabled": shared_sync_enabled,
         "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(payload.get("canvas_items") or []),
     }
 
     if not shared_sync_enabled:
@@ -533,6 +568,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
         "meeting_id": _safe_text(meeting_id),
         "stage": _normalize_canvas_stage(source.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
@@ -552,6 +588,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "meeting_id": _safe_text(workspace.get("meeting_id")),
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -1424,6 +1461,17 @@ class CanvasWorkspaceIdeaInput(BaseModel):
     body: str = ""
 
 
+class CanvasWorkspaceCanvasItemInput(BaseModel):
+    id: str = ""
+    agenda_id: str = ""
+    point_id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+    x: float | None = None
+    y: float | None = None
+
+
 class CanvasPersonalNoteInput(BaseModel):
     id: str = ""
     agenda_id: str = ""
@@ -1472,6 +1520,7 @@ class CanvasWorkspaceStateInput(BaseModel):
     meeting_id: str = ""
     stage: str = "ideation"
     agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
@@ -1482,6 +1531,7 @@ class CanvasWorkspacePatchInput(BaseModel):
     meeting_id: str = ""
     stage: str | None = None
     agenda_overrides: dict[str, dict[str, Any]] | None = None
+    canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
     problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
@@ -5823,6 +5873,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
     workspace["stage"] = _normalize_canvas_stage(payload.stage)
     workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
+    workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
     workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
     workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
@@ -5852,6 +5903,8 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         workspace["stage"] = _normalize_canvas_stage(payload.stage)
     if "agenda_overrides" in provided_fields:
         workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
+    if "canvas_items" in provided_fields:
+        workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
     if "problem_groups" in provided_fields:
         workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     if "solution_topics" in provided_fields:

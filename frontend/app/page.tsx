@@ -318,6 +318,11 @@ function HomeContent() {
 
     const wsClient = new WebSocketClient(meetingId, user.id);
     wsClientRef.current = wsClient;
+    setWsConnected(false);
+
+    wsClient.onConnectionStateChange((connected) => {
+      setWsConnected(connected);
+    });
 
     wsClient.on("transcript", (message: any) => {
       const payload = message?.data ?? message;
@@ -366,7 +371,6 @@ function HomeContent() {
     });
 
     wsClient.connect();
-    setWsConnected(true);
 
     return () => {
       wsClient.disconnect();
