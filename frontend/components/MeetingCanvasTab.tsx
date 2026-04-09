@@ -290,6 +290,7 @@ function buildCanvasPersonalNotesPayload(
   meetingId: string,
   userId: string,
   personalNotes: PersonalNote[],
+  localCanvasState?: CanvasLocalState | null,
 ) {
   return {
     meeting_id: meetingId,
@@ -301,6 +302,7 @@ function buildCanvasPersonalNotesPayload(
       title: note.title,
       body: note.body,
     })),
+    local_canvas_state: localCanvasState || null,
   };
 }
 
@@ -2404,8 +2406,8 @@ export default function MeetingCanvasTab({
     if (!meetingId || !userId || !workspaceLoadedRef.current || workspaceHydratingRef.current) {
       return null;
     }
-    return buildCanvasPersonalNotesPayload(meetingId, userId, personalNotes);
-  }, [meetingId, personalNotes, userId]);
+    return buildCanvasPersonalNotesPayload(meetingId, userId, personalNotes, localCanvasState);
+  }, [localCanvasState, meetingId, personalNotes, userId]);
 
   useEffect(() => {
     latestPersonalNotesPayloadRef.current = currentPersonalNotesPayload;

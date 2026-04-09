@@ -303,6 +303,7 @@ export function flushCanvasPersonalNotes(payload: {
     title: string;
     body: string;
   }>;
+  local_canvas_state?: CanvasLocalState | null;
 }): void {
   const url = apiPath("/api/canvas/personal-notes");
   const body = JSON.stringify(payload);
@@ -324,6 +325,8 @@ export function flushCanvasPersonalNotes(payload: {
       headers: JSON_HEADERS,
       body,
       keepalive: true,
+    }).catch(() => {
+      // unload 직전 네트워크 오류는 사용자 콘솔에 노출하지 않는다.
     });
   } catch {
     // unload 직전 실패는 다음 세션에서 다시 저장된다.
