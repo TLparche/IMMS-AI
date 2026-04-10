@@ -5,15 +5,19 @@ import os
 import platform
 import queue
 import re
+import subprocess
 import tempfile
 import threading
 import time
+import wave
 import importlib.util
 import copy
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 load_dotenv(ROOT / "gateway" / ".env", override=False)
 WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "large")
+PYANNOTE_DIARIZATION_MODEL = os.environ.get("PYANNOTE_DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 SUMMARY_INTERVAL = 4
 SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
@@ -37,6 +42,7 @@ LLM_IO_PREVIEW_MAX = 6000
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
 IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
+AUDIO_IMPORT_ALLOWED_SUFFIXES = {".wav", ".mp3", ".m4a", ".webm"}
 
 _SUPABASE_CLIENT: Client | None = None
 _SUPABASE_CLIENT_INITIALIZED = False
@@ -358,6 +364,8 @@ def _handle_runtime_db_exception(table_name: str, action: str, exc: Exception) -
 def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
     return {
         "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -379,6 +387,8 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
     return {
         "meeting_id": _safe_text(meeting_id),
         "stage": _normalize_canvas_stage(shared_state.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(shared_state.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(shared_state.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
         "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
@@ -467,10 +477,98 @@ def _normalize_canvas_workspace_solution_topics(
     ]
 
 
+def _normalize_canvas_workspace_items(
+    items: list[CanvasWorkspaceCanvasItemInput] | None,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+
+    for item in (items or []):
+        item_id = _safe_text(item.id)
+        if not item_id or not (_safe_text(item.title) or _safe_text(item.body)):
+            continue
+
+        payload: dict[str, Any] = {
+            "id": item_id,
+            "agenda_id": _safe_text(item.agenda_id),
+            "point_id": _safe_text(item.point_id),
+            "kind": _safe_text(item.kind, "note"),
+            "title": _safe_text(item.title),
+            "body": _safe_text(item.body),
+        }
+
+        try:
+            if item.x is not None:
+                payload["x"] = float(item.x)
+            if item.y is not None:
+                payload["y"] = float(item.y)
+        except (TypeError, ValueError):
+            pass
+
+        normalized.append(payload)
+
+    return normalized
+
+
+def _normalize_canvas_agenda_overrides(
+    overrides: Any,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    if not isinstance(overrides, dict):
+        return normalized
+
+    for raw_agenda_id, raw_override in overrides.items():
+        agenda_id = _safe_text(raw_agenda_id)
+        if not agenda_id or not isinstance(raw_override, dict):
+            continue
+
+        title = _safe_text(raw_override.get("title"))
+        keywords = [_safe_text(item) for item in (raw_override.get("keywords") or []) if _safe_text(item)]
+        summary_bullets = [
+            _safe_text(item) for item in (raw_override.get("summaryBullets") or []) if _safe_text(item)
+        ]
+
+        if title or keywords or summary_bullets:
+            normalized[agenda_id] = {
+                "title": title,
+                "keywords": keywords,
+                "summaryBullets": summary_bullets,
+            }
+
+    return normalized
+
+
+def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    shared_sync_enabled = _boolify(payload.get("shared_sync_enabled"), True)
+    normalized: dict[str, Any] = {
+        "shared_sync_enabled": shared_sync_enabled,
+        "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(payload.get("canvas_items") or []),
+    }
+
+    if not shared_sync_enabled:
+        normalized["stage"] = _normalize_canvas_stage(payload.get("stage"))
+        normalized["problem_groups"] = copy.deepcopy(payload.get("problem_groups") or [])
+        normalized["solution_topics"] = copy.deepcopy(payload.get("solution_topics") or [])
+        normalized["node_positions"] = _normalize_canvas_node_positions(payload.get("node_positions") or {})
+        normalized["imported_state"] = (
+            copy.deepcopy(payload.get("imported_state"))
+            if isinstance(payload.get("imported_state"), dict)
+            else None
+        )
+        normalized["import_override_active"] = bool(payload.get("import_override_active"))
+
+    return normalized
+
+
 def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], saved_at: str) -> dict[str, Any]:
     return {
         "meeting_id": _safe_text(meeting_id),
         "stage": _normalize_canvas_stage(source.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
@@ -489,6 +587,8 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "meeting_id": _safe_text(workspace.get("meeting_id")),
         "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -553,7 +653,10 @@ def _save_canvas_workspace_to_db(meeting_id: str, workspace: dict[str, Any]) -> 
         return False
 
 
-def _load_canvas_personal_notes_from_db(meeting_id: str, user_id: str) -> list[dict[str, Any]] | None:
+def _load_canvas_personal_notes_from_db(
+    meeting_id: str,
+    user_id: str,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     client = _get_supabase_service_client()
     normalized_meeting_id = _safe_text(meeting_id)
     normalized_user_id = _safe_text(user_id)
@@ -583,17 +686,24 @@ def _load_canvas_personal_notes_from_db(meeting_id: str, user_id: str) -> list[d
             personal_state = {}
         notes = personal_state.get("personal_notes")
         if not isinstance(notes, list):
-            return []
-        return copy.deepcopy([item for item in notes if isinstance(item, dict)])
+            notes = []
+        local_canvas_state = personal_state.get("local_canvas_state")
+        if not isinstance(local_canvas_state, dict):
+            local_canvas_state = None
+        return (
+            copy.deepcopy([item for item in notes if isinstance(item, dict)]),
+            copy.deepcopy(local_canvas_state) if isinstance(local_canvas_state, dict) else None,
+        )
     except Exception as exc:
         _handle_runtime_db_exception(RUNTIME_USER_STATE_TABLE, "load", exc)
-        return None
+        return None, None
 
 
 def _save_canvas_personal_notes_to_db(
     meeting_id: str,
     user_id: str,
     personal_notes: list[dict[str, Any]],
+    local_canvas_state: dict[str, Any] | None = None,
 ) -> bool:
     client = _get_supabase_service_client()
     normalized_meeting_id = _safe_text(meeting_id)
@@ -609,7 +719,12 @@ def _save_canvas_personal_notes_to_db(
                 {
                     "meeting_id": normalized_meeting_id,
                     "user_id": normalized_user_id,
-                    "personal_state": {"personal_notes": copy.deepcopy(personal_notes or [])},
+                    "personal_state": {
+                        "personal_notes": copy.deepcopy(personal_notes or []),
+                        "local_canvas_state": copy.deepcopy(local_canvas_state)
+                        if isinstance(local_canvas_state, dict)
+                        else {},
+                    },
                     "updated_at": _utc_iso_now(),
                 },
                 on_conflict="meeting_id,user_id",
@@ -673,6 +788,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
         workspace = {}
     workspace.setdefault("meeting_id", normalized_meeting_id)
     workspace.setdefault("stage", "ideation")
+    workspace.setdefault("agenda_overrides", {})
     workspace.setdefault("problem_groups", [])
     workspace.setdefault("solution_topics", [])
     workspace.setdefault("node_positions", {})
@@ -1345,6 +1461,17 @@ class CanvasWorkspaceIdeaInput(BaseModel):
     body: str = ""
 
 
+class CanvasWorkspaceCanvasItemInput(BaseModel):
+    id: str = ""
+    agenda_id: str = ""
+    point_id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+    x: float | None = None
+    y: float | None = None
+
+
 class CanvasPersonalNoteInput(BaseModel):
     id: str = ""
     agenda_id: str = ""
@@ -1392,6 +1519,8 @@ class CanvasWorkspaceSolutionTopicInput(BaseModel):
 class CanvasWorkspaceStateInput(BaseModel):
     meeting_id: str = ""
     stage: str = "ideation"
+    agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
@@ -1401,6 +1530,8 @@ class CanvasWorkspaceStateInput(BaseModel):
 class CanvasWorkspacePatchInput(BaseModel):
     meeting_id: str = ""
     stage: str | None = None
+    agenda_overrides: dict[str, dict[str, Any]] | None = None
+    canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
     problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
@@ -1411,6 +1542,7 @@ class CanvasPersonalNotesStateInput(BaseModel):
     meeting_id: str = ""
     user_id: str = ""
     personal_notes: list[CanvasPersonalNoteInput] = Field(default_factory=list)
+    local_canvas_state: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1456,6 +1588,7 @@ class RuntimeStore:
     canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_personal_notes_by_meeting_user: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    canvas_local_state_by_meeting_user: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.meeting_goal = ""
@@ -1495,11 +1628,36 @@ class RuntimeStore:
         self.canvas_workspace_by_meeting = {}
         self.canvas_llm_inflight_by_meeting = {}
         self.canvas_personal_notes_by_meeting_user = {}
+        self.canvas_local_state_by_meeting_user = {}
+
+
+@dataclass
+class AudioImportJob:
+    job_id: str
+    meeting_id: str
+    user_id: str
+    filename: str
+    status: str = "queued"
+    progress: float = 0.0
+    step: str = "queued"
+    detail: str = ""
+    created_at: str = field(default_factory=lambda: _now_ts())
+    updated_at: str = field(default_factory=lambda: _now_ts())
+    transcript_count: int = 0
+    speaker_count: int = 0
+    used_diarization: bool = False
+    warning: str = ""
+    error: str = ""
+    state: dict[str, Any] | None = None
 
 
 RT = RuntimeStore()
 ANALYSIS_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=2048)
 ANALYSIS_WORKER_STARTED = False
+_PYANNOTE_PIPELINE = None
+_PYANNOTE_LOCK = threading.Lock()
+_AUDIO_IMPORT_JOBS: dict[str, AudioImportJob] = {}
+_AUDIO_IMPORT_JOBS_LOCK = threading.Lock()
 
 
 def _analysis_worker_status(rt: RuntimeStore) -> dict[str, Any]:
@@ -2646,6 +2804,75 @@ def _extract_actions_from_turns(turns: list[dict[str, Any]], max_items: int = 10
     return out
 
 
+def _agenda_turn_overlap_ratio(
+    left_start: int,
+    left_end: int,
+    right_start: int,
+    right_end: int,
+) -> float:
+    if left_start <= 0 or left_end < left_start or right_start <= 0 or right_end < right_start:
+        return 0.0
+    overlap = min(left_end, right_end) - max(left_start, right_start) + 1
+    if overlap <= 0:
+        return 0.0
+    base = max(1, min(left_end - left_start + 1, right_end - right_start + 1))
+    return float(overlap) / float(base)
+
+
+def _reuse_previous_agenda_ids(
+    previous_outcomes: list[dict[str, Any]],
+    cleaned_outcomes: list[dict[str, Any]],
+) -> list[str]:
+    assigned_ids: list[str] = []
+    used_prev_indexes: set[int] = set()
+
+    for row_idx, row in enumerate(cleaned_outcomes):
+        row_title = _safe_text(row.get("agenda_title"))
+        row_start = int(row.get("_start_turn_id") or 0)
+        row_end = int(row.get("_end_turn_id") or 0)
+        best_prev_idx = -1
+        best_score = 0.0
+
+        for prev_idx, prev in enumerate(previous_outcomes):
+            if prev_idx in used_prev_indexes:
+                continue
+
+            prev_id = _safe_text(prev.get("agenda_id"))
+            if not prev_id:
+                continue
+
+            prev_title = _safe_text(prev.get("agenda_title"))
+            prev_start = int(prev.get("start_turn_id") or 0)
+            prev_end = int(prev.get("end_turn_id") or 0)
+            title_score = 1.0 if row_title and row_title == prev_title else _text_similarity(row_title, prev_title)
+            overlap_score = _agenda_turn_overlap_ratio(row_start, row_end, prev_start, prev_end)
+            order_bonus = max(0.0, 0.25 - abs(prev_idx - row_idx) * 0.08)
+            score = (title_score * 0.65) + (overlap_score * 0.85) + order_bonus
+
+            if score > best_score:
+                best_score = score
+                best_prev_idx = prev_idx
+
+        if best_prev_idx >= 0 and best_score >= 0.45:
+            used_prev_indexes.add(best_prev_idx)
+            assigned_ids.append(_safe_text(previous_outcomes[best_prev_idx].get("agenda_id")))
+        else:
+            assigned_ids.append("")
+
+    return assigned_ids
+
+
+def _max_agenda_sequence(agenda_rows: list[dict[str, Any]]) -> int:
+    max_seq = 0
+    for row in agenda_rows:
+        agenda_id = _safe_text(row.get("agenda_id"))
+        match = re.match(r"^agenda-(\d+)$", agenda_id)
+        if not match:
+            continue
+        max_seq = max(max_seq, int(match.group(1)))
+    return max_seq
+
+
 def _dedup_preserve(items: list[str], limit: int = 10) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -3156,10 +3383,16 @@ def _apply_outcomes(rt: RuntimeStore, outcomes: list[dict[str, Any]]) -> None:
         else:
             row["agenda_state"] = _normalize_agenda_state(row.get("agenda_state"))
 
+    previous_outcomes = [copy.deepcopy(item) for item in rt.agenda_outcomes if isinstance(item, dict)]
+    reused_agenda_ids = _reuse_previous_agenda_ids(previous_outcomes, cleaned)
+
     rt.agenda_outcomes = []
     rt.agenda_seq = 0
-    for row in cleaned:
+    for row_idx, row in enumerate(cleaned):
         created = _create_agenda(rt, _safe_text(row.get("agenda_title"), "안건 제목 미정"), _normalize_agenda_state(row.get("agenda_state")))
+        reused_agenda_id = _safe_text(reused_agenda_ids[row_idx] if row_idx < len(reused_agenda_ids) else "")
+        if reused_agenda_id:
+            created["agenda_id"] = reused_agenda_id
         created["flow_type"] = _safe_text(row.get("flow_type"))
         created["key_utterances"] = _dedup_preserve(list(row.get("key_utterances") or []), limit=20)
         created["_summary_items"] = _dedup_preserve(list(row.get("_summary_items") or []), limit=20)
@@ -3171,6 +3404,7 @@ def _apply_outcomes(rt: RuntimeStore, outcomes: list[dict[str, Any]]) -> None:
         created["action_items"] = list(row.get("action_items") or [])
         created["start_turn_id"] = int(row.get("_start_turn_id") or 0)
         created["end_turn_id"] = int(row.get("_end_turn_id") or 0)
+    rt.agenda_seq = max(rt.agenda_seq, _max_agenda_sequence(rt.agenda_outcomes))
 
 
 def _to_ids(raw_ids: Any) -> list[int]:
@@ -4243,6 +4477,135 @@ async def _collect_rows_from_uploads(files: list[UploadFile]) -> dict[str, Any]:
     }
 
 
+def _serialize_audio_import_job(job: AudioImportJob) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "job_id": _safe_text(job.job_id),
+        "meeting_id": _safe_text(job.meeting_id),
+        "filename": _safe_text(job.filename),
+        "status": _safe_text(job.status, "queued"),
+        "progress": max(0.0, min(float(job.progress), 100.0)),
+        "step": _safe_text(job.step, "queued"),
+        "detail": _safe_text(job.detail),
+        "created_at": _safe_text(job.created_at),
+        "updated_at": _safe_text(job.updated_at),
+        "transcript_count": int(job.transcript_count),
+        "speaker_count": int(job.speaker_count),
+        "used_diarization": bool(job.used_diarization),
+        "warning": _safe_text(job.warning),
+        "error": _safe_text(job.error),
+        "state": copy.deepcopy(job.state) if isinstance(job.state, dict) else None,
+    }
+
+
+def _create_audio_import_job(meeting_id: str, user_id: str, filename: str) -> AudioImportJob:
+    job = AudioImportJob(
+        job_id=str(uuid4()),
+        meeting_id=_safe_text(meeting_id),
+        user_id=_safe_text(user_id),
+        filename=_safe_text(filename, "audio"),
+    )
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        _AUDIO_IMPORT_JOBS[job.job_id] = job
+        stale = list(_AUDIO_IMPORT_JOBS.keys())[:-24]
+        for key in stale:
+            _AUDIO_IMPORT_JOBS.pop(key, None)
+    return job
+
+
+def _get_audio_import_job(job_id: str) -> AudioImportJob | None:
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        job = _AUDIO_IMPORT_JOBS.get(_safe_text(job_id))
+        return copy.deepcopy(job) if job else None
+
+
+def _update_audio_import_job(job_id: str, **changes: Any) -> AudioImportJob | None:
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        job = _AUDIO_IMPORT_JOBS.get(_safe_text(job_id))
+        if not job:
+            return None
+        for key, value in changes.items():
+            if hasattr(job, key):
+                setattr(job, key, value)
+        job.updated_at = _now_ts()
+        return copy.deepcopy(job)
+
+
+def _run_ffmpeg_to_mono_wav(source_path: Path, target_path: Path) -> None:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(target_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not target_path.exists():
+        raise RuntimeError((result.stderr or result.stdout or "ffmpeg normalize failed").strip())
+
+
+def _measure_wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate() or 16000
+        return max(float(frames) / float(rate), 0.0)
+
+
+def _load_pyannote_pipeline():
+    global _PYANNOTE_PIPELINE
+    token = _env_first("HUGGINGFACE_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN이 없어 diarization을 실행할 수 없습니다.")
+
+    with _PYANNOTE_LOCK:
+        if _PYANNOTE_PIPELINE is not None:
+            return _PYANNOTE_PIPELINE
+
+        try:
+            from pyannote.audio import Pipeline
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("pyannote.audio 패키지가 없습니다. diarization 의존성을 설치하세요.") from exc
+
+        pipeline = Pipeline.from_pretrained(PYANNOTE_DIARIZATION_MODEL, use_auth_token=token)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                pipeline.to(torch.device("cuda"))
+        except Exception:
+            pass
+
+        _PYANNOTE_PIPELINE = pipeline
+        return _PYANNOTE_PIPELINE
+
+
+def _diarize_audio_file(path: Path) -> list[dict[str, Any]]:
+    pipeline = _load_pyannote_pipeline()
+    diarization = pipeline(str(path))
+    rows: list[dict[str, Any]] = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        start = max(0.0, float(turn.start))
+        end = max(start, float(turn.end))
+        rows.append(
+            {
+                "start": start,
+                "end": end,
+                "speaker": _safe_text(speaker, "SPEAKER_00"),
+            }
+        )
+    return rows
+
+
 def _load_whisper_model():
     try:
         import whisper
@@ -4283,6 +4646,378 @@ def _transcribe_with_whisper(data: bytes, suffix: str) -> str:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def _transcribe_file_with_whisper_segments(path: Path) -> dict[str, Any]:
+    model = _get_whisper_model()
+    kwargs = {"language": "ko", "task": "transcribe", "verbose": False}
+    try:
+        import torch
+
+        kwargs["fp16"] = bool(torch.cuda.is_available())
+    except Exception:
+        kwargs["fp16"] = False
+
+    result = model.transcribe(str(path), **kwargs) or {}
+    segments: list[dict[str, Any]] = []
+    for segment in result.get("segments") or []:
+        text = _safe_text(segment.get("text"))
+        if not text:
+            continue
+        start = max(0.0, float(segment.get("start") or 0.0))
+        end = max(start, float(segment.get("end") or start))
+        segments.append({"start": start, "end": end, "text": text})
+    return {
+        "text": _safe_text(result.get("text")),
+        "segments": segments,
+    }
+
+
+def _speaker_with_max_overlap(
+    start_sec: float,
+    end_sec: float,
+    diarization_rows: list[dict[str, Any]],
+    last_speaker: str,
+) -> str:
+    if not diarization_rows:
+        return _safe_text(last_speaker, "화자 1")
+
+    best_speaker = ""
+    best_overlap = 0.0
+    for row in diarization_rows:
+        overlap = min(end_sec, float(row.get("end") or 0.0)) - max(start_sec, float(row.get("start") or 0.0))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = _safe_text(row.get("speaker"))
+
+    if best_speaker:
+        return best_speaker
+    return _safe_text(last_speaker, "화자 1")
+
+
+def _ends_like_sentence(text: str) -> bool:
+    return bool(re.search(r"[.!?。！？…]$|습니다$|입니다$|어요$|예요$|했어요$|했습니다$", _safe_text(text)))
+
+
+def _split_sentence_by_length(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", _safe_text(text)).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_chars:
+        return [clean]
+
+    parts: list[str] = []
+    remaining = clean
+    while len(remaining) > max_chars:
+        candidate = remaining[: max_chars + 1]
+        split_at = max(candidate.rfind(marker) for marker in (" ", ",", "·", " / ", " - "))
+        if split_at < max_chars // 2:
+            split_at = candidate.rfind(" ")
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip(" ,·-/")
+        if chunk:
+            parts.append(chunk)
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _split_text_naturally(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", _safe_text(text)).strip()
+    if not clean:
+        return []
+
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?。！？])\s+", clean) if segment.strip()]
+    if not sentences:
+        sentences = [clean]
+
+    parts: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not current:
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                parts.extend(_split_sentence_by_length(sentence, max_chars=max_chars))
+        elif len(current) + 1 + len(sentence) <= max_chars:
+            current = f"{current} {sentence}"
+        else:
+            parts.append(current)
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                parts.extend(_split_sentence_by_length(sentence, max_chars=max_chars))
+                current = ""
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _segment_timestamp(base_time: datetime, offset_sec: float) -> str:
+    return (base_time + timedelta(seconds=max(offset_sec, 0.0))).isoformat()
+
+
+def _build_import_utterances(
+    whisper_segments: list[dict[str, Any]],
+    diarization_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], int]:
+    base_time = datetime.now(timezone.utc)
+    speaker_aliases: dict[str, str] = {}
+    atomic_rows: list[dict[str, Any]] = []
+    last_speaker = "SPEAKER_00"
+
+    for segment in whisper_segments:
+        raw_text = _safe_text(segment.get("text"))
+        if not raw_text:
+            continue
+        seg_start = max(0.0, float(segment.get("start") or 0.0))
+        seg_end = max(seg_start, float(segment.get("end") or seg_start))
+        parts = _split_text_naturally(raw_text)
+        if not parts:
+            continue
+
+        duration = max(seg_end - seg_start, 0.001)
+        total_weight = max(sum(max(len(item), 1) for item in parts), 1)
+        cursor = seg_start
+        remaining = duration
+        remaining_weight = total_weight
+
+        for index, part in enumerate(parts):
+            weight = max(len(part), 1)
+            if index == len(parts) - 1 or remaining_weight <= weight:
+                piece_duration = remaining
+            else:
+                piece_duration = duration * (weight / total_weight)
+                piece_duration = min(piece_duration, remaining)
+            piece_end = max(cursor, min(seg_end, cursor + piece_duration))
+            raw_speaker = _speaker_with_max_overlap(cursor, piece_end, diarization_rows, last_speaker)
+            last_speaker = raw_speaker
+            speaker_label = speaker_aliases.setdefault(raw_speaker, f"화자 {len(speaker_aliases) + 1}")
+            atomic_rows.append(
+                {
+                    "speaker": speaker_label,
+                    "text": part,
+                    "timestamp": _segment_timestamp(base_time, cursor),
+                }
+            )
+            remaining -= max(piece_end - cursor, 0.0)
+            remaining_weight -= weight
+            cursor = piece_end
+
+    utterances: list[dict[str, str]] = []
+    for row in atomic_rows:
+        body = _safe_text(row.get("text"))
+        speaker = _safe_text(row.get("speaker"), "화자 1")
+        timestamp = _safe_text(row.get("timestamp"), _now_ts())
+        if not body:
+            continue
+
+        if (
+            utterances
+            and utterances[-1]["speaker"] == speaker
+            and len(utterances[-1]["text"]) + 1 + len(body) <= 120
+            and not _ends_like_sentence(utterances[-1]["text"])
+        ):
+            utterances[-1]["text"] = f"{utterances[-1]['text']} {body}".strip()
+        else:
+            utterances.append({"speaker": speaker, "text": body, "timestamp": timestamp})
+
+    return utterances, max(len(speaker_aliases), 1 if utterances else 0)
+
+
+def _create_working_runtime_for_audio_import(meeting_goal: str, window_size: int, reset_state: bool) -> RuntimeStore:
+    with RT.lock:
+        llm_enabled = bool(RT.llm_enabled)
+        if not reset_state:
+            seeded = _snapshot_runtime_for_analysis(RT)
+            seeded.meeting_goal = _safe_text(meeting_goal, seeded.meeting_goal)
+            seeded.window_size = int(window_size)
+            return seeded
+
+    working = RuntimeStore()
+    working.llm_enabled = llm_enabled
+    working.meeting_goal = _safe_text(meeting_goal)
+    working.window_size = int(window_size)
+    return working
+
+
+def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> None:
+    llm_enabled = bool(rt.llm_enabled)
+    canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
+    canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
+    canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
+    canvas_local_state_by_meeting_user = copy.deepcopy(rt.canvas_local_state_by_meeting_user)
+
+    rt.reset()
+    rt.llm_enabled = llm_enabled
+    rt.meeting_goal = _safe_text(source.meeting_goal)
+    rt.window_size = int(source.window_size)
+    rt.transcript = [dict(row) for row in source.transcript]
+    rt.transcript_version = int(source.transcript_version)
+    rt.analysis_next_windowed_target = int(source.analysis_next_windowed_target)
+    _apply_analysis_result(rt, source)
+    rt.canvas_last_placement = canvas_last_placement
+    rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
+    rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
+    rt.canvas_local_state_by_meeting_user = canvas_local_state_by_meeting_user
+
+
+def _persist_imported_transcripts_to_db(
+    meeting_id: str,
+    user_id: str,
+    rows: list[dict[str, str]],
+    reset_state: bool,
+) -> None:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return
+
+    normalized_rows = [
+        {
+            "meeting_id": normalized_meeting_id,
+            "user_id": normalized_user_id,
+            "speaker": _safe_text(row.get("speaker"), "화자 1"),
+            "text": _safe_text(row.get("text")),
+            "timestamp": _safe_text(row.get("timestamp"), _now_ts()),
+            "turn_id": idx,
+        }
+        for idx, row in enumerate(rows, start=1)
+        if _safe_text(row.get("text"))
+    ]
+
+    if not normalized_rows:
+        return
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            if reset_state:
+                client.table("transcripts").delete().eq("meeting_id", normalized_meeting_id).execute()
+            for start in range(0, len(normalized_rows), 200):
+                batch = normalized_rows[start : start + 200]
+                client.table("transcripts").insert(batch).execute()
+    except Exception as exc:
+        _log_runtime_db_error(
+            f"transcripts:audio-import:{normalized_meeting_id}",
+            f"❌ Failed to persist imported transcripts to Supabase: {exc}",
+            cooldown_sec=10.0,
+        )
+
+
+def _run_audio_import_job(
+    job_id: str,
+    source_path: Path,
+    filename: str,
+    meeting_id: str,
+    meeting_goal: str,
+    user_id: str,
+    reset_state: bool,
+    window_size: int,
+) -> None:
+    normalized_path = source_path.with_suffix(".normalized.wav")
+    try:
+        _update_audio_import_job(job_id, status="processing", progress=4.0, step="normalizing", detail="오디오를 분석용 wav로 변환하는 중입니다.")
+        _run_ffmpeg_to_mono_wav(source_path, normalized_path)
+        duration_sec = _measure_wav_duration_seconds(normalized_path)
+
+        diarization_rows: list[dict[str, Any]] = []
+        used_diarization = False
+        diarization_warning = ""
+        try:
+            _update_audio_import_job(job_id, progress=18.0, step="diarization", detail="화자 분리 구간을 계산하는 중입니다.")
+            diarization_rows = _diarize_audio_file(normalized_path)
+            used_diarization = len(diarization_rows) > 0
+        except Exception as exc:
+            diarization_warning = str(exc)
+            _update_audio_import_job(job_id, progress=18.0, step="diarization", detail="화자 분리를 건너뛰고 단일 화자 기준으로 계속 진행합니다.", warning=diarization_warning)
+
+        _update_audio_import_job(job_id, progress=42.0, step="transcribing", detail="Whisper로 전체 음성을 전사하는 중입니다.", used_diarization=used_diarization)
+        whisper_result = _transcribe_file_with_whisper_segments(normalized_path)
+        whisper_segments = whisper_result.get("segments") or []
+        if not whisper_segments:
+            raise RuntimeError("전사된 segment가 없습니다.")
+
+        _update_audio_import_job(job_id, progress=62.0, step="segmenting", detail="화자와 문장 흐름 기준으로 발화를 정리하는 중입니다.")
+        utterances, speaker_count = _build_import_utterances(whisper_segments, diarization_rows)
+        if not utterances:
+            raise RuntimeError("발화 단위로 정리된 결과가 없습니다.")
+
+        working_rt = _create_working_runtime_for_audio_import(
+            meeting_goal=meeting_goal or Path(filename).stem,
+            window_size=window_size,
+            reset_state=reset_state,
+        )
+        start_count = len(working_rt.transcript)
+        total_new = len(utterances)
+        _update_audio_import_job(
+            job_id,
+            progress=70.0,
+            step="analyzing",
+            detail="발화 4개 단위로 안건 분석을 진행하는 중입니다.",
+            transcript_count=start_count + total_new,
+            speaker_count=speaker_count,
+        )
+
+        appended = 0
+        for row in utterances:
+            _append_turn(working_rt, row.get("speaker", "화자 1"), row.get("text", ""), row.get("timestamp"))
+            appended += 1
+            total_count = len(working_rt.transcript)
+            if total_count % SUMMARY_INTERVAL == 0:
+                _run_analysis(working_rt, force=False, mode="windowed", skip_interval=True)
+            progress = 70.0 + (22.0 * (appended / max(total_new, 1)))
+            _update_audio_import_job(
+                job_id,
+                progress=progress,
+                step="analyzing",
+                detail=f"발화 {appended}/{total_new}개를 반영했습니다.",
+                transcript_count=total_count,
+                speaker_count=speaker_count,
+            )
+
+        if len(working_rt.transcript) > int(working_rt.last_analyzed_count):
+            _run_analysis(working_rt, force=False, mode="windowed", skip_interval=True)
+
+        _update_audio_import_job(job_id, progress=94.0, step="persisting", detail="회의 상태와 전사를 저장하는 중입니다.")
+        with RT.lock:
+            _apply_import_runtime_to_live(RT, working_rt)
+            live_state = _state_response(RT)
+
+        _persist_imported_transcripts_to_db(meeting_id, user_id, working_rt.transcript, reset_state=reset_state)
+
+        _update_audio_import_job(
+            job_id,
+            status="completed",
+            progress=100.0,
+            step="completed",
+            detail=f"{len(working_rt.transcript)}개 발화를 불러왔습니다.",
+            transcript_count=len(working_rt.transcript),
+            speaker_count=speaker_count,
+            used_diarization=used_diarization,
+            warning=diarization_warning,
+            state=live_state,
+        )
+    except Exception as exc:
+        _update_audio_import_job(
+            job_id,
+            status="error",
+            progress=100.0,
+            step="error",
+            detail="오디오 파일 처리에 실패했습니다.",
+            error=str(exc),
+        )
+    finally:
+        for target in (source_path, normalized_path):
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
 
 
 def _ensure_llm_ready(rt: RuntimeStore) -> tuple[Any, bool, str]:
@@ -4337,6 +5072,40 @@ def _normalize_canvas_node_positions(
             normalized[stage] = stage_nodes
 
     return normalized
+
+
+def _summarize_canvas_node_positions_for_debug(
+    payload: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "ideation": 0,
+            "problem_definition": 0,
+            "solution": 0,
+            "sample_ideation": [],
+        }
+
+    ideation = payload.get("ideation") if isinstance(payload.get("ideation"), dict) else {}
+    problem_definition = (
+        payload.get("problem-definition")
+        if isinstance(payload.get("problem-definition"), dict)
+        else {}
+    )
+    solution = payload.get("solution") if isinstance(payload.get("solution"), dict) else {}
+    top_ideation_nodes = sorted(
+        ideation.items(),
+        key=lambda item: (
+            float(item[1].get("y", 0) or 0) if isinstance(item[1], dict) else 0.0,
+            float(item[1].get("x", 0) or 0) if isinstance(item[1], dict) else 0.0,
+        ),
+    )[:4]
+
+    return {
+        "ideation": len(ideation),
+        "problem_definition": len(problem_definition),
+        "solution": len(solution),
+        "top_ideation_nodes": top_ideation_nodes,
+    }
 
 
 app = FastAPI(title="Meeting STT + Agenda MVP")
@@ -5048,17 +5817,25 @@ def get_canvas_personal_notes(meeting_id: str, user_id: str):
     if not normalized_user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
 
-    loaded_notes = _load_canvas_personal_notes_from_db(normalized_meeting_id, normalized_user_id)
+    loaded_notes, loaded_local_state = _load_canvas_personal_notes_from_db(
+        normalized_meeting_id,
+        normalized_user_id,
+    )
     with RT.lock:
         meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_local_state = RT.canvas_local_state_by_meeting_user.setdefault(normalized_meeting_id, {})
         if loaded_notes is not None:
             meeting_notes[normalized_user_id] = copy.deepcopy(loaded_notes)
+        if loaded_local_state is not None:
+            meeting_local_state[normalized_user_id] = copy.deepcopy(loaded_local_state)
         personal_notes = copy.deepcopy(meeting_notes.get(normalized_user_id) or [])
+        local_canvas_state = copy.deepcopy(meeting_local_state.get(normalized_user_id) or {})
         return {
             "ok": True,
             "meeting_id": normalized_meeting_id,
             "user_id": normalized_user_id,
             "personal_notes": personal_notes,
+            "local_canvas_state": local_canvas_state,
             "saved_at": _safe_text((RT.canvas_workspace_by_meeting.get(normalized_meeting_id) or {}).get("saved_at")),
         }
 
@@ -5084,18 +5861,27 @@ def post_canvas_personal_notes(payload: CanvasPersonalNotesStateInput):
         for note in (payload.personal_notes or [])
         if _safe_text(note.id) or _safe_text(note.title) or _safe_text(note.body)
     ]
+    normalized_local_canvas_state = _normalize_canvas_local_state(payload.local_canvas_state)
 
     with RT.lock:
         meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_local_state = RT.canvas_local_state_by_meeting_user.setdefault(normalized_meeting_id, {})
         meeting_notes[normalized_user_id] = copy.deepcopy(normalized_notes)
+        meeting_local_state[normalized_user_id] = copy.deepcopy(normalized_local_canvas_state)
 
-    _save_canvas_personal_notes_to_db(normalized_meeting_id, normalized_user_id, normalized_notes)
+    _save_canvas_personal_notes_to_db(
+        normalized_meeting_id,
+        normalized_user_id,
+        normalized_notes,
+        normalized_local_canvas_state,
+    )
 
     return {
         "ok": True,
         "meeting_id": normalized_meeting_id,
         "user_id": normalized_user_id,
         "personal_notes": copy.deepcopy(normalized_notes),
+        "local_canvas_state": copy.deepcopy(normalized_local_canvas_state),
         "saved_at": saved_at,
     }
 
@@ -5107,6 +5893,15 @@ def get_canvas_workspace_state(meeting_id: str):
         raise HTTPException(status_code=400, detail="meeting_id is required")
 
     saved = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    print(
+        "[canvas workspace GET]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "stage": _safe_text(saved.get("stage")),
+            "canvas_items": len(saved.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(saved.get("node_positions")),
+        },
+    )
     return _canvas_workspace_response(saved)
 
 
@@ -5120,6 +5915,8 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
     workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
     workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
+    workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
     workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
     workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
@@ -5130,6 +5927,15 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 
     _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    print(
+        "[canvas workspace PUT]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "stage": _safe_text(workspace.get("stage")),
+            "canvas_items": len(workspace.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
+        },
+    )
 
     return _canvas_workspace_response(workspace)
 
@@ -5147,6 +5953,10 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
 
     if "stage" in provided_fields:
         workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    if "agenda_overrides" in provided_fields:
+        workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
+    if "canvas_items" in provided_fields:
+        workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
     if "problem_groups" in provided_fields:
         workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     if "solution_topics" in provided_fields:
@@ -5162,6 +5972,16 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 
     _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    print(
+        "[canvas workspace PATCH]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "fields": sorted(list(provided_fields)),
+            "stage": _safe_text(workspace.get("stage")),
+            "canvas_items": len(workspace.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
+        },
+    )
     return _canvas_workspace_response(workspace)
 
 
@@ -5220,6 +6040,83 @@ async def post_import_agenda_snapshot(
                 "reset_state": _boolify(reset_state, True),
             },
         }
+
+
+@app.post("/api/import/audio-file/start")
+async def post_import_audio_file_start(
+    file: UploadFile = File(...),
+    meeting_id: str = Form(...),
+    user_id: str = Form(...),
+    meeting_goal: str = Form(default=""),
+    reset_state: str = Form(default="true"),
+    window_size: str = Form(default="12"),
+):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    filename = _safe_text(getattr(file, "filename", ""), "audio")
+    suffix = Path(filename).suffix.lower()
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if suffix not in AUDIO_IMPORT_ALLOWED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 오디오 형식입니다. 허용 형식: {', '.join(sorted(AUDIO_IMPORT_ALLOWED_SUFFIXES))}",
+        )
+
+    try:
+        blob = await file.read()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"오디오 파일 읽기에 실패했습니다: {exc}") from exc
+    if not blob:
+        raise HTTPException(status_code=400, detail="비어 있는 오디오 파일입니다.")
+
+    try:
+        normalized_window_size = max(4, min(int(window_size), 80))
+    except Exception:
+        normalized_window_size = 12
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="imms-audio-import-"))
+    source_path = temp_dir / f"source{suffix}"
+    source_path.write_bytes(blob)
+
+    job = _create_audio_import_job(normalized_meeting_id, normalized_user_id, filename)
+    _update_audio_import_job(
+        job.job_id,
+        status="queued",
+        progress=1.0,
+        step="queued",
+        detail="오디오 파일 처리 작업을 준비하는 중입니다.",
+    )
+
+    worker = threading.Thread(
+        target=_run_audio_import_job,
+        args=(
+            job.job_id,
+            source_path,
+            filename,
+            normalized_meeting_id,
+            _safe_text(meeting_goal),
+            normalized_user_id,
+            _boolify(reset_state, True),
+            normalized_window_size,
+        ),
+        daemon=True,
+        name=f"audio-import-{job.job_id[:8]}",
+    )
+    worker.start()
+
+    current_job = _get_audio_import_job(job.job_id)
+    return _serialize_audio_import_job(current_job or job)
+
+
+@app.get("/api/import/audio-file/jobs/{job_id}")
+def get_audio_import_job_status(job_id: str):
+    job = _get_audio_import_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="audio import job not found")
+    return _serialize_audio_import_job(job)
 
 
 @app.post("/api/reset")
