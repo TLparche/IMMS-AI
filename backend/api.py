@@ -195,6 +195,12 @@ DECISION_PAT = re.compile(r"(결정|확정|합의|채택|의결|하기로|정리
 ACTION_PAT = re.compile(r"(담당|까지|하겠습니다|진행하겠습니다|준비하겠습니다|검토하겠습니다|공유하겠습니다|작성하겠습니다)")
 DUE_PAT = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{1,2}월\s*\d{1,2}일|오늘|내일|이번주|다음주|월요일|화요일|수요일|목요일|금요일|토요일|일요일)")
 TRANSITION_PAT = re.compile(r"(다음|한편|반면|이제|정리하면|다시|또 하나|두 번째|세 번째|마지막으로)")
+LEADING_TIMESTAMP_RE = re.compile(
+    r"^\s*\[?\s*(?:"
+    r"\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+    r"|\d{1,2}:\d{2}(?::\d{2})?"
+    r")\s*\]?\s*"
+)
 
 
 def _now_ts() -> str:
@@ -204,6 +210,10 @@ def _now_ts() -> str:
 def _safe_text(raw: Any, fallback: str = "") -> str:
     s = str(raw or "").strip()
     return s if s else fallback
+
+
+def _strip_leading_timestamp(raw: Any) -> str:
+    return LEADING_TIMESTAMP_RE.sub("", _safe_text(raw)).strip()
 
 
 def _boolify(raw: Any, default: bool) -> bool:
@@ -1012,7 +1022,7 @@ def _run_canvas_llm_cached_request(
 def _doc_freq(rows: list[dict[str, Any]]) -> Counter[str]:
     cnt: Counter[str] = Counter()
     for row in rows:
-        seen = set(_keyword_tokens(_safe_text(row.get("text"))))
+        seen = set(_keyword_tokens(_strip_leading_timestamp(row.get("text"))))
         for tok in seen:
             cnt[tok] += 1
     return cnt
@@ -1028,7 +1038,7 @@ def _top_keywords_from_rows(
     banned = _tokens(meeting_goal)
     cnt: Counter[str] = Counter()
     for row in rows:
-        text = _safe_text(row.get("text"))
+        text = _strip_leading_timestamp(row.get("text"))
         for tok in _keyword_tokens(text):
             if tok in banned:
                 continue
@@ -1128,7 +1138,7 @@ def _usable_title_keywords(keywords: list[str] | None, meeting_goal: str) -> lis
 
 
 def _is_low_quality_title(title: str, meeting_goal: str) -> bool:
-    txt = _safe_text(title)
+    txt = _strip_leading_timestamp(title)
     if not txt:
         return True
     goal = _safe_text(meeting_goal)
@@ -1156,7 +1166,7 @@ def _is_low_quality_title(title: str, meeting_goal: str) -> bool:
 
 
 def _clean_agenda_title(raw_title: Any, meeting_goal: str = "", keywords: list[str] | None = None) -> str:
-    title = _safe_text(raw_title)
+    title = _strip_leading_timestamp(raw_title)
     title = re.sub(r"^[0-9]+[.)]\s*", "", title).strip(" -:|")
     title = re.sub(r"\s+", " ", title)
     if (not title) or _is_low_quality_title(title, meeting_goal):
@@ -1166,15 +1176,17 @@ def _clean_agenda_title(raw_title: Any, meeting_goal: str = "", keywords: list[s
 
 def _split_ts_prefix(line: str) -> tuple[str, str]:
     txt = _safe_text(line)
-    m = re.match(r"^\[(\d{2}:\d{2}(?::\d{2})?)\]\s*(.*)$", txt)
+    m = re.match(
+        r"^\[\s*((?:\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:\d{2}:\d{2}(?::\d{2})?))\s*\]\s*(.*)$",
+        txt,
+    )
     if m:
         return _safe_text(m.group(1)), _safe_text(m.group(2))
     return "", txt
 
 
 def _to_summary_point(text: str, max_len: int | None = SUMMARY_POINT_TARGET_LEN) -> str:
-    s = _safe_text(text)
-    s = re.sub(r"^\[[0-9:]+\]\s*", "", s)
+    s = _strip_leading_timestamp(text)
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"^(음|어|네|예|일단|그리고|근데|그니까|그러니까)\s+", "", s)
     s = re.sub(r"^(저는|제가|저희는|저희가)\s+", "", s)
@@ -1246,8 +1258,7 @@ def _extractive_title_from_candidates(candidates: list[str], meeting_goal: str) 
             break
 
     def _compact_clause(text: str, max_len: int = 36) -> str:
-        s = _safe_text(text)
-        s = re.sub(r"^\[[0-9:]+\]\s*", "", s)
+        s = _strip_leading_timestamp(text)
         s = re.sub(r"\s+", " ", s).strip(" ,;:/")
         s = re.sub(r"^(그리고|또|또한|다만|하지만|근데|그래서)\s+", "", s)
         s = re.split(r"\s*(?:;|/|·)\s*", s)[0]
@@ -1879,7 +1890,7 @@ def _build_problem_definition_groups_local(payload: ProblemDefinitionGenerateInp
 
 
 def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
-    text = _safe_text(raw, fallback)
+    text = _strip_leading_timestamp(raw) or _safe_text(fallback, "주제")
     parts = re.findall(r"[A-Za-z0-9가-힣]+", text)
     cleaned: list[str] = []
     for part in parts:
@@ -2562,7 +2573,7 @@ def _create_agenda(rt: RuntimeStore, title: str, state: str = "ACTIVE") -> dict[
     rt.agenda_seq += 1
     row = {
         "agenda_id": f"agenda-{rt.agenda_seq}",
-        "agenda_title": _safe_text(title, f"안건 {rt.agenda_seq}"),
+        "agenda_title": _strip_leading_timestamp(title) or f"안건 {rt.agenda_seq}",
         "agenda_state": state,
         "flow_type": "",
         "key_utterances": [],
@@ -2639,7 +2650,7 @@ def _extract_refs(rt: RuntimeStore, evidence_turn_ids: list[int], recent_turns: 
 
 def _format_line_from_turn(turn: dict[str, Any], max_chars: int = 180) -> str:
     ts = _safe_text(turn.get("timestamp"), _now_ts())
-    text = _safe_text(turn.get("text")).replace("\n", " ").strip()
+    text = _strip_leading_timestamp(turn.get("text")).replace("\n", " ").strip()
     if len(text) > max_chars:
         text = text[: max_chars - 1] + "…"
     return f"[{ts}] {text}"
@@ -2650,7 +2661,7 @@ def _ref_from_turn(turn: dict[str, Any], why: str = "요약 근거") -> dict[str
         "turn_id": int(turn.get("turn_id") or 0),
         "speaker": _safe_text(turn.get("speaker"), "화자"),
         "timestamp": _safe_text(turn.get("timestamp"), _now_ts()),
-        "quote": _safe_text(turn.get("text")),
+        "quote": _strip_leading_timestamp(turn.get("text")),
         "why": _safe_text(why, "요약 근거"),
     }
 
@@ -2659,7 +2670,7 @@ def _pick_key_refs(turns: list[dict[str, Any]], keywords: list[str], max_items: 
     scored: list[tuple[float, int, dict[str, Any]]] = []
     kw = [k.lower() for k in keywords[:8]]
     for idx, t in enumerate(turns):
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if len(text) < 8:
             continue
         low = text.lower()
@@ -2704,11 +2715,11 @@ def _segment_turns(turns: list[dict[str, Any]]) -> list[tuple[int, int]]:
     i = min_seg
     while i < n - min_seg:
         dist = i - last
-        prev_txt = " ".join(_safe_text(t.get("text")) for t in turns[max(last, i - win) : i])
-        next_txt = " ".join(_safe_text(t.get("text")) for t in turns[i : min(n, i + win)])
+        prev_txt = " ".join(_strip_leading_timestamp(t.get("text")) for t in turns[max(last, i - win) : i])
+        next_txt = " ".join(_strip_leading_timestamp(t.get("text")) for t in turns[i : min(n, i + win)])
         sim = _text_similarity(prev_txt, next_txt)
-        cue = bool(TRANSITION_PAT.search(_safe_text(turns[i].get("text")))) or bool(
-            TRANSITION_PAT.search(_safe_text(turns[i - 1].get("text")))
+        cue = bool(TRANSITION_PAT.search(_strip_leading_timestamp(turns[i].get("text")))) or bool(
+            TRANSITION_PAT.search(_strip_leading_timestamp(turns[i - 1].get("text")))
         )
         reached_target = dist >= target_gap
         too_long = dist >= max_seg
@@ -2778,7 +2789,7 @@ def _pick_key_utterances(turns: list[dict[str, Any]], keywords: list[str], max_i
     scored: list[tuple[float, int, str]] = []
     kw = [k.lower() for k in keywords[:8]]
     for idx, t in enumerate(turns):
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if len(text) < 8:
             continue
         low = text.lower()
@@ -2808,7 +2819,7 @@ def _extract_decisions_from_turns(turns: list[dict[str, Any]], max_items: int = 
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for t in turns:
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if not text or not DECISION_PAT.search(text):
             continue
         key = text[:120]
@@ -2825,7 +2836,7 @@ def _extract_actions_from_turns(turns: list[dict[str, Any]], max_items: int = 10
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for t in turns:
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if not text:
             continue
         if not ACTION_PAT.search(text) and not DUE_PAT.search(text):
@@ -3018,7 +3029,7 @@ def _request_agenda_title_with_llm(
         tid = int(t.get("turn_id") or 0)
         ts = _safe_text(t.get("timestamp"), _now_ts())
         speaker = _safe_text(t.get("speaker"), "화자")
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if not text:
             continue
         lines.append(f"- turn_id={tid} | {ts} | {speaker} | {text}")
@@ -3120,7 +3131,7 @@ def _refresh_low_quality_titles_with_llm(
 
 
 def _compact_summary_line(text: str, max_len: int = 90) -> str:
-    s = _safe_text(text)
+    s = _strip_leading_timestamp(text)
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"^(음|어|네|예|일단|그러면|그럼|근데|그러니까)\s+", "", s)
     if len(s) > max_len:
@@ -3250,7 +3261,7 @@ def _build_local_outcomes(rt: RuntimeStore, turns: list[dict[str, Any]]) -> list
 
         outcomes.append(
             {
-                "agenda_title": title,
+                "agenda_title": _strip_leading_timestamp(title) or f"안건 {seg_idx + 1}",
                 "agenda_state": "ACTIVE" if seg_idx == len(segments) - 1 else "CLOSED",
                 "flow_type": flow_type,
                 "key_utterances": _dedup_preserve(key_utterances, limit=20),
@@ -3480,8 +3491,9 @@ def _build_agenda_outline_prompt(rt: RuntimeStore, turns: list[dict[str, Any]], 
     agenda_hint_max = max(agenda_hint_min, min(12, agenda_hint_min + 3))
     lines = []
     for turn in turns:
+        text = _strip_leading_timestamp(turn.get("text"))
         lines.append(
-            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {turn['text']}"
+            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {text}"
         )
     transcript_block = "\n".join(lines)
 
@@ -3532,8 +3544,9 @@ def _build_agenda_detail_prompt(
     meeting_goal = _safe_text(rt.meeting_goal, "미정")
     lines = []
     for turn in seg_turns:
+        text = _strip_leading_timestamp(turn.get("text"))
         lines.append(
-            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {turn['text']}"
+            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {text}"
         )
     transcript_block = "\n".join(lines)
 
@@ -3608,8 +3621,9 @@ def _build_windowed_shift_prompt(
     meeting_goal = _safe_text(rt.meeting_goal, "미정")
     lines = []
     for turn in recent_turns:
+        text = _strip_leading_timestamp(turn.get("text"))
         lines.append(
-            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {turn['text']}"
+            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {text}"
         )
     transcript_block = "\n".join(lines)
     return f"""
@@ -3857,7 +3871,7 @@ def _run_realtime_window_analysis(rt: RuntimeStore, client: Any) -> bool:
 
     active = _active_agenda(rt.agenda_outcomes)
     if active is None:
-        seed = _extractive_title_from_candidates([_safe_text(t.get("text")) for t in turns[-8:]], rt.meeting_goal)
+        seed = _extractive_title_from_candidates([_strip_leading_timestamp(t.get("text")) for t in turns[-8:]], rt.meeting_goal)
         active = _create_agenda(rt, _safe_text(seed, "안건 진행"), "ACTIVE")
         active["start_turn_id"] = max(1, max_turn - min(7, max_turn - 1))
         active["end_turn_id"] = max_turn
@@ -4403,7 +4417,7 @@ def _run_analysis(rt: RuntimeStore, force: bool = False, mode: str = "windowed",
 
         outcomes.append(
             {
-                "agenda_title": title,
+                "agenda_title": _strip_leading_timestamp(title) or f"안건 {idx + 1}",
                 "agenda_state": state,
                 "flow_type": flow_type,
                 "key_utterances": _dedup_preserve(key_utterances, limit=20),

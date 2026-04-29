@@ -472,7 +472,12 @@ function extractCanvasItemIdFromNodeId(nodeId: string) {
 }
 
 function stripLeadingTimestamp(text: string) {
-  return text.replace(/^\s*\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*/, "").trim();
+  return text
+    .replace(
+      /^\s*\[?\s*(?:\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\d{1,2}:\d{2}(?::\d{2})?)\s*\]?\s*/,
+      "",
+    )
+    .trim();
 }
 
 function summarizeDecision(decision: AgendaDecisionDetail) {
@@ -663,13 +668,13 @@ function buildAgendaModels(
       const end = Math.max(start, Number(outcome.end_turn_id || transcriptRows.length || start));
       return {
         id: outcome.agenda_id || `agenda-${index + 1}`,
-        title: outcome.agenda_title || `안건 ${index + 1}`,
+        title: stripLeadingTimestamp(outcome.agenda_title || "") || `안건 ${index + 1}`,
         status: outcome.agenda_state || "PROPOSED",
-        keywords: outcome.agenda_keywords || [],
+        keywords: (outcome.agenda_keywords || []).map(stripLeadingTimestamp).filter(Boolean),
         summaryBullets:
           (outcome.agenda_summary_items || []).filter(Boolean).slice(0, 4).length > 0
-            ? (outcome.agenda_summary_items || []).filter(Boolean).slice(0, 4)
-            : [outcome.summary].filter(Boolean),
+            ? (outcome.agenda_summary_items || []).filter(Boolean).slice(0, 4).map(stripLeadingTimestamp)
+            : [outcome.summary].filter(Boolean).map(stripLeadingTimestamp),
         utterances: transcriptRows.filter((row) => row.turnId >= start && row.turnId <= end),
         decisions: outcome.decision_results || [],
         actionItems: outcome.action_items || [],
