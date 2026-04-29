@@ -366,6 +366,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
+        "custom_groups": copy.deepcopy(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -389,6 +390,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         "stage": _normalize_canvas_stage(shared_state.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(shared_state.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(shared_state.get("canvas_items") or []),
+        "custom_groups": copy.deepcopy(shared_state.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
         "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
@@ -510,6 +512,41 @@ def _normalize_canvas_workspace_items(
     return normalized
 
 
+def _normalize_canvas_custom_groups(groups: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+
+    for group in (groups or []):
+        if hasattr(group, "model_dump"):
+            raw_group = group.model_dump()
+        elif isinstance(group, dict):
+            raw_group = group
+        else:
+            continue
+
+        group_id = _safe_text(raw_group.get("id"))
+        title = _safe_text(raw_group.get("title"))
+        if not group_id or not title:
+            continue
+
+        normalized.append(
+            {
+                "id": group_id,
+                "title": title,
+                "description": _safe_text(raw_group.get("description")),
+                "keywords": [
+                    _safe_text(keyword)
+                    for keyword in (raw_group.get("keywords") or [])
+                    if _safe_text(keyword)
+                ][:8],
+                "color": _safe_text(raw_group.get("color")),
+                "created_by": _safe_text(raw_group.get("created_by")),
+                "created_at": _safe_text(raw_group.get("created_at")),
+            }
+        )
+
+    return normalized
+
+
 def _normalize_canvas_agenda_overrides(
     overrides: Any,
 ) -> dict[str, dict[str, Any]]:
@@ -547,6 +584,7 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
         "shared_sync_enabled": shared_sync_enabled,
         "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(payload.get("canvas_items") or []),
+        "custom_groups": _normalize_canvas_custom_groups(payload.get("custom_groups") or []),
     }
 
     if not shared_sync_enabled:
@@ -570,6 +608,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
         "stage": _normalize_canvas_stage(source.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
+        "custom_groups": _normalize_canvas_custom_groups(source.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
@@ -590,6 +629,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
+        "custom_groups": _normalize_canvas_custom_groups(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
@@ -790,6 +830,8 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     workspace.setdefault("meeting_id", normalized_meeting_id)
     workspace.setdefault("stage", "ideation")
     workspace.setdefault("agenda_overrides", {})
+    workspace.setdefault("canvas_items", [])
+    workspace.setdefault("custom_groups", [])
     workspace.setdefault("problem_groups", [])
     workspace.setdefault("solution_topics", [])
     workspace.setdefault("node_positions", {})
@@ -1474,6 +1516,16 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     y: float | None = None
 
 
+class CanvasCustomGroupInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    description: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    color: str = ""
+    created_by: str = ""
+    created_at: str = ""
+
+
 class CanvasPersonalNoteInput(BaseModel):
     id: str = ""
     agenda_id: str = ""
@@ -1523,6 +1575,7 @@ class CanvasWorkspaceStateInput(BaseModel):
     stage: str = "ideation"
     agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
+    custom_groups: list[CanvasCustomGroupInput] = Field(default_factory=list)
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
@@ -1534,6 +1587,7 @@ class CanvasWorkspacePatchInput(BaseModel):
     stage: str | None = None
     agenda_overrides: dict[str, dict[str, Any]] | None = None
     canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
+    custom_groups: list[CanvasCustomGroupInput] | None = None
     problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
@@ -5919,6 +5973,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     workspace["stage"] = _normalize_canvas_stage(payload.stage)
     workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
     workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
+    workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
     workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
     workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
@@ -5935,6 +5990,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
             "meeting_id": normalized_meeting_id,
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
+            "custom_groups": len(workspace.get("custom_groups") or []),
             "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
         },
     )
@@ -5959,6 +6015,8 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
     if "canvas_items" in provided_fields:
         workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
+    if "custom_groups" in provided_fields:
+        workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
     if "problem_groups" in provided_fields:
         workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     if "solution_topics" in provided_fields:
@@ -5981,6 +6039,7 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
             "fields": sorted(list(provided_fields)),
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
+            "custom_groups": len(workspace.get("custom_groups") or []),
             "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
         },
     )

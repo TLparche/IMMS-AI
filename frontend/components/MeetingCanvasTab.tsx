@@ -37,6 +37,7 @@ import {
 import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
+  CanvasCustomGroup,
   CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
@@ -63,6 +64,7 @@ export type MeetingAgenda = {
 
 type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
+type CanvasTool = ComposerTool | "group";
 type LeftPanelTab = "detail" | "agenda-list";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
@@ -82,6 +84,7 @@ type ProblemGroupViewModel = CanvasProblemDefinitionGroup & {
 };
 
 type CanvasItemViewModel = CanvasWorkspaceItem;
+type CustomGroupViewModel = CanvasCustomGroup;
 
 type SolutionTopicViewModel = CanvasSolutionTopicResponse & {
   status: ProblemGroupStatus;
@@ -109,6 +112,7 @@ type WorkspaceFieldSignatures = {
   stage: string;
   agenda_overrides: string;
   canvas_items: string;
+  custom_groups: string;
   problem_groups: string;
   solution_topics: string;
   node_positions: string;
@@ -120,6 +124,7 @@ function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
     stage: "",
     agenda_overrides: "",
     canvas_items: "",
+    custom_groups: "",
     problem_groups: "",
     solution_topics: "",
     node_positions: "",
@@ -176,10 +181,25 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
   }));
 }
 
+function serializeCustomGroups(groups: CustomGroupViewModel[]) {
+  return groups
+    .map((group) => ({
+      id: group.id,
+      title: group.title.trim(),
+      description: (group.description || "").trim(),
+      keywords: (group.keywords || []).map((keyword) => keyword.trim()).filter(Boolean),
+      color: (group.color || "").trim(),
+      created_by: group.created_by || "",
+      created_at: group.created_at || "",
+    }))
+    .filter((group) => group.id && group.title);
+}
+
 function buildWorkspaceFieldSignatures(input: {
   stage: CanvasStage;
   agendaOverrides: Record<string, AgendaOverride>;
   canvasItems: CanvasItemViewModel[];
+  customGroups: CustomGroupViewModel[];
   problemGroups: ProblemGroupViewModel[];
   solutionTopics: SolutionTopicViewModel[];
   nodePositions: CanvasNodePositionsByStage;
@@ -189,6 +209,7 @@ function buildWorkspaceFieldSignatures(input: {
     stage: input.stage,
     agenda_overrides: JSON.stringify(serializeAgendaOverrides(input.agendaOverrides)),
     canvas_items: JSON.stringify(buildWorkspaceCanvasItemsPayload(input.canvasItems)),
+    custom_groups: JSON.stringify(serializeCustomGroups(input.customGroups)),
     problem_groups: JSON.stringify(buildWorkspaceProblemGroupsPayload(input.problemGroups)),
     solution_topics: JSON.stringify(buildWorkspaceSolutionTopicsPayload(input.solutionTopics)),
     node_positions: JSON.stringify(input.nodePositions || {}),
@@ -201,6 +222,7 @@ function buildFullWorkspacePatchPayload(input: {
   stage: CanvasStage;
   agendaOverrides: Record<string, AgendaOverride>;
   canvasItems: CanvasItemViewModel[];
+  customGroups: CustomGroupViewModel[];
   problemGroups: ProblemGroupViewModel[];
   solutionTopics: SolutionTopicViewModel[];
   nodePositions: CanvasNodePositionsByStage;
@@ -211,6 +233,7 @@ function buildFullWorkspacePatchPayload(input: {
     stage: input.stage,
     agenda_overrides: serializeAgendaOverrides(input.agendaOverrides),
     canvas_items: serializeSharedCanvasItems(input.canvasItems),
+    custom_groups: serializeCustomGroups(input.customGroups),
     problem_groups: buildWorkspaceProblemGroupsPayload(input.problemGroups),
     solution_topics: buildWorkspaceSolutionTopicsPayload(input.solutionTopics),
     node_positions: input.nodePositions,
@@ -352,6 +375,7 @@ type AgendaViewModel = {
   utterances: Array<TranscriptUtterance & { turnId: number }>;
   decisions: AgendaDecisionDetail[];
   actionItems: AgendaActionItemDetail[];
+  isCustom?: boolean;
 };
 
 type AgendaOverride = {
@@ -397,25 +421,29 @@ function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
 }
 
-function toolLabel(tool: ComposerTool) {
+function toolLabel(tool: CanvasTool) {
   if (tool === "note") return "메모";
   if (tool === "comment") return "코멘트";
+  if (tool === "group") return "그룹";
   return "주제";
 }
 
-function toolIcon(tool: ComposerTool) {
+function toolIcon(tool: CanvasTool) {
   if (tool === "note") return "✎";
   if (tool === "comment") return "!";
+  if (tool === "group") return "G";
   return "#";
 }
 
-function toolPreviewHint(tool: ComposerTool) {
+function toolPreviewHint(tool: CanvasTool) {
+  if (tool === "group") return "프로젝트 그룹을 만들 위치";
   if (tool === "topic") return "새 주제를 만들 위치";
   if (tool === "comment") return "코멘트를 남길 위치";
   return "메모를 붙일 위치";
 }
 
-function toolPreviewTone(tool: ComposerTool) {
+function toolPreviewTone(tool: CanvasTool) {
+  if (tool === "group") return "border-emerald-200 bg-emerald-50/92 text-emerald-700";
   if (tool === "topic") return "border-fuchsia-200 bg-fuchsia-50/92 text-fuchsia-700";
   if (tool === "comment") return "border-sky-200 bg-sky-50/92 text-sky-700";
   return "border-amber-200 bg-amber-50/92 text-amber-700";
@@ -1220,6 +1248,20 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
   });
 }
 
+function hydrateCustomGroups(groups: CustomGroupViewModel[] = []): CustomGroupViewModel[] {
+  return groups
+    .map((group) => ({
+      id: (group.id || "").trim(),
+      title: (group.title || "").trim(),
+      description: (group.description || "").trim(),
+      keywords: (group.keywords || []).map((keyword) => keyword.trim()).filter(Boolean).slice(0, 8),
+      color: (group.color || "").trim(),
+      created_by: group.created_by || "",
+      created_at: group.created_at || "",
+    }))
+    .filter((group) => group.id && group.title);
+}
+
 function hydrateSolutionTopics(
   topics: CanvasSolutionTopicResponse[],
   problemGroups: ProblemGroupViewModel[],
@@ -1302,6 +1344,7 @@ function buildSharedCanvasSignature(payload: {
   stage: CanvasStage;
   agenda_overrides: Record<string, unknown>;
   canvas_items: unknown[];
+  custom_groups?: unknown[];
   problem_groups: unknown[];
   solution_topics: unknown[];
   node_positions: CanvasNodePositionsByStage;
@@ -1453,7 +1496,7 @@ export default function MeetingCanvasTab({
 }: MeetingCanvasTabProps) {
   const [stage, setStage] = useState<CanvasStage>("ideation");
   const [composerTool, setComposerTool] = useState<ComposerTool>("note");
-  const [armedCanvasTool, setArmedCanvasTool] = useState<ComposerTool | null>(null);
+  const [armedCanvasTool, setArmedCanvasTool] = useState<CanvasTool | null>(null);
   const [composerTitle, setComposerTitle] = useState("");
   const [composerBody, setComposerBody] = useState("");
   const [selectedAgendaId, setSelectedAgendaId] = useState("");
@@ -1462,6 +1505,8 @@ export default function MeetingCanvasTab({
   const [personalNotes, setPersonalNotes] = useState<PersonalNote[]>([]);
   const [agendaOverrides, setAgendaOverrides] = useState<Record<string, AgendaOverride>>({});
   const [canvasItems, setCanvasItems] = useState<CanvasItemViewModel[]>([]);
+  const [customGroups, setCustomGroups] = useState<CustomGroupViewModel[]>([]);
+  const [customGroupDraftTitle, setCustomGroupDraftTitle] = useState("");
   const [editingAgendaId, setEditingAgendaId] = useState("");
   const [agendaDraftTitle, setAgendaDraftTitle] = useState("");
   const [agendaDraftKeywords, setAgendaDraftKeywords] = useState("");
@@ -1548,6 +1593,7 @@ export default function MeetingCanvasTab({
     stage: CanvasStage;
     agendaOverrides: Record<string, AgendaOverride>;
     canvasItems: CanvasItemViewModel[];
+    customGroups: CustomGroupViewModel[];
     problemGroups: ProblemGroupViewModel[];
     solutionTopics: SolutionTopicViewModel[];
     nodePositions: CanvasNodePositionsByStage;
@@ -1556,6 +1602,7 @@ export default function MeetingCanvasTab({
     stage: "ideation",
     agendaOverrides: {},
     canvasItems: [],
+    customGroups: [],
     problemGroups: [],
     solutionTopics: [],
     nodePositions: {},
@@ -1576,7 +1623,7 @@ export default function MeetingCanvasTab({
   const effectiveState = importOverrideActive && importedState ? importedState : analysisState ?? importedState;
   const agendaModels = useMemo(() => {
     const baseModels = buildAgendaModels(effectiveState, agendas, transcripts);
-    return baseModels.map((agenda) => {
+    const hydratedBaseModels = baseModels.map((agenda) => {
       const override = agendaOverrides[agenda.id];
       if (!override) {
         return agenda;
@@ -1589,7 +1636,21 @@ export default function MeetingCanvasTab({
         summaryBullets: override.summaryBullets || agenda.summaryBullets,
       };
     });
-  }, [effectiveState, agendas, transcripts, agendaOverrides]);
+
+    const customAgendaModels: AgendaViewModel[] = customGroups.map((group) => ({
+      id: group.id,
+      title: group.title,
+      status: "프로젝트 분류",
+      keywords: group.keywords || [],
+      summaryBullets: [group.description || "프로젝트에서 직접 추가한 그룹 분류입니다."],
+      utterances: [],
+      decisions: [],
+      actionItems: [],
+      isCustom: true,
+    }));
+
+    return [...hydratedBaseModels, ...customAgendaModels];
+  }, [effectiveState, agendas, transcripts, agendaOverrides, customGroups]);
   const meetingGoalTopic = useMemo(
     () => meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim(),
     [effectiveState?.meeting_goal, meetingTitle],
@@ -1619,6 +1680,7 @@ export default function MeetingCanvasTab({
       stage: "ideation",
       agendaOverrides: {},
       canvasItems: [],
+      customGroups: [],
       problemGroups: [],
       solutionTopics: [],
       nodePositions: {},
@@ -1629,6 +1691,8 @@ export default function MeetingCanvasTab({
     setImportOverrideActive(false);
     setAgendaOverrides({});
     setCanvasItems([]);
+    setCustomGroups([]);
+    setCustomGroupDraftTitle("");
     setEditingAgendaId("");
     setEditingCanvasItemId("");
     setEditingPersonalNoteId("");
@@ -1657,6 +1721,7 @@ export default function MeetingCanvasTab({
       stage,
       agendaOverrides,
       canvasItems,
+      customGroups,
       problemGroups,
       solutionTopics,
       nodePositions,
@@ -1666,6 +1731,7 @@ export default function MeetingCanvasTab({
   }, [
     agendaOverrides,
     canvasItems,
+    customGroups,
     nodePositions,
     persistedSharedImportedState,
     problemGroups,
@@ -1718,6 +1784,8 @@ export default function MeetingCanvasTab({
     setPersonalNotes([]);
     setAgendaOverrides({});
     setCanvasItems([]);
+    setCustomGroups([]);
+    setCustomGroupDraftTitle("");
     setNodePositions({});
     setImportedState(null);
     setStage("ideation");
@@ -1776,6 +1844,9 @@ export default function MeetingCanvasTab({
         const nextCanvasItems = shouldUseLocalCanvas
           ? hydrateCanvasItems(savedLocalCanvasState?.canvas_items || [])
           : hydrateCanvasItems(saved.canvas_items || []);
+        const nextCustomGroups = shouldUseLocalCanvas
+          ? hydrateCustomGroups(savedLocalCanvasState?.custom_groups || [])
+          : hydrateCustomGroups(saved.custom_groups || []);
         const nextGroups = shouldUseLocalCanvas
           ? hydrateProblemGroups(savedLocalCanvasState?.problem_groups || [], sharedGroups)
           : sharedGroups;
@@ -1806,6 +1877,7 @@ export default function MeetingCanvasTab({
         setPersonalNotes(nextPersonalNotes);
         setAgendaOverrides(nextAgendaOverrides);
         setCanvasItems(nextCanvasItems);
+        setCustomGroups(nextCustomGroups);
         setSharedSyncEnabled(nextSharedSyncEnabled);
         setNodePositions(nextNodePositions);
         setImportedState(nextImportedState);
@@ -1818,6 +1890,7 @@ export default function MeetingCanvasTab({
           stage: nextStage,
           agenda_overrides: nextAgendaOverrides,
           canvas_items: nextCanvasItems,
+          custom_groups: serializeCustomGroups(nextCustomGroups),
           problem_groups: nextGroups,
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
           node_positions: nextNodePositions,
@@ -1827,6 +1900,7 @@ export default function MeetingCanvasTab({
           stage: nextStage,
           agendaOverrides: nextAgendaOverrides,
           canvasItems: nextCanvasItems,
+          customGroups: nextCustomGroups,
           problemGroups: nextGroups,
           solutionTopics: nextSolutionTopics,
           nodePositions: nextNodePositions,
@@ -1851,6 +1925,7 @@ export default function MeetingCanvasTab({
           usingLocalCanvas: shouldUseLocalCanvas,
           stage: nextStage,
           canvasItems: nextCanvasItems.length,
+          customGroups: nextCustomGroups.length,
           usedCachedNodePositions:
             !shouldUseLocalCanvas &&
             Object.keys(saved.node_positions || {}).length === 0 &&
@@ -1866,6 +1941,7 @@ export default function MeetingCanvasTab({
         setPersonalNotes([]);
         setAgendaOverrides({});
         setCanvasItems([]);
+        setCustomGroups([]);
         setSharedSyncEnabled(true);
         setNodePositions({});
         setImportedState(null);
@@ -1874,6 +1950,7 @@ export default function MeetingCanvasTab({
           stage: "ideation",
           agenda_overrides: {},
           canvas_items: [],
+          custom_groups: [],
           problem_groups: [],
           solution_topics: [],
           node_positions: {},
@@ -1883,6 +1960,7 @@ export default function MeetingCanvasTab({
           stage: "ideation",
           agendaOverrides: {},
           canvasItems: [],
+          customGroups: [],
           problemGroups: [],
           solutionTopics: [],
           nodePositions: {},
@@ -2073,6 +2151,7 @@ export default function MeetingCanvasTab({
       stage?: CanvasStage;
       agendaOverrides?: Record<string, AgendaOverride>;
       canvasItems?: CanvasItemViewModel[];
+      customGroups?: CustomGroupViewModel[];
       problemGroups?: ProblemGroupViewModel[];
       solutionTopics?: SolutionTopicViewModel[];
       nodePositions?: CanvasNodePositionsByStage;
@@ -2086,6 +2165,7 @@ export default function MeetingCanvasTab({
         stage: overrides?.stage ?? stage,
         agenda_overrides: serializeAgendaOverrides(overrides?.agendaOverrides ?? agendaOverrides),
         canvas_items: serializeSharedCanvasItems(overrides?.canvasItems ?? canvasItems),
+        custom_groups: serializeCustomGroups(overrides?.customGroups ?? customGroups),
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
         node_positions: overrides?.nodePositions ?? nodePositions,
@@ -2104,6 +2184,7 @@ export default function MeetingCanvasTab({
         stage: snapshot.stage,
         agenda_overrides: snapshot.agenda_overrides,
         canvas_items: snapshot.canvas_items,
+        custom_groups: snapshot.custom_groups,
         problem_groups: snapshot.problem_groups,
         solution_topics: snapshot.solution_topics,
         node_positions: snapshot.node_positions,
@@ -2113,6 +2194,7 @@ export default function MeetingCanvasTab({
     [
       agendaOverrides,
       canvasItems,
+      customGroups,
       meetingId,
       nodePositions,
       onSharedCanvasSync,
@@ -2319,6 +2401,7 @@ export default function MeetingCanvasTab({
       stage,
       agendaOverrides,
       canvasItems,
+      customGroups,
       problemGroups,
       solutionTopics,
       nodePositions,
@@ -2330,6 +2413,7 @@ export default function MeetingCanvasTab({
       stage?: CanvasStage;
       agenda_overrides?: ReturnType<typeof serializeAgendaOverrides>;
       canvas_items?: ReturnType<typeof serializeSharedCanvasItems>;
+      custom_groups?: ReturnType<typeof serializeCustomGroups>;
       problem_groups?: ReturnType<typeof buildWorkspaceProblemGroupsPayload>;
       solution_topics?: ReturnType<typeof buildWorkspaceSolutionTopicsPayload>;
       node_positions?: CanvasNodePositionsByStage;
@@ -2349,6 +2433,10 @@ export default function MeetingCanvasTab({
     }
     if (nextSignatures.canvas_items !== previousSignatures.canvas_items) {
       patch.canvas_items = serializeSharedCanvasItems(canvasItems);
+      hasChanges = true;
+    }
+    if (nextSignatures.custom_groups !== previousSignatures.custom_groups) {
+      patch.custom_groups = serializeCustomGroups(customGroups);
       hasChanges = true;
     }
     if (nextSignatures.problem_groups !== previousSignatures.problem_groups) {
@@ -2396,6 +2484,7 @@ export default function MeetingCanvasTab({
     agendaOverrides,
     canvasItems,
     conclusionBatchBusy,
+    customGroups,
     meetingId,
     nodePositions,
     persistedSharedImportedState,
@@ -2414,11 +2503,13 @@ export default function MeetingCanvasTab({
             shared_sync_enabled: true,
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
+            custom_groups: serializeCustomGroups(customGroups),
           }
         : {
             shared_sync_enabled: false,
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
+            custom_groups: serializeCustomGroups(customGroups),
             stage,
             problem_groups: serializeSharedProblemGroups(problemGroups),
             solution_topics: serializeSharedSolutionTopics(solutionTopics),
@@ -2429,6 +2520,7 @@ export default function MeetingCanvasTab({
     [
       agendaOverrides,
       canvasItems,
+      customGroups,
       importOverrideActive,
       nodePositions,
       persistedSharedImportedState,
@@ -2478,12 +2570,13 @@ export default function MeetingCanvasTab({
       stage,
       agenda_overrides: serializeAgendaOverrides(agendaOverrides),
       canvas_items: serializeSharedCanvasItems(canvasItems),
+      custom_groups: serializeCustomGroups(customGroups),
       problem_groups: serializeSharedProblemGroups(problemGroups),
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
       node_positions: nodePositions,
       imported_state: persistedSharedImportedState,
     }),
-    [agendaOverrides, canvasItems, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
+    [agendaOverrides, canvasItems, customGroups, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
   );
 
   useEffect(() => {
@@ -2498,6 +2591,7 @@ export default function MeetingCanvasTab({
         stage,
         agendaOverrides,
         canvasItems,
+        customGroups,
         problemGroups,
         solutionTopics,
         nodePositions,
@@ -2507,6 +2601,7 @@ export default function MeetingCanvasTab({
   }, [
     agendaOverrides,
     canvasItems,
+    customGroups,
     meetingId,
     nodePositions,
     persistedSharedImportedState,
@@ -2565,12 +2660,14 @@ export default function MeetingCanvasTab({
       incomingSharedCanvasSync.stage === "problem-definition" ||
       incomingSharedCanvasSync.stage === "solution"
         ? incomingSharedCanvasSync.stage
-        : "ideation";
+            : "ideation";
     const incomingCanvasItems = hydrateCanvasItems(incomingSharedCanvasSync.canvas_items || []);
+    const incomingCustomGroups = hydrateCustomGroups(incomingSharedCanvasSync.custom_groups || []);
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       stage: incomingStage,
       agenda_overrides: incomingSharedCanvasSync.agenda_overrides || {},
       canvas_items: incomingCanvasItems,
+      custom_groups: serializeCustomGroups(incomingCustomGroups),
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
       solution_topics: serializeSharedSolutionTopics(
         hydrateSolutionTopics(
@@ -2594,6 +2691,7 @@ export default function MeetingCanvasTab({
     setSolutionTopics(nextSolutionTopics);
     setAgendaOverrides(incomingSharedCanvasSync.agenda_overrides || {});
     setCanvasItems(incomingCanvasItems);
+    setCustomGroups(incomingCustomGroups);
     setNodePositions((prev) =>
       sharedSyncEnabled
         ? incomingSharedCanvasSync.node_positions || {}
@@ -2616,6 +2714,7 @@ export default function MeetingCanvasTab({
       stage: incomingStage,
       agendaOverrides: incomingSharedCanvasSync.agenda_overrides || {},
       canvasItems: incomingCanvasItems,
+      customGroups: incomingCustomGroups,
       problemGroups: nextProblemGroups,
       solutionTopics: nextSolutionTopics,
       nodePositions: incomingSharedCanvasSync.node_positions || {},
@@ -2709,6 +2808,7 @@ export default function MeetingCanvasTab({
         stage: sharedCanvasSnapshot.stage,
         agenda_overrides: sharedCanvasSnapshot.agenda_overrides,
         canvas_items: sharedCanvasSnapshot.canvas_items,
+        custom_groups: sharedCanvasSnapshot.custom_groups,
         problem_groups: sharedCanvasSnapshot.problem_groups,
         solution_topics: sharedCanvasSnapshot.solution_topics,
         node_positions: sharedCanvasSnapshot.node_positions,
@@ -3535,12 +3635,14 @@ export default function MeetingCanvasTab({
     setActivityMessage("개인 메모에 저장했습니다. 이후 그룹 보드로 드래그 편입하는 흐름을 붙일 수 있습니다.");
   };
 
-  const armCanvasTool = (tool: ComposerTool) => {
+  const armCanvasTool = (tool: CanvasTool) => {
     if (stage !== "ideation") {
       setActivityMessage("도구 아이템은 아이디어 단계에서만 생성할 수 있습니다.");
       return;
     }
-    setComposerTool(tool);
+    if (tool !== "group") {
+      setComposerTool(tool);
+    }
     const isDisarming = armedCanvasTool === tool;
     setArmedCanvasTool(isDisarming ? null : tool);
     setCanvasPlacementPreview((prev) =>
@@ -3556,7 +3658,9 @@ export default function MeetingCanvasTab({
     setActivityMessage(
       isDisarming
         ? "보드 클릭 도구를 해제했습니다."
-        : `${toolLabel(tool)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
+        : tool === "group"
+          ? "그룹 도구를 선택했습니다. 보드를 클릭하면 프로젝트 그룹 분류가 생성됩니다."
+          : `${toolLabel(tool)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
     );
   };
 
@@ -3595,7 +3699,7 @@ export default function MeetingCanvasTab({
   }, []);
 
   const handleCanvasPlacementStart = useCallback(
-    async (tool: ComposerTool, clientX: number, clientY: number, agendaId?: string, pointId?: string) => {
+    async (tool: CanvasTool, clientX: number, clientY: number, agendaId?: string, pointId?: string) => {
       if (!flowRef.current || !canvasSurfaceRef.current) {
         return;
       }
@@ -3604,6 +3708,122 @@ export default function MeetingCanvasTab({
       const uiX = Math.max(0, Math.min(clientX - canvasRect.left, canvasRect.width));
       const uiY = Math.max(0, Math.min(clientY - canvasRect.top, canvasRect.height));
       const flowPosition = flowRef.current.screenToFlowPosition({ x: clientX, y: clientY });
+
+      if (tool === "group") {
+        const now = new Date().toISOString();
+        const draftTitle = customGroupDraftTitle.trim() || `그룹 분류 ${customGroups.length + 1}`;
+        const nextGroup: CustomGroupViewModel = {
+          id: `project-group-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+          title: draftTitle,
+          description: "프로젝트에서 직접 추가한 그룹 분류입니다.",
+          keywords: [],
+          color: "",
+          created_by: userId,
+          created_at: now,
+        };
+        const nextNodeId = `agenda-${nextGroup.id}`;
+        const nextCustomGroupsSnapshot = [nextGroup, ...customGroups];
+        const nextNodePositionsSnapshot: CanvasNodePositionsByStage = {
+          ...nodePositions,
+          ideation: {
+            ...(nodePositions.ideation || {}),
+            [nextNodeId]: {
+              x: flowPosition.x,
+              y: flowPosition.y,
+            },
+          },
+        };
+
+        suppressNextAutoFitRef.current = true;
+        pendingNodePlacementsRef.current[nextNodeId] = {
+          x: flowPosition.x,
+          y: flowPosition.y,
+        };
+        latestSharedWorkspaceRef.current = {
+          ...latestSharedWorkspaceRef.current,
+          stage,
+          customGroups: nextCustomGroupsSnapshot,
+          nodePositions: nextNodePositionsSnapshot,
+          importedState: persistedSharedImportedState,
+        };
+
+        setArmedCanvasTool(null);
+        setCanvasPlacementPreview(null);
+        setCustomGroups(nextCustomGroupsSnapshot);
+        setNodePositions(nextNodePositionsSnapshot);
+        setSelectedAgendaId(nextGroup.id);
+        setSelectedCanvasItemId("");
+        setSelectedProblemGroupId("");
+        setSelectedSolutionTopicId("");
+        setSelectedNodeId(nextNodeId);
+        setEditingAgendaId(nextGroup.id);
+        setAgendaDraftTitle(nextGroup.title);
+        setAgendaDraftKeywords("");
+        setAgendaDraftSummary(nextGroup.description || "");
+        setCustomGroupDraftTitle("");
+        setLeftPanelTab("detail");
+        setPlacementFeedback({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          x: uiX,
+          y: uiY,
+          label: toolLabel(tool),
+        });
+        if (placementFeedbackTimerRef.current) {
+          window.clearTimeout(placementFeedbackTimerRef.current);
+        }
+        placementFeedbackTimerRef.current = window.setTimeout(() => {
+          setPlacementFeedback(null);
+          placementFeedbackTimerRef.current = null;
+        }, 1500);
+        setActivityMessage("보드 위치에 프로젝트 그룹 분류를 생성했습니다. 이름을 바로 수정할 수 있습니다.");
+
+        if (sharedSyncEnabled) {
+          writeSharedWorkspaceSessionCache(
+            meetingId,
+            buildFullWorkspacePatchPayload({
+              meetingId,
+              stage,
+              agendaOverrides,
+              canvasItems,
+              customGroups: nextCustomGroupsSnapshot,
+              problemGroups,
+              solutionTopics,
+              nodePositions: nextNodePositionsSnapshot,
+              importedState: persistedSharedImportedState,
+            }),
+          );
+          forceBroadcastSharedCanvas({
+            customGroups: nextCustomGroupsSnapshot,
+            nodePositions: nextNodePositionsSnapshot,
+          });
+          if (meetingId) {
+            void saveCanvasWorkspacePatch({
+              meeting_id: meetingId,
+              custom_groups: serializeCustomGroups(nextCustomGroupsSnapshot),
+              node_positions: nextNodePositionsSnapshot,
+              imported_state: persistedSharedImportedState,
+            }).catch((error) => {
+              console.error("Failed to save shared project group placement:", error);
+            });
+          }
+        }
+
+        try {
+          await confirmCanvasPlacement({
+            tool,
+            ui_x: uiX,
+            ui_y: uiY,
+            flow_x: flowPosition.x,
+            flow_y: flowPosition.y,
+            title: draftTitle,
+            body: "",
+          });
+        } catch (error) {
+          console.error("Failed to confirm project group placement:", error);
+        }
+        return;
+      }
+
       const nextAgendaId = agendaId || selectedAgendaId || agendaModels[0]?.id || "";
       const draftTitle = `${toolLabel(tool)} ${canvasItems.filter((item) => item.kind === tool).length + 1}`;
       const nextItemId = `item-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
@@ -3687,6 +3907,7 @@ export default function MeetingCanvasTab({
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
+            customGroups,
             problemGroups,
             solutionTopics,
             nodePositions: nextNodePositionsSnapshot,
@@ -3729,6 +3950,8 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       agendaModels,
       canvasItems,
+      customGroupDraftTitle,
+      customGroups,
       forceBroadcastSharedCanvas,
       meetingId,
       nodePositions,
@@ -3738,6 +3961,7 @@ export default function MeetingCanvasTab({
       sharedSyncEnabled,
       solutionTopics,
       stage,
+      userId,
     ],
   );
 
@@ -3844,6 +4068,7 @@ export default function MeetingCanvasTab({
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot || canvasItems,
+            customGroups,
             problemGroups,
             solutionTopics,
             nodePositions: nextPositionsSnapshot,
@@ -4030,6 +4255,47 @@ export default function MeetingCanvasTab({
       .split("\n")
       .map((item) => item.trim())
       .filter(Boolean);
+
+    if (selectedAgenda.isCustom) {
+      const nextCustomGroupsSnapshot = customGroups.map((group) =>
+        group.id === selectedAgenda.id
+          ? {
+              ...group,
+              title: nextTitle,
+              keywords: nextKeywords,
+              description:
+                nextSummaryBullets.join("\n") ||
+                group.description ||
+                selectedAgenda.summaryBullets.join("\n"),
+            }
+          : group,
+      );
+
+      setCustomGroups(nextCustomGroupsSnapshot);
+      setEditingAgendaId("");
+      setAgendaDraftTitle("");
+      setAgendaDraftKeywords("");
+      setAgendaDraftSummary("");
+      setActivityMessage("프로젝트 그룹 분류를 수정했습니다.");
+
+      if (sharedSyncEnabled) {
+        latestSharedWorkspaceRef.current = {
+          ...latestSharedWorkspaceRef.current,
+          customGroups: nextCustomGroupsSnapshot,
+          importedState: persistedSharedImportedState,
+        };
+        forceBroadcastSharedCanvas({ customGroups: nextCustomGroupsSnapshot });
+        if (meetingId) {
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            custom_groups: serializeCustomGroups(nextCustomGroupsSnapshot),
+          }).catch((error) => {
+            console.error("Failed to save shared project group category edit:", error);
+          });
+        }
+      }
+      return;
+    }
 
     let nextAgendaOverridesSnapshot: Record<string, AgendaOverride> | null = null;
     setAgendaOverrides((prev) => {
@@ -4261,6 +4527,87 @@ export default function MeetingCanvasTab({
     }
   };
 
+  const handleAddProjectGroupCategory = (connectCanvasItemId?: string) => {
+    const title = customGroupDraftTitle.trim();
+    if (!title) {
+      setActivityMessage("추가할 프로젝트 그룹 분류명을 입력해 주세요.");
+      return;
+    }
+
+    const existingGroup = customGroups.find(
+      (group) => group.title.trim().toLowerCase() === title.toLowerCase(),
+    );
+    if (existingGroup) {
+      setCustomGroupDraftTitle("");
+      setSelectedAgendaId(existingGroup.id);
+      if (connectCanvasItemId) {
+        handleSetCanvasItemAgendaLink(connectCanvasItemId, existingGroup.id);
+      } else {
+        setActivityMessage(`이미 있는 프로젝트 그룹 분류 "${existingGroup.title}"을 선택했습니다.`);
+      }
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const nextGroup: CustomGroupViewModel = {
+      id: `project-group-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      title,
+      description: "사용자가 프로젝트에 직접 추가한 그룹 분류입니다.",
+      keywords: [],
+      color: "",
+      created_by: userId,
+      created_at: now,
+    };
+    const nextCustomGroupsSnapshot = [nextGroup, ...customGroups];
+    const nextCanvasItemsSnapshot = connectCanvasItemId
+      ? canvasItems.map((item) =>
+          item.id === connectCanvasItemId
+            ? {
+                ...item,
+                agenda_id: nextGroup.id,
+                point_id: "",
+              }
+            : item,
+        )
+      : canvasItems;
+
+    setCustomGroups(nextCustomGroupsSnapshot);
+    setCustomGroupDraftTitle("");
+    setSelectedAgendaId(nextGroup.id);
+    if (connectCanvasItemId) {
+      setCanvasItems(nextCanvasItemsSnapshot);
+      setSelectedCanvasItemId(connectCanvasItemId);
+      setSelectedNodeId(`canvas-item-${connectCanvasItemId}`);
+    }
+    setActivityMessage(
+      connectCanvasItemId
+        ? `프로젝트 그룹 분류 "${title}"을 추가하고 선택한 아이템에 연결했습니다.`
+        : `프로젝트 그룹 분류 "${title}"을 추가했습니다.`,
+    );
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        customGroups: nextCustomGroupsSnapshot,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({
+        customGroups: nextCustomGroupsSnapshot,
+        canvasItems: connectCanvasItemId ? nextCanvasItemsSnapshot : undefined,
+      });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          custom_groups: serializeCustomGroups(nextCustomGroupsSnapshot),
+          canvas_items: connectCanvasItemId ? serializeSharedCanvasItems(nextCanvasItemsSnapshot) : undefined,
+        }).catch((error) => {
+          console.error("Failed to save project group categories:", error);
+        });
+      }
+    }
+  };
+
   const handleDeleteCanvasItem = () => {
     if (!selectedCanvasItem) return;
 
@@ -4298,6 +4645,7 @@ export default function MeetingCanvasTab({
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
+            customGroups,
             problemGroups,
             solutionTopics,
             nodePositions: nextNodePositionsSnapshot,
@@ -4697,6 +5045,7 @@ export default function MeetingCanvasTab({
                         analysisSignatureAtImportRef.current = analysisStateSignature;
                         setImportOverrideActive(true);
                         setCanvasItems([]);
+                        setCustomGroups([]);
                         setProblemGroups([]);
                         setSolutionTopics([]);
                         setNodePositions({});
@@ -4713,6 +5062,7 @@ export default function MeetingCanvasTab({
                             stage: "ideation",
                             agendaOverrides: {},
                             canvasItems: [],
+                            customGroups: [],
                             problemGroups: [],
                             solutionTopics: [],
                             nodePositions: {},
@@ -4723,6 +5073,7 @@ export default function MeetingCanvasTab({
                             stage: "ideation",
                             agenda_overrides: {},
                             canvas_items: [],
+                            custom_groups: [],
                             problem_groups: [],
                             solution_topics: [],
                             node_positions: {},
@@ -5363,23 +5714,43 @@ export default function MeetingCanvasTab({
                                 <p className="text-sm font-semibold text-slate-500">{item.label}</p>
                                 <p className="mt-1 text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
                                 {stage === "ideation" && selectedCanvasItem && item.label === "연결 안건" ? (
-                                  <select
-                                    value={selectedCanvasItem.agenda_id || ""}
-                                    onChange={(event) => {
-                                      const nextAgendaId = event.target.value;
-                                      if (nextAgendaId) {
-                                        handleSetCanvasItemAgendaLink(selectedCanvasItem.id, nextAgendaId);
-                                      }
-                                    }}
-                                    className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-                                  >
-                                    <option value="">연결할 안건 선택</option>
-                                    {agendaModels.map((agenda) => (
-                                      <option key={`${selectedCanvasItem.id}-agenda-link-${agenda.id}`} value={agenda.id}>
-                                        {agenda.title}
-                                      </option>
-                                    ))}
-                                  </select>
+                                  <>
+                                    <select
+                                      value={selectedCanvasItem.agenda_id || ""}
+                                      onChange={(event) => {
+                                        const nextAgendaId = event.target.value;
+                                        if (nextAgendaId) {
+                                          handleSetCanvasItemAgendaLink(selectedCanvasItem.id, nextAgendaId);
+                                        }
+                                      }}
+                                      className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                                    >
+                                      <option value="">연결할 안건 선택</option>
+                                      {agendaModels.map((agenda) => (
+                                        <option key={`${selectedCanvasItem.id}-agenda-link-${agenda.id}`} value={agenda.id}>
+                                          {agenda.title}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-white/70 p-3">
+                                      <p className="text-xs font-semibold text-slate-500">새 프로젝트 그룹 분류</p>
+                                      <div className="mt-2 flex gap-2">
+                                        <input
+                                          value={customGroupDraftTitle}
+                                          onChange={(event) => setCustomGroupDraftTitle(event.target.value)}
+                                          placeholder="예: 고객 경험"
+                                          className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAddProjectGroupCategory(selectedCanvasItem.id)}
+                                          className="shrink-0 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                                        >
+                                          추가/연결
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </>
                                 ) : null}
                               </div>
                               {stage === "ideation" && selectedCanvasItem && item.label === "연결 안건" && selectedCanvasItem.agenda_id ? (
@@ -5453,6 +5824,32 @@ export default function MeetingCanvasTab({
                     <h4 className="text-lg font-semibold text-slate-900">안건 목록</h4>
                     <span className="text-sm text-slate-500">{agendaModels.length}개 그룹</span>
                   </div>
+                  <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white/70 p-4">
+                    <p className="text-sm font-semibold text-slate-800">프로젝트 그룹 분류 추가</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      회의에서 자동 생성된 안건과 별개로, 이 프로젝트에서 함께 쓸 분류를 추가합니다.
+                    </p>
+                    <div className="mt-3 flex gap-2">
+                      <input
+                        value={customGroupDraftTitle}
+                        onChange={(event) => setCustomGroupDraftTitle(event.target.value)}
+                        placeholder="예: 고객 경험, 기술 리스크"
+                        className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleAddProjectGroupCategory()}
+                        className="shrink-0 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
+                      >
+                        추가
+                      </button>
+                    </div>
+                    {!sharedSyncEnabled ? (
+                      <p className="mt-2 text-xs leading-5 text-amber-700">
+                        공유 OFF 상태라 지금 추가한 분류는 내 화면에만 저장됩니다.
+                      </p>
+                    ) : null}
+                  </div>
                   <div className="mt-4 space-y-3">
                     {agendaModels.map((agenda) => (
                       <button
@@ -5465,7 +5862,14 @@ export default function MeetingCanvasTab({
                         }}
                         className={`w-full rounded-xl border px-4 py-4 text-left transition ${selectedAgendaId === agenda.id ? "border-slate-300 bg-white" : "border-slate-200 bg-[#fafafa] hover:bg-white"}`}
                       >
-                        <strong className="text-base text-slate-900">{agenda.title}</strong>
+                        <div className="flex items-start justify-between gap-3">
+                          <strong className="text-base text-slate-900">{agenda.title}</strong>
+                          {agenda.isCustom ? (
+                            <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
+                              프로젝트 분류
+                            </span>
+                          ) : null}
+                        </div>
                         <p className="mt-2 text-sm leading-6 text-slate-500">{agenda.summaryBullets[0] || "요약이 아직 없습니다."}</p>
                       </button>
                     ))}
@@ -5804,7 +6208,7 @@ export default function MeetingCanvasTab({
                 <span className="hidden shrink-0 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 sm:inline-flex">
                   Tools
                 </span>
-                {(["note", "comment", "topic"] as ComposerTool[]).map((item) => (
+                {(["note", "comment", "topic", "group"] as CanvasTool[]).map((item) => (
                   <button
                     key={item}
                     type="button"

@@ -5,6 +5,7 @@ import type {
   AudioImportJobStartResponse,
   AudioImportJobStatusResponse,
   CanvasLocalState,
+  CanvasCustomGroup,
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasPersonalNotesStateResponse,
@@ -213,6 +214,7 @@ export async function getCanvasWorkspaceState(meetingId: string): Promise<Canvas
 export async function saveCanvasWorkspaceState(payload: {
   meeting_id: string;
   stage: "ideation" | "problem-definition" | "solution";
+  custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionStageResponse["topics"];
   node_positions?: CanvasNodePositionsByStage;
