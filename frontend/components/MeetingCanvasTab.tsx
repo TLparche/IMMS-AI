@@ -403,6 +403,12 @@ function toolLabel(tool: ComposerTool) {
   return "주제";
 }
 
+function toolIcon(tool: ComposerTool) {
+  if (tool === "note") return "✎";
+  if (tool === "comment") return "!";
+  return "#";
+}
+
 function toolPreviewHint(tool: ComposerTool) {
   if (tool === "topic") return "새 주제를 만들 위치";
   if (tool === "comment") return "코멘트를 남길 위치";
@@ -3535,10 +3541,20 @@ export default function MeetingCanvasTab({
       return;
     }
     setComposerTool(tool);
-    setArmedCanvasTool((prev) => (prev === tool ? null : tool));
-    setCanvasPlacementPreview(null);
-    setActivityMessage((prev) =>
-      armedCanvasTool === tool
+    const isDisarming = armedCanvasTool === tool;
+    setArmedCanvasTool(isDisarming ? null : tool);
+    setCanvasPlacementPreview((prev) =>
+      !prev || isDisarming
+        ? null
+        : {
+            ...prev,
+            label: toolLabel(tool),
+            hint: toolPreviewHint(tool),
+            tone: toolPreviewTone(tool),
+          },
+    );
+    setActivityMessage(
+      isDisarming
         ? "보드 클릭 도구를 해제했습니다."
         : `${toolLabel(tool)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
     );
@@ -5784,36 +5800,35 @@ export default function MeetingCanvasTab({
             ) : null}
 
             <div className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex justify-center px-3 sm:bottom-6 sm:px-4">
-              <div className="pointer-events-auto flex w-full max-w-[min(100%,820px)] flex-wrap items-center justify-center gap-2 rounded-[20px] border border-slate-200 bg-white/96 px-3 py-3 shadow-xl shadow-slate-200/80 backdrop-blur-md sm:px-5 sm:py-3.5">
+              <div className="pointer-events-auto flex w-auto max-w-[calc(100%-24px)] items-center justify-center gap-2 rounded-full border border-slate-200/90 bg-white/95 px-2 py-2 shadow-[0_18px_44px_rgba(15,23,42,0.16)] backdrop-blur-md">
+                <span className="hidden shrink-0 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500 sm:inline-flex">
+                  Tools
+                </span>
                 {(["note", "comment", "topic"] as ComposerTool[]).map((item) => (
                   <button
                     key={item}
                     type="button"
                     onClick={() => armCanvasTool(item)}
                     disabled={stage !== "ideation"}
-                    className={`shrink-0 rounded-xl px-3 py-2 text-sm font-semibold sm:px-4 sm:py-2.5 sm:text-base ${
+                    className={`flex h-10 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-semibold transition-all duration-150 ease-out sm:h-11 sm:px-3.5 ${
                       armedCanvasTool === item
-                        ? "bg-blue-600 text-white"
-                        : composerTool === item
-                          ? "bg-slate-900 text-white"
-                          : "text-slate-600 hover:bg-slate-100"
+                        ? "scale-[1.03] bg-blue-600 text-white shadow-md shadow-blue-200"
+                        : "bg-white text-slate-600 shadow-sm hover:-translate-y-0.5 hover:bg-slate-100 hover:text-slate-900"
                     } disabled:cursor-not-allowed disabled:opacity-45`}
                   >
-                    {toolLabel(item)}
+                    <span className={`flex h-5 w-5 items-center justify-center rounded-full text-sm leading-none transition-colors ${
+                      armedCanvasTool === item ? "bg-white/18" : "bg-slate-100"
+                    }`}>
+                      {toolIcon(item)}
+                    </span>
+                    <span>{toolLabel(item)}</span>
                   </button>
                 ))}
                 {armedCanvasTool ? (
-                  <span className="shrink-0 rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 sm:text-sm">
-                    보드 클릭 대기 중
+                  <span className="hidden shrink-0 rounded-full bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 sm:inline-flex">
+                    클릭 대기
                   </span>
                 ) : null}
-                <div className="mx-1 hidden h-8 w-px bg-slate-200 lg:block" />
-                <button type="button" onClick={() => void handleGenerateProblemDefinition()} disabled={busy || agendaModels.length === 0} className="shrink-0 rounded-xl px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-60 sm:px-4 sm:py-2.5 sm:text-base">
-                  문제 정의
-                </button>
-                <button type="button" onClick={() => void handleGenerateSolutionStage()} disabled={busy || !problemGroups.some((group) => group.status === "final")} className="shrink-0 rounded-xl px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-60 sm:px-4 sm:py-2.5 sm:text-base">
-                  해결책
-                </button>
               </div>
             </div>
           </section>
