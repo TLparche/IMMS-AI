@@ -432,6 +432,10 @@ function extractAgendaIdFromNodeId(nodeId: string) {
   return "";
 }
 
+function extractCanvasItemIdFromNodeId(nodeId: string) {
+  return nodeId.startsWith("canvas-item-") ? nodeId.slice("canvas-item-".length) : "";
+}
+
 function stripLeadingTimestamp(text: string) {
   return text.replace(/^\s*\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*/, "").trim();
 }
@@ -1204,7 +1208,7 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
     const keywords = (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean);
     return {
       ...item,
-      keywords: keywords.length > 0 ? keywords.slice(0, 8) : extractCanvasItemKeywords(item.title, item.body, 5),
+      keywords: keywords.slice(0, 8),
     };
   });
 }
@@ -3513,7 +3517,7 @@ export default function MeetingCanvasTab({
         point_id: pointId || "",
         kind: tool,
         title: draftTitle,
-        keywords: extractCanvasItemKeywords(draftTitle, draftBody),
+        keywords: [],
         x: flowPosition.x,
         y: flowPosition.y,
         body: draftBody,
@@ -3866,7 +3870,6 @@ export default function MeetingCanvasTab({
 
     const nextTitle = canvasItemDraftTitle.trim() || selectedCanvasItem.title;
     const nextBody = canvasItemDraftBody.trim() || selectedCanvasItem.body || "";
-    const nextKeywords = extractCanvasItemKeywords(nextTitle, nextBody);
     let nextCanvasItemsSnapshot: CanvasItemViewModel[] | null = null;
 
     setCanvasItems((prev) => {
@@ -3876,7 +3879,6 @@ export default function MeetingCanvasTab({
               ...item,
               title: nextTitle,
               body: nextBody,
-              keywords: nextKeywords,
             }
           : item,
       );
@@ -3901,6 +3903,59 @@ export default function MeetingCanvasTab({
           canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
         }).catch((error) => {
           console.error("Failed to save shared canvas items:", error);
+        });
+      }
+    }
+  };
+
+  const handleExtractCanvasItemKeywords = (targetItemId?: string) => {
+    if (isEditingSelectedCanvasItem) return;
+
+    const itemId =
+      targetItemId ||
+      extractCanvasItemIdFromNodeId(selectedNodeId) ||
+      selectedCanvasItemId ||
+      selectedCanvasItem?.id ||
+      "";
+    const targetItem = canvasItems.find((item) => item.id === itemId);
+    if (!targetItem) {
+      setActivityMessage("키워드를 추출할 canvas 아이템을 먼저 선택해 주세요.");
+      return;
+    }
+
+    const nextKeywords = extractCanvasItemKeywords(targetItem.title, targetItem.body || "", 5);
+    if (nextKeywords.length === 0) {
+      setActivityMessage("키워드로 추출할 내용이 부족합니다.");
+      return;
+    }
+
+    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+      item.id === itemId
+        ? {
+            ...item,
+            keywords: nextKeywords,
+          }
+        : item,
+    );
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    setSelectedCanvasItemId(itemId);
+    setSelectedNodeId(`canvas-item-${itemId}`);
+    setActivityMessage("공용 canvas 아이템의 키워드를 추출했습니다.");
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared canvas item keywords:", error);
         });
       }
     }
@@ -4661,7 +4716,20 @@ export default function MeetingCanvasTab({
                     </section>
 
                     <section className="border-b border-slate-200/80 py-6">
-                      <h4 className="text-lg font-semibold text-slate-900">키워드</h4>
+                      <div className="flex items-center justify-between gap-3">
+                        <h4 className="text-lg font-semibold text-slate-900">키워드</h4>
+                        {stage === "ideation" && selectedCanvasItem ? (
+                          <button
+                            type="button"
+                            onClick={() => handleExtractCanvasItemKeywords(selectedCanvasItem.id)}
+                            disabled={isEditingSelectedCanvasItem}
+                            title={isEditingSelectedCanvasItem ? "편집을 저장한 뒤 키워드를 추출할 수 있습니다." : "제목과 내용에서 키워드를 추출합니다."}
+                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            키워드 추출
+                          </button>
+                        ) : null}
+                      </div>
                       {isEditingSelectedAgenda ? (
                         <>
                           <input
