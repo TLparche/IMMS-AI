@@ -250,6 +250,7 @@ export interface CanvasWorkspaceItem {
   kind: string;
   title: string;
   body: string;
+  keywords?: string[];
   x?: number;
   y?: number;
 }

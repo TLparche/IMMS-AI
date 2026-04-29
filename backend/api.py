@@ -494,6 +494,7 @@ def _normalize_canvas_workspace_items(
             "kind": _safe_text(item.kind, "note"),
             "title": _safe_text(item.title),
             "body": _safe_text(item.body),
+            "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
         }
 
         try:
@@ -1468,6 +1469,7 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     kind: str = "note"
     title: str = ""
     body: str = ""
+    keywords: list[str] = Field(default_factory=list)
     x: float | None = None
     y: float | None = None
 

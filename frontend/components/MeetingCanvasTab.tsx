@@ -169,6 +169,7 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
     kind: item.kind,
     title: item.title,
     body: item.body,
+    keywords: (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean),
     x: typeof item.x === "number" ? item.x : undefined,
     y: typeof item.y === "number" ? item.y : undefined,
   }));
@@ -759,12 +760,93 @@ function estimateCanvasItemNodeHeight(title: string, body: string) {
   return 150 + (titleLines - 1) * 16 + (bodyLines - 1) * 18;
 }
 
+const CANVAS_ITEM_KEYWORD_STOPWORDS = new Set([
+  "note",
+  "comment",
+  "topic",
+  "memo",
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "this",
+  "that",
+  "메모",
+  "코멘트",
+  "주제",
+  "내용",
+  "입력",
+  "입력해",
+  "작성",
+  "정리",
+  "정리해",
+  "해주세요",
+  "주세요",
+  "새",
+  "신규",
+  "공용",
+  "canvas",
+  "캔버스",
+]);
+
+function normalizeCanvasItemKeyword(raw: string) {
+  const token = raw
+    .trim()
+    .replace(/^#+/, "")
+    .replace(/^[^\w가-힣]+|[^\w가-힣]+$/g, "");
+  if (!token || token.length < 2 || /^\d+$/.test(token)) return "";
+
+  const normalized = /[A-Za-z]/.test(token)
+    ? token.toLowerCase()
+    : token.replace(/(으로|에서|에게|까지|부터|처럼|보다|은|는|이|가|을|를|에|와|과|로|의|도|만)$/u, "");
+  if (!normalized || normalized.length < 2) return "";
+  if (CANVAS_ITEM_KEYWORD_STOPWORDS.has(normalized)) return "";
+
+  return normalized;
+}
+
+function extractCanvasItemKeywords(title: string, body: string, limit = 5) {
+  const scores = new Map<string, { value: string; score: number; firstSeen: number }>();
+  let cursor = 0;
+
+  const addSource = (source: string, weight: number) => {
+    const matches = source.match(/[A-Za-z0-9가-힣][A-Za-z0-9가-힣+#._-]{1,}/g) || [];
+    matches.forEach((match) => {
+      const keyword = normalizeCanvasItemKeyword(match);
+      if (!keyword) return;
+
+      const existing = scores.get(keyword);
+      if (existing) {
+        existing.score += weight;
+        return;
+      }
+
+      scores.set(keyword, {
+        value: keyword,
+        score: weight,
+        firstSeen: cursor,
+      });
+      cursor += 1;
+    });
+  };
+
+  addSource(title, 2);
+  addSource(body, 1);
+
+  return [...scores.values()]
+    .sort((left, right) => right.score - left.score || left.firstSeen - right.firstSeen)
+    .slice(0, limit)
+    .map((entry) => entry.value);
+}
+
 function makeCanvasItemNodeLabel(
   item: CanvasItemViewModel,
   selected: boolean,
   linkedAgendaTitle: string,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
+  const keywords = (item.keywords || []).filter(Boolean).slice(0, 3);
 
   return (
     <div className="min-w-0 p-1">
@@ -786,6 +868,15 @@ function makeCanvasItemNodeLabel(
             {item.body || "내용을 입력해 주세요."}
           </p>
         </div>
+        {keywords.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {keywords.map((keyword) => (
+              <span key={`${item.id}-${keyword}`} className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                #{keyword}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {item.point_id ? (
           <p className={`mt-3 text-xs font-medium ${tone.accent}`}>연결 노드: {item.point_id}</p>
         ) : null}
@@ -1106,6 +1197,16 @@ function serializeSharedProblemGroups(groups: ProblemGroupViewModel[]) {
 
 function serializeSharedCanvasItems(items: CanvasItemViewModel[]) {
   return buildWorkspaceCanvasItemsPayload(items);
+}
+
+function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewModel[] {
+  return items.map((item) => {
+    const keywords = (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean);
+    return {
+      ...item,
+      keywords: keywords.length > 0 ? keywords.slice(0, 8) : extractCanvasItemKeywords(item.title, item.body, 5),
+    };
+  });
 }
 
 function hydrateSolutionTopics(
@@ -1655,8 +1756,8 @@ export default function MeetingCanvasTab({
           ? savedLocalCanvasState?.agenda_overrides || {}
           : saved.agenda_overrides || {};
         const nextCanvasItems = shouldUseLocalCanvas
-          ? savedLocalCanvasState?.canvas_items || []
-          : saved.canvas_items || [];
+          ? hydrateCanvasItems(savedLocalCanvasState?.canvas_items || [])
+          : hydrateCanvasItems(saved.canvas_items || []);
         const nextGroups = shouldUseLocalCanvas
           ? hydrateProblemGroups(savedLocalCanvasState?.problem_groups || [], sharedGroups)
           : sharedGroups;
@@ -2447,10 +2548,11 @@ export default function MeetingCanvasTab({
       incomingSharedCanvasSync.stage === "solution"
         ? incomingSharedCanvasSync.stage
         : "ideation";
+    const incomingCanvasItems = hydrateCanvasItems(incomingSharedCanvasSync.canvas_items || []);
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       stage: incomingStage,
       agenda_overrides: incomingSharedCanvasSync.agenda_overrides || {},
-      canvas_items: incomingSharedCanvasSync.canvas_items || [],
+      canvas_items: incomingCanvasItems,
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
       solution_topics: serializeSharedSolutionTopics(
         hydrateSolutionTopics(
@@ -2473,7 +2575,7 @@ export default function MeetingCanvasTab({
     setProblemGroups(nextProblemGroups);
     setSolutionTopics(nextSolutionTopics);
     setAgendaOverrides(incomingSharedCanvasSync.agenda_overrides || {});
-    setCanvasItems(incomingSharedCanvasSync.canvas_items || []);
+    setCanvasItems(incomingCanvasItems);
     setNodePositions((prev) =>
       sharedSyncEnabled
         ? incomingSharedCanvasSync.node_positions || {}
@@ -2495,7 +2597,7 @@ export default function MeetingCanvasTab({
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
       stage: incomingStage,
       agendaOverrides: incomingSharedCanvasSync.agenda_overrides || {},
-      canvasItems: incomingSharedCanvasSync.canvas_items || [],
+      canvasItems: incomingCanvasItems,
       problemGroups: nextProblemGroups,
       solutionTopics: nextSolutionTopics,
       nodePositions: incomingSharedCanvasSync.node_positions || {},
@@ -2842,6 +2944,7 @@ export default function MeetingCanvasTab({
                 item.kind,
                 item.title,
                 item.body,
+                ...(item.keywords || []),
                 item.agenda_id,
                 item.point_id,
                 selectedCanvasItemId === item.id,
@@ -3093,7 +3196,7 @@ export default function MeetingCanvasTab({
           linkedAgenda?.title || "",
         ].filter(Boolean),
         insightLens: "",
-        keywords: [],
+        keywords: (selectedCanvasItem.keywords || []).slice(0, 5),
         summaryItems: [
           {
             label: "내용",
@@ -3393,6 +3496,12 @@ export default function MeetingCanvasTab({
       const draftTitle = `${toolLabel(tool)} ${canvasItems.filter((item) => item.kind === tool).length + 1}`;
       const nextItemId = `item-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
       const nextNodeId = `canvas-item-${nextItemId}`;
+      const draftBody =
+        tool === "topic"
+          ? "새 주제를 정리해 주세요."
+          : tool === "comment"
+            ? "코멘트 내용을 입력해 주세요."
+            : "메모 내용을 입력해 주세요.";
       suppressNextAutoFitRef.current = true;
       pendingNodePlacementsRef.current[nextNodeId] = {
         x: flowPosition.x,
@@ -3404,14 +3513,10 @@ export default function MeetingCanvasTab({
         point_id: pointId || "",
         kind: tool,
         title: draftTitle,
+        keywords: extractCanvasItemKeywords(draftTitle, draftBody),
         x: flowPosition.x,
         y: flowPosition.y,
-        body:
-          tool === "topic"
-            ? "새 주제를 정리해 주세요."
-            : tool === "comment"
-              ? "코멘트 내용을 입력해 주세요."
-              : "메모 내용을 입력해 주세요.",
+        body: draftBody,
       };
       const nextCanvasItemsSnapshot: CanvasItemViewModel[] = [nextItem, ...canvasItems];
       const nextNodePositionsSnapshot: CanvasNodePositionsByStage = {
@@ -3761,6 +3866,7 @@ export default function MeetingCanvasTab({
 
     const nextTitle = canvasItemDraftTitle.trim() || selectedCanvasItem.title;
     const nextBody = canvasItemDraftBody.trim() || selectedCanvasItem.body || "";
+    const nextKeywords = extractCanvasItemKeywords(nextTitle, nextBody);
     let nextCanvasItemsSnapshot: CanvasItemViewModel[] | null = null;
 
     setCanvasItems((prev) => {
@@ -3770,6 +3876,7 @@ export default function MeetingCanvasTab({
               ...item,
               title: nextTitle,
               body: nextBody,
+              keywords: nextKeywords,
             }
           : item,
       );

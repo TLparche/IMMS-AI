@@ -123,7 +123,6 @@ function HomeContent() {
   const searchParams = useSearchParams();
   const { user, loading: authLoading } = useAuth();
   const meetingId = searchParams.get("meeting_id");
-  const headerRef = useRef<HTMLElement | null>(null);
 
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("meeting");
   const [meetingTitle, setMeetingTitle] = useState("회의 워크스페이스");
@@ -138,7 +137,6 @@ function HomeContent() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
   const [autoSyncing, setAutoSyncing] = useState(false);
-  const [canvasViewportHeight, setCanvasViewportHeight] = useState<number | null>(null);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
   const [incomingCanvasStateRequestId, setIncomingCanvasStateRequestId] = useState("");
   const [calibrationState, setCalibrationState] = useState<CalibrationState>("idle");
@@ -224,21 +222,6 @@ function HomeContent() {
     setAgendas(mapped.agendas);
     setDecisions(mapped.decisions);
     setActionItems(mapped.actionItems);
-  }, []);
-
-  useEffect(() => {
-    const updateCanvasViewport = () => {
-      const headerHeight = headerRef.current?.offsetHeight || 0;
-      const nextHeight = Math.max(window.innerHeight - headerHeight, 520);
-      setCanvasViewportHeight(nextHeight);
-    };
-
-    updateCanvasViewport();
-    window.addEventListener("resize", updateCanvasViewport);
-
-    return () => {
-      window.removeEventListener("resize", updateCanvasViewport);
-    };
   }, []);
 
   useEffect(() => {
@@ -736,7 +719,7 @@ function HomeContent() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-gray-50">
-      <header ref={headerRef} className="bg-white border-b border-gray-200 shadow-sm">
+      <header className="bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
@@ -793,7 +776,7 @@ function HomeContent() {
 
       <main className={activeTab === "canvas" ? "flex-1 min-h-0 overflow-hidden p-0" : "max-w-7xl mx-auto w-full flex-1 overflow-y-auto px-4 py-8 sm:px-6 lg:px-8"}>
         {activeTab === "canvas" ? (
-          <div className="min-h-0" style={{ height: canvasViewportHeight ?? undefined }}>
+          <div className="h-full min-h-0">
             <MeetingCanvasTab
               userId={user.id}
               meetingId={meetingId}
