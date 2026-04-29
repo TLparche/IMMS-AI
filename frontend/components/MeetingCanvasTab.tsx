@@ -6,6 +6,7 @@ import {
   BackgroundVariant,
   Controls,
   MiniMap,
+  MarkerType,
   Position,
   ReactFlow,
   addEdge,
@@ -1341,6 +1342,12 @@ type CanvasNodeData = {
   contentSignature: string;
 };
 
+type CanvasEdgeData = {
+  kind?: "canvasItemLink";
+  canvasItemId?: string;
+  linkField?: "agenda_id" | "point_id";
+};
+
 type CanvasNodeDescriptor = {
   id: string;
   position: { x: number; y: number };
@@ -1491,6 +1498,7 @@ export default function MeetingCanvasTab({
   const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const [selectedEdgeId, setSelectedEdgeId] = useState("");
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
   const [rightPanelWidth, setRightPanelWidth] = useState(360);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
@@ -3063,6 +3071,90 @@ export default function MeetingCanvasTab({
     () => canvasItems.find((item) => item.id === selectedCanvasItemId) || null,
     [canvasItems, selectedCanvasItemId],
   );
+  const autoLinkEdges = useMemo<Edge[]>(() => {
+    if (stage !== "ideation") return [];
+
+    const validNodeIds = new Set(nodes.map((node) => node.id));
+
+    return canvasItems.flatMap((item): Edge[] => {
+      const target = `canvas-item-${item.id}`;
+      if (!validNodeIds.has(target)) return [];
+
+      const pointSource =
+        item.point_id && item.point_id !== target && validNodeIds.has(item.point_id)
+          ? item.point_id
+          : "";
+      const agendaSource =
+        item.agenda_id && validNodeIds.has(`agenda-${item.agenda_id}`)
+          ? `agenda-${item.agenda_id}`
+          : "";
+      const source = pointSource || agendaSource;
+      if (!source || source === target) return [];
+
+      const linkField: CanvasEdgeData["linkField"] = pointSource ? "point_id" : "agenda_id";
+
+      return [
+        {
+          id: `auto-link-${source}-${target}`,
+          source,
+          target,
+          type: "smoothstep",
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: "#475569",
+          },
+          interactionWidth: 28,
+          zIndex: 10,
+          style: { stroke: "#475569", strokeOpacity: 0.95, strokeWidth: 2 },
+          data: {
+            kind: "canvasItemLink",
+            canvasItemId: item.id,
+            linkField,
+          } satisfies CanvasEdgeData,
+        },
+      ];
+    });
+  }, [canvasItems, nodes, stage]);
+  const displayEdges = useMemo<Edge[]>(() => {
+    const autoPairs = new Set(autoLinkEdges.map((edge) => `${edge.source}->${edge.target}`));
+    return [
+      ...autoLinkEdges,
+      ...edges.filter((edge) => !autoPairs.has(`${edge.source}->${edge.target}`)),
+    ];
+  }, [autoLinkEdges, edges]);
+  const selectedEdge = useMemo(
+    () => displayEdges.find((edge) => edge.id === selectedEdgeId) || null,
+    [displayEdges, selectedEdgeId],
+  );
+  const renderedEdges = useMemo<Edge[]>(
+    () =>
+      displayEdges.map((edge): Edge => {
+        const isSelected = edge.id === selectedEdgeId;
+        return {
+          ...edge,
+          selected: isSelected,
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: isSelected ? "#0f172a" : "#475569",
+          },
+          interactionWidth: isSelected ? 36 : 28,
+          zIndex: isSelected ? 20 : 10,
+          style: {
+            ...(edge.style || {}),
+            stroke: isSelected ? "#0f172a" : edge.style?.stroke || "#475569",
+            strokeOpacity: 0.95,
+            strokeWidth: isSelected ? 3 : edge.style?.strokeWidth || 2,
+          } as React.CSSProperties,
+        };
+      }),
+    [displayEdges, selectedEdgeId],
+  );
+  useEffect(() => {
+    if (!selectedEdgeId) return;
+    if (!displayEdges.some((edge) => edge.id === selectedEdgeId)) {
+      setSelectedEdgeId("");
+    }
+  }, [displayEdges, selectedEdgeId]);
   const selectedProblemGroup = useMemo(
     () => problemGroups.find((group) => group.group_id === selectedProblemGroupId) || problemGroups[0] || null,
     [problemGroups, selectedProblemGroupId],
@@ -3190,7 +3282,7 @@ export default function MeetingCanvasTab({
 
     if (stage === "ideation" && selectedCanvasItem) {
       const linkedAgenda =
-        agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id) || selectedAgenda;
+        agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id) || null;
 
       return {
         title: selectedCanvasItem.title,
@@ -3764,22 +3856,126 @@ export default function MeetingCanvasTab({
   };
 
   const onEdgesChange = (changes: EdgeChange[]) => {
+    const removedIds = new Set(
+      changes
+        .filter((change) => change.type === "remove")
+        .map((change) => change.id),
+    );
+    if (selectedEdgeId && removedIds.has(selectedEdgeId)) {
+      setSelectedEdgeId("");
+    }
     setEdges((current) => applyEdgeChanges(changes, current));
   };
 
   const onConnect = (connection: Connection) => {
-    setEdges((current) =>
-      addEdge(
+    const edgeId = `user-edge-${Date.now()}`;
+    setSelectedEdgeId(edgeId);
+    setEdges((current) => {
+      const existingEdge = current.find(
+        (edge) =>
+          edge.source === connection.source &&
+          edge.target === connection.target &&
+          edge.sourceHandle === connection.sourceHandle &&
+          edge.targetHandle === connection.targetHandle,
+      );
+      if (existingEdge) {
+        setSelectedEdgeId(existingEdge.id);
+        return current;
+      }
+
+      return addEdge(
         {
           ...connection,
-          id: `user-edge-${Date.now()}`,
+          id: edgeId,
           type: "smoothstep",
-          style: { stroke: "#94a3b8", strokeWidth: 1.25 },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: "#475569",
+          },
+          interactionWidth: 28,
+          zIndex: 10,
+          style: { stroke: "#475569", strokeOpacity: 0.95, strokeWidth: 2 },
         },
         current,
-      ),
-    );
+      );
+    });
   };
+
+  const handleDeleteSelectedEdge = useCallback(() => {
+    if (!selectedEdgeId || !selectedEdge) return;
+
+    const edgeData = (selectedEdge.data || {}) as CanvasEdgeData;
+    if (edgeData.kind === "canvasItemLink" && edgeData.canvasItemId) {
+      const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+        item.id === edgeData.canvasItemId
+          ? {
+              ...item,
+              agenda_id: "",
+              point_id: "",
+            }
+          : item,
+      );
+
+      setCanvasItems(nextCanvasItemsSnapshot);
+      setSelectedCanvasItemId(edgeData.canvasItemId);
+      setSelectedNodeId(`canvas-item-${edgeData.canvasItemId}`);
+      setSelectedEdgeId("");
+      setActivityMessage("노드 연결 정보와 연결선을 삭제했습니다.");
+
+      if (sharedSyncEnabled) {
+        latestSharedWorkspaceRef.current = {
+          ...latestSharedWorkspaceRef.current,
+          canvasItems: nextCanvasItemsSnapshot,
+          importedState: persistedSharedImportedState,
+        };
+        forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+        if (meetingId) {
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+          }).catch((error) => {
+            console.error("Failed to save shared canvas item link removal:", error);
+          });
+        }
+      }
+      return;
+    }
+
+    setEdges((current) => current.filter((edge) => edge.id !== selectedEdgeId));
+    setSelectedEdgeId("");
+    setActivityMessage("노드 연결을 삭제했습니다.");
+  }, [
+    canvasItems,
+    forceBroadcastSharedCanvas,
+    meetingId,
+    persistedSharedImportedState,
+    selectedEdge,
+    selectedEdgeId,
+    sharedSyncEnabled,
+  ]);
+
+  useEffect(() => {
+    if (!selectedEdgeId) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isEditableTarget =
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        Boolean(target?.isContentEditable);
+
+      if (isEditableTarget || (event.key !== "Delete" && event.key !== "Backspace")) {
+        return;
+      }
+
+      event.preventDefault();
+      handleDeleteSelectedEdge();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleDeleteSelectedEdge, selectedEdgeId]);
 
   const handleDeletePersonalNote = (noteId: string) => {
     setPersonalNotes((prev) => prev.filter((item) => item.id !== noteId));
@@ -3956,6 +4152,94 @@ export default function MeetingCanvasTab({
           canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
         }).catch((error) => {
           console.error("Failed to save shared canvas item keywords:", error);
+        });
+      }
+    }
+  };
+
+  const handleClearCanvasItemLink = (targetItemId: string, field: "agenda_id" | "point_id") => {
+    if (!targetItemId) return;
+
+    const targetItem = canvasItems.find((item) => item.id === targetItemId);
+    if (!targetItem || !targetItem[field]) {
+      setActivityMessage(field === "agenda_id" ? "해제할 연결 안건이 없습니다." : "해제할 연결 위치가 없습니다.");
+      return;
+    }
+
+    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+      item.id === targetItemId
+        ? {
+            ...item,
+            [field]: "",
+          }
+        : item,
+    );
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    setSelectedCanvasItemId(targetItemId);
+    setSelectedNodeId(`canvas-item-${targetItemId}`);
+    if (field === "agenda_id") {
+      setActivityMessage("공용 canvas 아이템의 연결 안건을 해제했습니다.");
+    } else {
+      setActivityMessage("공용 canvas 아이템의 연결 위치를 해제했습니다.");
+    }
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared canvas item link removal:", error);
+        });
+      }
+    }
+  };
+
+  const handleSetCanvasItemAgendaLink = (targetItemId: string, agendaId: string) => {
+    if (!targetItemId || !agendaId) return;
+
+    const targetAgenda = agendaModels.find((agenda) => agenda.id === agendaId);
+    if (!targetAgenda) {
+      setActivityMessage("연결할 안건을 찾을 수 없습니다.");
+      return;
+    }
+
+    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+      item.id === targetItemId
+        ? {
+            ...item,
+            agenda_id: agendaId,
+            point_id: "",
+          }
+        : item,
+    );
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    setSelectedCanvasItemId(targetItemId);
+    setSelectedNodeId(`canvas-item-${targetItemId}`);
+    setSelectedAgendaId(agendaId);
+    setActivityMessage(`공용 canvas 아이템을 "${targetAgenda.title}" 안건에 연결했습니다.`);
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared canvas item agenda link:", error);
         });
       }
     }
@@ -5058,8 +5342,49 @@ export default function MeetingCanvasTab({
                       <div className="mt-4 space-y-3">
                         {leftPanelDetail.organizeItems.map((item, index) => (
                           <div key={`${leftPanelDetail.title}-organize-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                            <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                          <p className="mt-1 text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                                <p className="mt-1 text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
+                                {stage === "ideation" && selectedCanvasItem && item.label === "연결 안건" ? (
+                                  <select
+                                    value={selectedCanvasItem.agenda_id || ""}
+                                    onChange={(event) => {
+                                      const nextAgendaId = event.target.value;
+                                      if (nextAgendaId) {
+                                        handleSetCanvasItemAgendaLink(selectedCanvasItem.id, nextAgendaId);
+                                      }
+                                    }}
+                                    className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                                  >
+                                    <option value="">연결할 안건 선택</option>
+                                    {agendaModels.map((agenda) => (
+                                      <option key={`${selectedCanvasItem.id}-agenda-link-${agenda.id}`} value={agenda.id}>
+                                        {agenda.title}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : null}
+                              </div>
+                              {stage === "ideation" && selectedCanvasItem && item.label === "연결 안건" && selectedCanvasItem.agenda_id ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleClearCanvasItemLink(selectedCanvasItem.id, "agenda_id")}
+                                  className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                                >
+                                  해제
+                                </button>
+                              ) : null}
+                              {stage === "ideation" && selectedCanvasItem && item.label === "연결 위치" && selectedCanvasItem.point_id ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleClearCanvasItemLink(selectedCanvasItem.id, "point_id")}
+                                  className="shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                                >
+                                  해제
+                                </button>
+                              ) : null}
+                            </div>
                         </div>
                       ))}
                       </div>
@@ -5211,11 +5536,12 @@ export default function MeetingCanvasTab({
             >
               <ReactFlow
                 nodes={nodes}
-                edges={edges}
+                edges={renderedEdges}
                 onInit={(instance) => {
                   flowRef.current = instance;
                 }}
                 onNodeClick={(event, node) => {
+                  setSelectedEdgeId("");
                   setSelectedNodeId(node.id);
                   setLeftPanelTab("detail");
                   const agendaId = extractAgendaIdFromNodeId(node.id);
@@ -5258,7 +5584,16 @@ export default function MeetingCanvasTab({
                     );
                   }
                 }}
+                onEdgeClick={(event, edge) => {
+                  event.stopPropagation();
+                  setSelectedEdgeId(edge.id);
+                  setSelectedNodeId("");
+                  setSelectedCanvasItemId("");
+                  setSelectedProblemGroupId("");
+                  setSelectedSolutionTopicId("");
+                }}
                 onPaneClick={(event) => {
+                  setSelectedEdgeId("");
                   if (!armedCanvasTool) {
                     return;
                   }
@@ -5274,9 +5609,17 @@ export default function MeetingCanvasTab({
                 onNodeDragStop={onNodeDragStop}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
+                elevateEdgesOnSelect
+                connectionLineStyle={{ stroke: "#0f172a", strokeOpacity: 0.9, strokeWidth: 2 }}
                 minZoom={0.45}
                 maxZoom={1.6}
-                defaultEdgeOptions={{ type: "smoothstep" }}
+                defaultEdgeOptions={{
+                  type: "smoothstep",
+                  markerEnd: { type: MarkerType.ArrowClosed, color: "#475569" },
+                  interactionWidth: 28,
+                  zIndex: 10,
+                  style: { stroke: "#475569", strokeOpacity: 0.95, strokeWidth: 2 },
+                }}
                 proOptions={{ hideAttribution: true }}
               >
                 <Background variant={BackgroundVariant.Dots} gap={18} size={1.2} color="#dbe3f0" />
@@ -5284,6 +5627,25 @@ export default function MeetingCanvasTab({
                 <Controls />
               </ReactFlow>
             </div>
+
+            {selectedEdge ? (
+              <div className="absolute right-4 top-4 z-[9] w-[260px] rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-[0_18px_46px_rgba(15,23,42,0.16)] backdrop-blur">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Connection</p>
+                  <p className="mt-1 truncate text-sm font-semibold text-slate-800">
+                    {selectedEdge.source} → {selectedEdge.target}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDeleteSelectedEdge}
+                  className="mt-3 w-full rounded-xl bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700"
+                >
+                  연결 삭제
+                </button>
+                <p className="mt-2 text-xs leading-5 text-slate-500">연결선을 클릭해 선택한 뒤 Delete 또는 Backspace로도 삭제할 수 있습니다.</p>
+              </div>
+            ) : null}
 
             {placementFeedback ? (
               <div
