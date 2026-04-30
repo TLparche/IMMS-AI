@@ -1,3 +1,6 @@
+type WebSocketMessage = Record<string, unknown>
+type WebSocketMessageHandler = (data: WebSocketMessage) => void
+
 export class WebSocketClient {
   private ws: WebSocket | null = null
   private reconnectAttempts = 0
@@ -7,7 +10,7 @@ export class WebSocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private meetingId: string
   private userId: string
-  private messageHandlers: Map<string, (data: any) => void> = new Map()
+  private messageHandlers: Map<string, WebSocketMessageHandler> = new Map()
   private connectionStateHandler: ((connected: boolean) => void) | null = null
 
   constructor(meetingId: string, userId: string) {
@@ -45,11 +48,12 @@ export class WebSocketClient {
 
     this.ws.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data)
+        const message = JSON.parse(event.data) as WebSocketMessage
         console.log('📨 WebSocket message:', message)
 
-        if (message.type && this.messageHandlers.has(message.type)) {
-          const handler = this.messageHandlers.get(message.type)
+        const messageType = typeof message.type === 'string' ? message.type : ''
+        if (messageType && this.messageHandlers.has(messageType)) {
+          const handler = this.messageHandlers.get(messageType)
           if (handler) handler(message)
         }
       } catch (error) {
@@ -94,7 +98,7 @@ export class WebSocketClient {
     }, delay)
   }
 
-  on(eventType: string, handler: (data: any) => void) {
+  on(eventType: string, handler: WebSocketMessageHandler) {
     this.messageHandlers.set(eventType, handler)
   }
 
@@ -141,7 +145,7 @@ export class WebSocketClient {
     reader.readAsDataURL(audioBlob)
   }
 
-  sendMessage(type: string, data: any) {
+  sendMessage(type: string, data: Record<string, unknown>) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('⚠️ WebSocket not connected, cannot send message')
       return

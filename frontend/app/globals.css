@@ -53,6 +53,112 @@
   background: transparent;
 }
 
+.react-flow__controls {
+  overflow: hidden !important;
+  border: 1px solid rgba(148, 163, 184, 0.35) !important;
+  border-radius: 18px !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.14) !important;
+}
+
+.react-flow__controls-button {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92) !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  color: #10243f !important;
+}
+
+.react-flow__controls-button:hover {
+  background: #ecfeff !important;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor !important;
+}
+
+.react-flow__minimap {
+  overflow: hidden !important;
+  border: 1px solid rgba(148, 163, 184, 0.28) !important;
+  border-radius: 22px !important;
+  background: rgba(255, 255, 255, 0.86) !important;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.12) !important;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.imms-side-panel-surface {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.imms-left-panel-detail > section {
+  margin-top: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1) !important;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 14px !important;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.imms-left-panel-detail > section:first-child {
+  margin-top: 0;
+}
+
+.imms-left-panel-detail > p {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.imms-side-panel input,
+.imms-side-panel textarea,
+.imms-side-panel select {
+  background-color: #ffffff;
+}
+
+.imms-side-panel input:focus,
+.imms-side-panel textarea:focus,
+.imms-side-panel select:focus {
+  border-color: rgba(27, 89, 248, 0.45) !important;
+  box-shadow: 0 0 0 3px rgba(27, 89, 248, 0.08);
+}
+
+.imms-overlay-scroll {
+  scrollbar-gutter: auto;
+}
+
+@supports (overflow: overlay) {
+  .imms-overlay-scroll {
+    overflow-y: overlay !important;
+  }
+}
+
+.imms-overlay-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.imms-overlay-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.imms-overlay-scroll::-webkit-scrollbar-thumb {
+  background: rgba(77, 77, 77, 0.22);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.imms-overlay-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(77, 77, 77, 0.38);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
