@@ -14,53 +14,82 @@ interface Meeting {
   host_id: string;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+  }
+  return fallback;
+}
+
+function getMeetingStatusLabel(status: string) {
+  if (status === "active" || status === "in_progress") return "진행";
+  if (status === "scheduled" || status === "waiting") return "예정";
+  if (status === "completed") return "종료";
+  return status;
+}
+
+function getMeetingActionLabel(status: string) {
+  return status === "completed" ? "열기" : "참여";
+}
+
+function formatDashboardDate(value: string) {
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  })
+    .format(new Date(value))
+    .replace(/\. /g, ".")
+    .replace(/\.$/, "");
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const { user, loading: authLoading, signOut } = useAuth();
-  
+
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [newMeetingTitle, setNewMeetingTitle] = useState('');
+  const [newMeetingTitle, setNewMeetingTitle] = useState("");
 
-  // 인증 체크
   useEffect(() => {
-    console.log('📊 Dashboard - Auth check:', { authLoading, userEmail: user?.email });
+    console.log("📊 Dashboard - Auth check:", { authLoading, userEmail: user?.email });
     if (!authLoading && !user) {
-      console.log('❌ Dashboard - No user, redirecting to /login');
-      router.push('/login');
+      console.log("❌ Dashboard - No user, redirecting to /login");
+      router.push("/login");
     }
   }, [user, authLoading, router]);
 
-  // 회의 목록 로드
   useEffect(() => {
     if (user) {
-      console.log('📊 Dashboard - Loading meetings for user:', user.email);
-      loadMeetings();
+      console.log("📊 Dashboard - Loading meetings for user:", user.email);
+      void loadMeetings();
     }
   }, [user]);
 
   const loadMeetings = async () => {
     try {
       setLoading(true);
-      console.log('📊 Dashboard - Fetching meetings from Supabase...');
-      
+      console.log("📊 Dashboard - Fetching meetings from Supabase...");
+
       const { data, error } = await supabase
-        .from('meetings')
-        .select('*')
-        .order('created_at', { ascending: false })
+        .from("meetings")
+        .select("*")
+        .order("created_at", { ascending: false })
         .limit(50);
 
       if (error) {
-        console.error('❌ Dashboard - Failed to load meetings:', error);
+        console.error("❌ Dashboard - Failed to load meetings:", error);
         throw error;
       }
 
-      console.log('✅ Dashboard - Loaded meetings:', data?.length || 0);
+      console.log("✅ Dashboard - Loaded meetings:", data?.length || 0);
       setMeetings(data || []);
     } catch (error) {
-      console.error('Error loading meetings:', error);
-      alert('회의 목록을 불러오는데 실패했습니다.');
+      console.error("Error loading meetings:", error);
+      alert("회의 목록을 불러오는데 실패했습니다.");
     } finally {
       setLoading(false);
     }
@@ -69,96 +98,91 @@ export default function DashboardPage() {
   const handleCreateMeeting = async () => {
     if (!user) return;
     if (!newMeetingTitle.trim()) {
-      alert('회의 제목을 입력해주세요.');
+      alert("회의 제목을 입력해주세요.");
       return;
     }
 
     try {
-      console.log('📊 Dashboard - Creating new meeting:', newMeetingTitle);
-      
+      console.log("📊 Dashboard - Creating new meeting:", newMeetingTitle);
+
       const { data, error } = await supabase
-        .from('meetings')
+        .from("meetings")
         .insert([
           {
             title: newMeetingTitle,
             host_id: user.id,
-            status: 'scheduled'
-          }
+            status: "scheduled",
+          },
         ])
         .select()
         .single();
 
       if (error) {
-        console.error('❌ Dashboard - Failed to create meeting:', error);
+        console.error("❌ Dashboard - Failed to create meeting:", error);
         throw error;
       }
 
-      console.log('✅ Dashboard - Meeting created:', data.id);
+      console.log("✅ Dashboard - Meeting created:", data.id);
       setShowCreateModal(false);
-      setNewMeetingTitle('');
-      
-      // 회의 목록 새로고침
+      setNewMeetingTitle("");
+
       await loadMeetings();
-      
-      // 회의 페이지로 이동
       router.push(`/?meeting_id=${data.id}`);
     } catch (error) {
-      console.error('Error creating meeting:', error);
-      alert('회의 생성에 실패했습니다: ' + (error as any).message);
+      console.error("Error creating meeting:", error);
+      alert("회의 생성에 실패했습니다: " + getErrorMessage(error, "알 수 없는 오류"));
     }
   };
 
   const handleJoinMeeting = (meetingId: string) => {
-    console.log('📊 Dashboard - Joining meeting:', meetingId);
+    console.log("📊 Dashboard - Joining meeting:", meetingId);
     router.push(`/?meeting_id=${meetingId}`);
   };
 
   const handleLogout = async () => {
-    console.log('📊 Dashboard - Logging out...');
+    console.log("📊 Dashboard - Logging out...");
     await signOut();
-    router.push('/login');
+    router.push("/login");
   };
 
-  // 로딩 중
   if (authLoading) {
-    console.log('⏳ Dashboard - Auth loading...');
+    console.log("⏳ Dashboard - Auth loading...");
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">로딩 중...</p>
+      <div className="flex min-h-screen items-center justify-center bg-[#f9f9f9]">
+        <div className="rounded-2xl border border-black/10 bg-white px-8 py-7 text-center">
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-[3px] border-[#e9efff] border-t-[#1b59f8]" />
+          <p className="mt-4 text-sm font-medium text-[#4d4d4d]">로딩 중...</p>
         </div>
       </div>
     );
   }
 
-  // 인증되지 않은 경우
   if (!user) {
-    console.log('❌ Dashboard - No user, showing redirect message');
+    console.log("❌ Dashboard - No user, showing redirect message");
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <p className="text-gray-600">로그인이 필요합니다. 리다이렉트 중...</p>
+      <div className="flex min-h-screen items-center justify-center bg-[#f9f9f9]">
+        <div className="rounded-2xl border border-black/10 bg-white px-8 py-7 text-center">
+          <p className="text-sm font-medium text-[#4d4d4d]">로그인이 필요합니다. 리다이렉트 중...</p>
         </div>
       </div>
     );
   }
 
-  console.log('🎨 Dashboard - Rendering UI with', meetings.length, 'meetings');
+  console.log("🎨 Dashboard - Rendering UI with", meetings.length, "meetings");
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">회의 대시보드</h1>
-              <p className="text-sm text-gray-600 mt-1">{user.email}</p>
-            </div>
+    <div className="min-h-screen bg-[#f9f9f9] text-black">
+      <header className="border border-black/10 bg-white">
+        <div className="mx-auto grid min-h-[113px] max-w-none grid-cols-[1fr_auto_1fr] items-center px-8">
+          <div aria-hidden="true" />
+          <h1 className="justify-self-center text-[32px] font-semibold leading-[24.811px] tracking-normal text-black">회의 대시보드</h1>
+          <div className="flex items-center justify-end gap-7 justify-self-end">
+            <span className="max-w-[180px] truncate text-[16px] font-normal leading-[24.811px] text-[#4d4d4d]">
+              {user.email || "아이디"}
+            </span>
             <button
               onClick={handleLogout}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition font-medium"
+              className="rounded-[8px] bg-[#ef4e4e] px-6 py-2.5 text-[20px] font-semibold leading-[24.811px] text-white transition hover:bg-[#df3f3f]"
             >
               로그아웃
             </button>
@@ -166,60 +190,61 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
-        
-        {/* Create Meeting Button */}
-        <div className="mb-6">
+      <main className="mx-auto max-w-[1407px] px-0 py-[47px]">
+        <div className="mb-[27px] flex items-center gap-3">
           <button
             onClick={() => setShowCreateModal(true)}
-            className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition shadow-md"
+            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#1b59f8] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-white transition hover:bg-[#164be0]"
           >
-            + 새 회의 만들기
+            <svg aria-hidden="true" className="h-6 w-6 shrink-0" viewBox="0 0 24 24" fill="none">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+            </svg>
+            새 회의 생성
+          </button>
+          <button
+            type="button"
+            onClick={() => alert("불러오기 기능은 추후 회의 파일/스냅샷 선택과 연결할 수 있습니다.")}
+            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#e9efff] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-[#1b59f8] transition hover:bg-[#dfe8ff]"
+          >
+            <svg aria-hidden="true" className="h-6 w-6 shrink-0" viewBox="0 0 24 24" fill="none">
+              <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5M5 19h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            불러오기
           </button>
         </div>
 
-        {/* Meetings List */}
-        <div className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-lg font-semibold text-gray-900">내 회의 목록</h2>
+        <section className="overflow-hidden rounded-[16px] border border-black/10 bg-white">
+          <div className="flex h-[81px] items-center border-b border-black/10 px-8">
+            <h2 className="text-[18px] font-semibold leading-[24.811px] text-black">내 회의 목록</h2>
           </div>
 
           {loading ? (
-            <div className="p-8 text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-              <p className="mt-4 text-gray-600">회의 목록을 불러오는 중...</p>
+            <div className="p-12 text-center">
+              <div className="mx-auto h-9 w-9 animate-spin rounded-full border-[3px] border-[#e9efff] border-t-[#1b59f8]" />
+              <p className="mt-4 text-sm font-medium text-[#4d4d4d]">회의 목록을 불러오는 중...</p>
             </div>
           ) : meetings.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">
-              <p>아직 생성된 회의가 없습니다.</p>
-              <p className="text-sm mt-2">위의 "새 회의 만들기" 버튼을 눌러 회의를 시작하세요.</p>
+            <div className="p-12 text-center">
+              <p className="font-semibold text-black">아직 생성된 회의가 없습니다.</p>
+              <p className="mt-2 text-sm text-[#4d4d4d]">새 회의 생성 버튼을 눌러 회의를 시작하세요.</p>
             </div>
           ) : (
-            <div className="divide-y divide-gray-200">
+            <div className="divide-y divide-black/10">
               {meetings.map((meeting) => (
                 <div
                   key={meeting.id}
-                  className="px-6 py-4 hover:bg-gray-50 transition cursor-pointer"
+                  className="group flex min-h-[115px] cursor-pointer items-center px-8 transition hover:bg-[#f9f9f9]"
                   onClick={() => handleJoinMeeting(meeting.id)}
                 >
-                  <div className="flex justify-between items-center">
-                    <div className="flex-1">
-                      <h3 className="text-lg font-medium text-gray-900">{meeting.title}</h3>
-                      <div className="flex items-center gap-3 mt-1">
-                        <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                          meeting.status === 'active' || meeting.status === 'in_progress'
-                            ? 'bg-green-100 text-green-800'
-                            : meeting.status === 'scheduled' || meeting.status === 'waiting'
-                            ? 'bg-blue-100 text-blue-800'
-                            : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          {meeting.status === 'active' || meeting.status === 'in_progress' ? '진행 중' :
-                           meeting.status === 'scheduled' || meeting.status === 'waiting' ? '예정됨' :
-                           meeting.status === 'completed' ? '종료됨' : meeting.status}
+                  <div className="grid w-full gap-4 grid-cols-[minmax(0,1fr)_87px] items-center">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="truncate text-[16px] font-semibold leading-[24.811px] text-black">{meeting.title}</h3>
+                      <div className="mt-[26px] flex flex-wrap items-center gap-3">
+                        <span className="inline-flex min-w-[76px] justify-center rounded-[16px] bg-[#eff0f6] px-4 py-1 text-[14px] font-medium leading-normal tracking-[-0.1737px] text-[#4d4d4d]">
+                          {getMeetingStatusLabel(meeting.status)}
                         </span>
-                        <span className="text-sm text-gray-500">
-                          {new Date(meeting.created_at).toLocaleDateString('ko-KR')}
+                        <span className="text-[14px] font-normal leading-[24.811px] text-[#4d4d4d]">
+                          {formatDashboardDate(meeting.created_at)}
                         </span>
                       </div>
                     </div>
@@ -228,49 +253,49 @@ export default function DashboardPage() {
                         e.stopPropagation();
                         handleJoinMeeting(meeting.id);
                       }}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium"
+                      className="inline-flex h-[41px] w-[87px] items-center justify-center justify-self-end rounded-[16px] bg-[#e9efff] text-[18px] font-medium leading-normal tracking-[-0.1737px] text-[#1b59f8] transition hover:bg-[#dfe8ff]"
                     >
-                      {meeting.status === 'completed' ? '열기' : '참여하기'}
+                      {getMeetingActionLabel(meeting.status)}
                     </button>
                   </div>
                 </div>
               ))}
             </div>
           )}
-        </div>
+        </section>
       </main>
 
-      {/* Create Meeting Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-2xl p-6 max-w-md w-full mx-4">
-            <h2 className="text-xl font-bold text-gray-900 mb-4">새 회의 만들기</h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <div className="w-full max-w-[744px] rounded-[16px] bg-white px-14 py-12">
+            <h2 className="text-2xl font-semibold text-black">회의 이름</h2>
+            <p className="mt-5 text-base text-[#4d4d4d]">회의를 하려면 마이크 연결이 필요합니다.</p>
             <input
               type="text"
               value={newMeetingTitle}
               onChange={(e) => setNewMeetingTitle(e.target.value)}
-              placeholder="회의 제목을 입력하세요"
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="회의 이름"
+              className="mt-8 w-full rounded-[12px] border border-black/10 px-4 py-3 text-base text-black outline-none focus:border-[#1b59f8]"
               onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreateMeeting();
+                if (e.key === "Enter") void handleCreateMeeting();
               }}
             />
-            <div className="flex gap-3 mt-6">
+            <div className="mt-8 flex justify-end gap-4">
               <button
                 onClick={() => {
                   setShowCreateModal(false);
-                  setNewMeetingTitle('');
+                  setNewMeetingTitle("");
                 }}
-                className="flex-1 px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg transition font-medium"
+                className="min-w-[164px] rounded-[8px] bg-[#eff0f6] px-8 py-3 text-base font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
               >
                 취소
               </button>
               <button
-                onClick={handleCreateMeeting}
+                onClick={() => void handleCreateMeeting()}
                 disabled={!newMeetingTitle.trim()}
-                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                className="min-w-[164px] rounded-[8px] bg-[#1b59f8] px-8 py-3 text-base font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                생성
+                시작
               </button>
             </div>
           </div>

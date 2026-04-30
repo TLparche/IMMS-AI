@@ -23,21 +23,6 @@ interface Agenda {
   status: string;
 }
 
-interface Decision {
-  id: string;
-  text: string;
-  status: string;
-}
-
-interface ActionItem {
-  id: string;
-  task: string;
-  owner: string;
-  due_date: string;
-  status: string;
-}
-
-type WorkspaceTab = "meeting" | "canvas";
 type CalibrationState = "idle" | "running" | "done";
 
 interface CalibrationAccumulator {
@@ -97,25 +82,20 @@ function mapAnalysisToUi(state: MeetingState) {
     status: outcome.agenda_state || "PROPOSED",
   }));
 
-  const decisions: Decision[] = outcomes.flatMap((outcome, agendaIndex) =>
-    (outcome.decision_results || []).map((decision, decisionIndex) => ({
-      id: `${outcome.agenda_id || agendaIndex}-decision-${decisionIndex}`,
-      text: decision.conclusion || decision.opinions?.join(" / ") || "결정 내용 없음",
-      status: decision.conclusion ? "approved" : "pending",
-    })),
-  );
+  return { agendas };
+}
 
-  const actionItems: ActionItem[] = outcomes.flatMap((outcome, agendaIndex) =>
-    (outcome.action_items || []).map((item, itemIndex) => ({
-      id: `${outcome.agenda_id || agendaIndex}-action-${itemIndex}`,
-      task: item.item || "액션 아이템",
-      owner: item.owner || "미정",
-      due_date: item.due || "미정",
-      status: item.due ? "in_progress" : "open",
-    })),
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
-  return { agendas, decisions, actionItems };
+function getMessagePayload(message: unknown) {
+  if (!isRecord(message)) return message;
+  return message.data ?? message;
+}
+
+function readString(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
 }
 
 function HomeContent() {
@@ -124,17 +104,13 @@ function HomeContent() {
   const { user, loading: authLoading } = useAuth();
   const meetingId = searchParams.get("meeting_id");
 
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("meeting");
   const [meetingTitle, setMeetingTitle] = useState("회의 워크스페이스");
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [agendas, setAgendas] = useState<Agenda[]>([]);
-  const [decisions, setDecisions] = useState<Decision[]>([]);
-  const [actionItems, setActionItems] = useState<ActionItem[]>([]);
   const [analysisState, setAnalysisState] = useState<MeetingState | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [loadingMeeting, setLoadingMeeting] = useState(true);
-  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
   const [autoSyncing, setAutoSyncing] = useState(false);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
@@ -220,8 +196,6 @@ function HomeContent() {
     const mapped = mapAnalysisToUi(state);
     setAnalysisState(state);
     setAgendas(mapped.agendas);
-    setDecisions(mapped.decisions);
-    setActionItems(mapped.actionItems);
   }, []);
 
   useEffect(() => {
@@ -282,8 +256,6 @@ function HomeContent() {
         } else {
           setAnalysisState(null);
           setAgendas([]);
-          setDecisions([]);
-          setActionItems([]);
           lastSyncedSignatureRef.current = "";
         }
       } catch (error) {
@@ -307,50 +279,53 @@ function HomeContent() {
       setWsConnected(connected);
     });
 
-    wsClient.on("transcript", (message: any) => {
-      const payload = message?.data ?? message;
-      const nextTimestamp = payload.timestamp || new Date().toISOString();
+    wsClient.on("transcript", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      const speaker = readString(payload.speaker, "알 수 없음");
+      const text = readString(payload.text);
+      const nextTimestamp = readString(payload.timestamp, new Date().toISOString());
       setTranscripts((prev) =>
         dedupeTranscripts([
           ...prev,
           {
             id: `${Date.now()}-${Math.random()}`,
-            speaker: payload.speaker || "알 수 없음",
-            text: payload.text || "",
+            speaker,
+            text,
             timestamp: nextTimestamp,
           },
         ]),
       );
-      showLiveSpeechPreview(payload.speaker || "알 수 없음", payload.text || "", nextTimestamp);
+      showLiveSpeechPreview(speaker, text, nextTimestamp);
     });
 
-    wsClient.on("analysis_update", (message: any) => {
-      const payload = message?.data ?? message;
-      if (!payload) return;
+    wsClient.on("analysis_update", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
       if (payload.agenda_outcomes || payload.analysis) {
-        const normalizedState = payload.analysis ? payload : ({ analysis: payload } as MeetingState);
+        const normalizedState = payload.analysis ? (payload as unknown as MeetingState) : ({ analysis: payload } as unknown as MeetingState);
         applyMeetingStateToUi(normalizedState);
       }
     });
 
-    wsClient.on("canvas_sync", (message: any) => {
-      const payload = (message?.data ?? message?.workspace ?? message) as CanvasRealtimeSyncPayload | null;
+    wsClient.on("canvas_sync", (message) => {
+      const payload = (message.data ?? message.workspace ?? message) as CanvasRealtimeSyncPayload | null;
       if (!payload || payload.meeting_id !== meetingId) return;
       setIncomingCanvasSync(payload);
     });
 
-    wsClient.on("canvas_state_request", (message: any) => {
-      const payload = message?.data ?? message;
-      if (!payload || payload.meeting_id !== meetingId) return;
+    wsClient.on("canvas_state_request", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload) || payload.meeting_id !== meetingId) return;
       if (payload.requested_by === user.id) return;
       setIncomingCanvasStateRequestId(String(payload.request_id || Date.now()));
     });
 
-    wsClient.on("audio_selection", (message: any) => {
-      const payload = message?.data ?? message;
-      if (!payload || payload.meeting_id !== meetingId) return;
-      setFusionSelectedUserId(payload.selected_user_id || null);
-      setFusionSelectedSpeaker(payload.speaker || "");
+    wsClient.on("audio_selection", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload) || payload.meeting_id !== meetingId) return;
+      setFusionSelectedUserId(readString(payload.selected_user_id) || null);
+      setFusionSelectedSpeaker(readString(payload.speaker));
     });
 
     wsClient.connect();
@@ -640,19 +615,6 @@ function HomeContent() {
     setIsRecording(true);
   };
 
-  const requestAnalysis = async () => {
-    try {
-      setAnalysisLoading(true);
-      await syncBackendFromMeeting(true);
-      alert("현재 회의 전사를 기준으로 분석을 갱신했습니다.");
-    } catch (error) {
-      console.error("Failed to run analysis:", error);
-      alert("분석 갱신에 실패했습니다.");
-    } finally {
-      setAnalysisLoading(false);
-    }
-  };
-
   const endMeeting = async () => {
     if (!meetingId) return;
     if (!confirm("회의를 종료하시겠습니까?")) return;
@@ -708,238 +670,60 @@ function HomeContent() {
 
   if (authLoading || !user || !meetingId || loadingMeeting) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto" />
-          <p className="mt-4 text-gray-600">로딩 중...</p>
+      <div className="flex min-h-screen items-center justify-center bg-[#eaf0f7]">
+        <div className="rounded-[28px] border border-white/70 bg-white/85 px-8 py-7 text-center shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+          <div className="mx-auto h-12 w-12 animate-spin rounded-full border-[3px] border-cyan-100 border-t-[#10243f]" />
+          <p className="mt-4 text-sm font-medium text-slate-600">로딩 중...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-gray-50">
-      <header className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">{meetingTitle}</h1>
-              <div className="flex items-center gap-3 mt-1">
-                <p className="text-sm text-gray-600">Meeting ID: {meetingId.substring(0, 8)}...</p>
-                <span className={`inline-block w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-red-500"}`} />
-                <span className="text-xs text-gray-500">{wsConnected ? "WebSocket 연결됨" : "WebSocket 연결 안 됨"}</span>
-                <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
-                  calibrationState === "running"
-                    ? "bg-amber-100 text-amber-800"
-                    : deviceCalibrated
-                    ? "bg-emerald-100 text-emerald-800"
-                    : "bg-slate-100 text-slate-600"
-                }`}>
-                  {calibrationState === "running"
-                    ? `마이크 캘리브레이션 ${calibrationSecondsLeft}s`
-                    : deviceCalibrated
-                    ? "캘리브레이션 완료"
-                    : "캘리브레이션 대기"}
-                </span>
-                <span className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${
-                  fusionSelectedUserId === user.id
-                    ? "bg-blue-100 text-blue-800"
-                    : fusionSelectedUserId
-                    ? "bg-gray-100 text-gray-700"
-                    : "bg-slate-100 text-slate-600"
-                }`}>
-                  {fusionSelectedUserId === user.id
-                    ? "내 마이크가 현재 선택됨"
-                    : fusionSelectedUserId
-                    ? `${fusionSelectedSpeaker || "다른 화자"} 마이크 선택 중`
-                    : "선택된 마이크 없음"}
-                </span>
-              </div>
-              {audioImportStatusText ? (
-                <p className="mt-2 text-xs text-slate-500">{audioImportStatusText}</p>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button onClick={() => setActiveTab("meeting")} className={`px-4 py-2 rounded-xl text-sm font-semibold transition ${activeTab === "meeting" ? "bg-blue-600 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}>
-                Meeting
-              </button>
-              <button onClick={() => setActiveTab("canvas")} className={`px-4 py-2 rounded-xl text-sm font-semibold transition ${activeTab === "canvas" ? "bg-slate-900 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}>
-                Canvas
-              </button>
-              <button onClick={() => router.push("/dashboard")} className="px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-xl transition font-medium hover:bg-gray-50">
-                대시보드로
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <main className={activeTab === "canvas" ? "flex-1 min-h-0 overflow-hidden p-0" : "max-w-7xl mx-auto w-full flex-1 overflow-y-auto px-4 py-8 sm:px-6 lg:px-8"}>
-        {activeTab === "canvas" ? (
-          <div className="h-full min-h-0">
-            <MeetingCanvasTab
-              userId={user.id}
-              meetingId={meetingId}
-              meetingTitle={meetingTitle}
-              transcripts={canvasTranscripts}
-              agendas={canvasAgendas}
-              analysisState={analysisState}
-              onSyncFromMeeting={syncBackendFromMeeting}
-              incomingSharedCanvasSync={incomingCanvasSync}
-              onSharedCanvasSync={broadcastCanvasSync}
-              incomingCanvasStateRequestId={incomingCanvasStateRequestId}
-              syncStatusText={canvasSyncStatus}
-              autoSyncing={autoSyncing}
-              liveSpeechPreview={liveSpeechPreview}
-              onImportAudioFile={handleAudioImport}
-              audioImportBusy={audioImportBusy}
-              audioImportStatusText={audioImportStatusText}
-              audioImportRevision={audioImportRevision}
-            />
-          </div>
-        ) : (
-          <>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-1 bg-white rounded-xl shadow-md border border-gray-200 p-6">
-                <h2 className="text-lg font-semibold text-gray-900 mb-4">실시간 전사</h2>
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {transcripts.length === 0 ? (
-                    <p className="text-gray-500 text-sm">녹음을 시작하면 전사 내용이 여기에 표시됩니다.</p>
-                  ) : (
-                    transcripts.map((t) => (
-                      <div key={t.id} className="bg-blue-50 p-3 rounded-lg">
-                        <p className="text-sm text-gray-700">
-                          <span className="font-semibold">{t.speaker}:</span> {t.text}
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">{new Date(t.timestamp).toLocaleTimeString("ko-KR")}</p>
-                      </div>
-                    ))
-                  )}
-                </div>
-                <div className="mt-6 pt-6 border-t border-gray-200">
-                  <div className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                    {calibrationState === "running"
-                      ? `현재 ${calibrationSecondsLeft}초 동안 주 화자 기준을 학습하고 있습니다. 마이크 가까이에서 자연스럽게 말해 주세요.`
-                      : fusionSelectedUserId === user.id
-                      ? "현재 내 기기의 입력이 프로젝트 단일 스트림에 채택되고 있습니다."
-                      : fusionSelectedUserId
-                      ? `${fusionSelectedSpeaker || "다른 화자"} 입력이 현재 선택되고 있습니다.`
-                      : "주 화자 선택 정보를 기다리는 중입니다."}
-                  </div>
-                  <button
-                    onClick={() => void toggleRecording()}
-                    className={`w-full px-4 py-3 rounded-lg font-semibold transition ${
-                      isRecording ? "bg-red-600 hover:bg-red-700 text-white" : "bg-blue-600 hover:bg-blue-700 text-white"
-                    }`}
-                  >
-                    {isRecording ? "녹음 중지" : "녹음 시작"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="lg:col-span-1 bg-white rounded-xl shadow-md border border-gray-200 p-6">
-                <div className="flex items-center justify-between gap-3 mb-4">
-                  <h2 className="text-lg font-semibold text-gray-900">안건 분석</h2>
-                  <button
-                    onClick={() => void requestAnalysis()}
-                    disabled={analysisLoading}
-                    className="px-3 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 disabled:opacity-60"
-                  >
-                    {analysisLoading ? "분석 중..." : "분석 갱신"}
-                  </button>
-                </div>
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {agendas.length === 0 ? (
-                    <p className="text-gray-500 text-sm">분석 갱신 버튼을 누르면 현재 전사를 기준으로 안건을 다시 계산합니다.</p>
-                  ) : (
-                    agendas.map((agenda, idx) => (
-                      <div key={agenda.id} className="border-l-4 border-blue-500 pl-3 py-2">
-                        <h3 className="font-semibold text-gray-900">
-                          {idx + 1}. {agenda.title}
-                        </h3>
-                        <div className="mt-2">
-                          <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                            agenda.status === "ACTIVE"
-                              ? "bg-yellow-100 text-yellow-800"
-                              : agenda.status === "CLOSED"
-                              ? "bg-green-100 text-green-800"
-                              : "bg-gray-100 text-gray-600"
-                          }`}>
-                            {agenda.status}
-                          </span>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="lg:col-span-1 space-y-6">
-                <div className="bg-white rounded-xl shadow-md border border-gray-200 p-6">
-                  <h2 className="text-lg font-semibold text-gray-900 mb-4">의사결정</h2>
-                  <div className="space-y-3 max-h-48 overflow-y-auto">
-                    {decisions.length === 0 ? (
-                      <p className="text-gray-500 text-sm">분석 결과가 여기에 표시됩니다.</p>
-                    ) : (
-                      decisions.map((decision) => (
-                        <div key={decision.id} className="bg-green-50 p-3 rounded-lg border border-green-200">
-                          <p className="text-sm text-gray-700">{decision.text}</p>
-                          <div className="mt-2">
-                            <span className={`inline-block px-2 py-1 text-xs rounded-full ${decision.status === "approved" ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-600"}`}>
-                              {decision.status === "approved" ? "✓ 승인" : "대기 중"}
-                            </span>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-xl shadow-md border border-gray-200 p-6">
-                  <h2 className="text-lg font-semibold text-gray-900 mb-4">액션 아이템</h2>
-                  <div className="space-y-3 max-h-48 overflow-y-auto">
-                    {actionItems.length === 0 ? (
-                      <p className="text-gray-500 text-sm">분석 결과가 여기에 표시됩니다.</p>
-                    ) : (
-                      actionItems.map((item) => (
-                        <div key={item.id} className="p-3 border border-gray-200 rounded-lg">
-                          <p className="text-sm text-gray-700 font-medium">{item.task}</p>
-                          <p className="text-xs text-gray-500 mt-1">담당: {item.owner}</p>
-                          <p className="text-xs text-gray-500">기한: {item.due_date}</p>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-6 bg-white rounded-xl shadow-md border border-gray-200 p-6">
-              <div className="flex justify-center gap-4">
-                <button onClick={() => void requestAnalysis()} disabled={analysisLoading} className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition disabled:opacity-60">
-                  분석 갱신
-                </button>
-                <button onClick={endMeeting} className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition">
-                  회의 종료
-                </button>
-                <button onClick={() => setActiveTab("canvas")} className="px-6 py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-semibold transition">
-                  Canvas 열기
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </main>
+    <div className="h-screen overflow-hidden bg-white">
+      <MeetingCanvasTab
+        userId={user.id}
+        meetingId={meetingId}
+        meetingTitle={meetingTitle}
+        transcripts={canvasTranscripts}
+        agendas={canvasAgendas}
+        analysisState={analysisState}
+        onSyncFromMeeting={syncBackendFromMeeting}
+        incomingSharedCanvasSync={incomingCanvasSync}
+        onSharedCanvasSync={broadcastCanvasSync}
+        incomingCanvasStateRequestId={incomingCanvasStateRequestId}
+        syncStatusText={canvasSyncStatus}
+        autoSyncing={autoSyncing}
+        liveSpeechPreview={liveSpeechPreview}
+        onImportAudioFile={handleAudioImport}
+        audioImportBusy={audioImportBusy}
+        audioImportStatusText={audioImportStatusText}
+        audioImportRevision={audioImportRevision}
+        isRecording={isRecording}
+        onToggleRecording={toggleRecording}
+        onEndMeeting={endMeeting}
+        recordingStatusText={
+          calibrationState === "running"
+            ? `마이크 캘리브레이션 ${calibrationSecondsLeft}s`
+            : fusionSelectedUserId === user.id
+            ? "내 마이크가 현재 선택됨"
+            : fusionSelectedUserId
+            ? `${fusionSelectedSpeaker || "다른 화자"} 마이크 선택 중`
+            : wsConnected
+            ? "WebSocket 연결됨"
+            : "WebSocket 연결 안 됨"
+        }
+      />
     </div>
   );
 }
 
 function HomeFallback() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="text-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-        <p className="mt-4 text-gray-600">워크스페이스를 불러오는 중...</p>
+    <div className="flex min-h-screen items-center justify-center bg-[#eaf0f7]">
+      <div className="rounded-[28px] border border-white/70 bg-white/85 px-8 py-7 text-center shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+        <div className="mx-auto h-12 w-12 animate-spin rounded-full border-[3px] border-cyan-100 border-t-[#10243f]" />
+        <p className="mt-4 text-sm font-medium text-slate-600">워크스페이스를 불러오는 중...</p>
       </div>
     </div>
   );
