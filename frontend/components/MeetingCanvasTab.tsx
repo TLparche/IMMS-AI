@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getCanvasWorkspaceState,
   getCanvasPersonalNotes,
+  assimilateCanvasIdeas,
   confirmCanvasPlacement,
   generateMeetingGoal,
   generateProblemGroupConclusion,
@@ -36,6 +37,8 @@ import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
   CanvasCustomGroup,
+  CanvasIdeaAssimilationIdea,
+  CanvasIdeaAssimilationUpdate,
   CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
@@ -174,6 +177,11 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
     title: item.title,
     body: item.body,
     keywords: (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean),
+    key_evidence: (item.key_evidence || []).map((value) => value.trim()).filter(Boolean),
+    evidence_utterance_ids: (item.evidence_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
+    ignored_utterance_ids: (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
+    ai_generated: Boolean(item.ai_generated),
+    user_edited: Boolean(item.user_edited),
     x: typeof item.x === "number" ? item.x : undefined,
     y: typeof item.y === "number" ? item.y : undefined,
   }));
@@ -475,6 +483,27 @@ function stripLeadingTimestamp(text: string) {
     .trim();
 }
 
+function trimText(text: string, maxLength: number) {
+  const clean = stripLeadingTimestamp(text || "").replace(/\s+/g, " ").trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function buildLiveFlowHint(row: MeetingTranscript | null) {
+  if (!row || !row.text.trim()) return "";
+  const clean = trimText(row.text, 56);
+  const normalized = row.text.toLowerCase();
+  const intent =
+    /[?？]|궁금|어떻게|왜|가능|될까|되나/.test(normalized)
+      ? "질문 중"
+      : /문제|불편|어렵|리스크|걱정|한계|부족/.test(normalized)
+        ? "문제 제기 중"
+        : /하자|하면|아이디어|제안|추가|개선|만들|넣|도입|활용/.test(normalized)
+          ? "아이디어 제시 중"
+          : "의견 공유 중";
+  return `${row.speaker || "참가자"}: ${clean} · ${intent}`;
+}
+
 function summarizeDecision(decision: AgendaDecisionDetail) {
   return stripLeadingTimestamp(decision.conclusion || decision.opinions?.[0] || "결정 내용 없음");
 }
@@ -642,6 +671,7 @@ function safeDownload(filename: string, content: string, mime: string) {
 
 function normalizeTranscriptRows(rows: MeetingTranscript[] | TranscriptUtterance[]) {
   return rows.map((row, index) => ({
+    id: "id" in row ? row.id : `${row.timestamp || "turn"}-${index}`,
     speaker: row.speaker,
     text: row.text,
     timestamp: row.timestamp,
@@ -1241,9 +1271,17 @@ function serializeSharedCanvasItems(items: CanvasItemViewModel[]) {
 function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewModel[] {
   return items.map((item) => {
     const keywords = (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean);
+    const keyEvidence = (item.key_evidence || []).map((value) => value.trim()).filter(Boolean);
+    const evidenceUtteranceIds = (item.evidence_utterance_ids || []).map((value) => value.trim()).filter(Boolean);
+    const ignoredUtteranceIds = (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean);
     return {
       ...item,
       keywords: keywords.slice(0, 8),
+      key_evidence: keyEvidence.slice(0, 8),
+      evidence_utterance_ids: evidenceUtteranceIds.slice(0, 80),
+      ignored_utterance_ids: ignoredUtteranceIds.slice(0, 80),
+      ai_generated: Boolean(item.ai_generated),
+      user_edited: Boolean(item.user_edited),
     };
   });
 }
@@ -1548,6 +1586,8 @@ export default function MeetingCanvasTab({
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
   const [solutionStagePending, setSolutionStagePending] = useState(false);
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
+  const [liveFlowHint, setLiveFlowHint] = useState("");
+  const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
   const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
@@ -1593,6 +1633,11 @@ export default function MeetingCanvasTab({
   const analysisSignatureAtImportRef = useRef("");
   const placementFeedbackTimerRef = useRef<number | null>(null);
   const initialLayoutLogDoneRef = useRef(false);
+  const processedIdeaUtteranceIdsRef = useRef<Set<string>>(new Set());
+  const ideaBufferStartedAtRef = useRef<number | null>(null);
+  const ideaFlushTimerRef = useRef<number | null>(null);
+  const ideaSilenceTimerRef = useRef<number | null>(null);
+  const ideaAssimilationInFlightRef = useRef(false);
   const latestSharedWorkspaceRef = useRef<{
     stage: CanvasStage;
     agendaOverrides: Record<string, AgendaOverride>;
@@ -1703,6 +1748,9 @@ export default function MeetingCanvasTab({
     workspaceHydratingRef.current = false;
     analysisSignatureAtImportRef.current = "";
     initialLayoutLogDoneRef.current = false;
+    processedIdeaUtteranceIdsRef.current = new Set();
+    ideaBufferStartedAtRef.current = null;
+    ideaAssimilationInFlightRef.current = false;
     latestSharedWorkspaceRef.current = {
       stage: "ideation",
       agendaOverrides: {},
@@ -1724,6 +1772,8 @@ export default function MeetingCanvasTab({
     setEditingCanvasItemId("");
     setEditingPersonalNoteId("");
     setArmedCanvasTool(null);
+    setLiveFlowHint("");
+    setIdeaAssimilationStatus("");
     setPlacementFeedback(null);
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
@@ -1740,6 +1790,14 @@ export default function MeetingCanvasTab({
     if (placementFeedbackTimerRef.current) {
       window.clearTimeout(placementFeedbackTimerRef.current);
       placementFeedbackTimerRef.current = null;
+    }
+    if (ideaFlushTimerRef.current) {
+      window.clearTimeout(ideaFlushTimerRef.current);
+      ideaFlushTimerRef.current = null;
+    }
+    if (ideaSilenceTimerRef.current) {
+      window.clearTimeout(ideaSilenceTimerRef.current);
+      ideaSilenceTimerRef.current = null;
     }
   }, [meetingId]);
 
@@ -2232,6 +2290,277 @@ export default function MeetingCanvasTab({
       userId,
     ],
   );
+
+  const flushIdeaAssimilationBuffer = useCallback(
+    async (reason: "timer" | "silence" | "stage-change" | "manual") => {
+      if (!meetingId || stage !== "ideation" || ideaAssimilationInFlightRef.current) {
+        return;
+      }
+
+      const processedIds = processedIdeaUtteranceIdsRef.current;
+      const targetRows = normalizeTranscriptRows(transcripts)
+        .filter((row) => row.id && row.text.trim() && !processedIds.has(row.id))
+        .slice(-80);
+
+      const targetTextLength = targetRows.reduce((sum, row) => sum + stripLeadingTimestamp(row.text).length, 0);
+      if (targetRows.length === 0 || (reason !== "stage-change" && targetTextLength < 80)) {
+        return;
+      }
+
+      ideaAssimilationInFlightRef.current = true;
+      setIdeaAssimilationStatus("AI가 최근 발화를 아이디어로 정리 중");
+
+      try {
+        const firstTargetIndex = transcripts.findIndex((row) => row.id === targetRows[0]?.id);
+        const contextRows =
+          firstTargetIndex > 0 ? normalizeTranscriptRows(transcripts.slice(Math.max(0, firstTargetIndex - 6), firstTargetIndex)) : [];
+        const existingIdeas: CanvasIdeaAssimilationIdea[] = canvasItems
+          .filter((item) => item.kind !== "comment")
+          .map((item) => ({
+            id: item.id,
+            title: item.title,
+            summary: item.body || item.title,
+            keywords: item.keywords || [],
+            key_evidence: item.key_evidence || [],
+            evidence_utterance_ids: item.evidence_utterance_ids || [],
+            user_edited: Boolean(item.user_edited),
+          }));
+
+        const result = await assimilateCanvasIdeas({
+          meeting_id: meetingId,
+          meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+          context_utterances: contextRows.map((row) => ({
+            id: row.id,
+            speaker: row.speaker || "참가자",
+            text: stripLeadingTimestamp(row.text),
+            timestamp: row.timestamp || "",
+          })),
+          target_utterances: targetRows.map((row) => ({
+            id: row.id,
+            speaker: row.speaker || "참가자",
+            text: stripLeadingTimestamp(row.text),
+            timestamp: row.timestamp || "",
+          })),
+          existing_ideas: existingIdeas,
+        });
+
+        const updates = (result.updates || []).filter((update) => update.action === "merge" || update.action === "create");
+        if (updates.length === 0) {
+          targetRows.forEach((row) => processedIds.add(row.id));
+          setIdeaAssimilationStatus("정리할 새 아이디어 없음");
+          return;
+        }
+
+        const nextNodePositions: CanvasNodePositionsByStage = {
+          ...nodePositions,
+          ideation: {
+            ...(nodePositions.ideation || {}),
+          },
+        };
+        const knownItems = [...canvasItems];
+        const now = Date.now();
+        const createdItems: CanvasItemViewModel[] = [];
+
+        const applyUpdateToItem = (item: CanvasItemViewModel, update: CanvasIdeaAssimilationUpdate) => {
+          const nextEvidenceIds = Array.from(
+            new Set([...(item.evidence_utterance_ids || []), ...(update.evidenceUtteranceIds || [])]),
+          ).slice(0, 80);
+          const nextIgnoredIds = Array.from(
+            new Set([...(item.ignored_utterance_ids || []), ...(update.ignoredUtteranceIds || [])]),
+          ).slice(0, 80);
+          const nextKeyEvidence = Array.from(new Set([...(item.key_evidence || []), ...(update.keyEvidence || [])])).slice(0, 8);
+          const nextKeywords = Array.from(new Set([...(item.keywords || []), ...(update.keywords || [])])).slice(0, 8);
+
+          return {
+            ...item,
+            title: item.user_edited ? item.title : update.title || item.title,
+            body: item.user_edited ? item.body : update.summary || item.body,
+            keywords: nextKeywords,
+            key_evidence: nextKeyEvidence,
+            evidence_utterance_ids: nextEvidenceIds,
+            ignored_utterance_ids: nextIgnoredIds,
+            ai_generated: item.ai_generated || result.used_llm,
+          };
+        };
+
+        let nextCanvasItemsSnapshot = knownItems.map((item) => {
+          const update = updates.find((candidate) => candidate.action === "merge" && candidate.targetIdeaId === item.id);
+          return update ? applyUpdateToItem(item, update) : item;
+        });
+
+        updates
+          .filter((update) => update.action === "create")
+          .forEach((update, index) => {
+            const id = `ai-idea-${now}-${index}-${Math.random().toString(16).slice(2, 6)}`;
+            const nodeId = `canvas-item-${id}`;
+            const layoutIndex = nextCanvasItemsSnapshot.length + createdItems.length;
+            const x = 180 + (layoutIndex % 3) * 300;
+            const y = 300 + Math.floor(layoutIndex / 3) * 230;
+            const nextItem: CanvasItemViewModel = {
+              id,
+              agenda_id: selectedAgendaId || agendaModels[0]?.id || "",
+              point_id: "",
+              kind: "note",
+              title: update.title || "새 아이디어",
+              body: update.summary || "",
+              keywords: (update.keywords || []).slice(0, 8),
+              key_evidence: (update.keyEvidence || []).slice(0, 8),
+              evidence_utterance_ids: (update.evidenceUtteranceIds || []).slice(0, 80),
+              ignored_utterance_ids: (update.ignoredUtteranceIds || []).slice(0, 80),
+              ai_generated: true,
+              user_edited: false,
+              x,
+              y,
+            };
+            nextNodePositions.ideation = {
+              ...(nextNodePositions.ideation || {}),
+              [nodeId]: { x, y },
+            };
+            createdItems.push(nextItem);
+          });
+
+        nextCanvasItemsSnapshot = [...createdItems, ...nextCanvasItemsSnapshot];
+        updates.forEach((update) => {
+          [...(update.evidenceUtteranceIds || []), ...(update.ignoredUtteranceIds || [])].forEach((id) => {
+            if (id) processedIds.add(id);
+          });
+        });
+        targetRows.forEach((row) => processedIds.add(row.id));
+        ideaBufferStartedAtRef.current = null;
+
+        setCanvasItems(nextCanvasItemsSnapshot);
+        setNodePositions(nextNodePositions);
+        latestSharedWorkspaceRef.current = {
+          ...latestSharedWorkspaceRef.current,
+          canvasItems: nextCanvasItemsSnapshot,
+          nodePositions: nextNodePositions,
+          importedState: persistedSharedImportedState,
+        };
+
+        if (sharedSyncEnabled) {
+          writeSharedWorkspaceSessionCache(
+            meetingId,
+            buildFullWorkspacePatchPayload({
+              meetingId,
+              stage,
+              agendaOverrides,
+              canvasItems: nextCanvasItemsSnapshot,
+              customGroups,
+              problemGroups,
+              solutionTopics,
+              nodePositions: nextNodePositions,
+              importedState: persistedSharedImportedState,
+            }),
+          );
+          forceBroadcastSharedCanvas({
+            canvasItems: nextCanvasItemsSnapshot,
+            nodePositions: nextNodePositions,
+          });
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+            node_positions: nextNodePositions,
+            imported_state: persistedSharedImportedState,
+          }).catch((error) => {
+            console.error("Failed to save AI idea assimilation:", error);
+          });
+        }
+
+        setIdeaAssimilationStatus(result.used_llm ? "AI 아이디어 정리 반영됨" : "로컬 기준으로 아이디어 정리됨");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setIdeaAssimilationStatus(`아이디어 정리 실패: ${message}`);
+      } finally {
+        ideaAssimilationInFlightRef.current = false;
+      }
+    },
+    [
+      agendaModels,
+      agendaOverrides,
+      canvasItems,
+      customGroups,
+      effectiveState?.meeting_goal,
+      forceBroadcastSharedCanvas,
+      generatedMeetingGoal,
+      meetingId,
+      meetingTitle,
+      nodePositions,
+      persistedSharedImportedState,
+      problemGroups,
+      selectedAgendaId,
+      sharedSyncEnabled,
+      solutionTopics,
+      stage,
+      transcripts,
+    ],
+  );
+
+  useEffect(() => {
+    const evidenceIds = new Set<string>();
+    canvasItems.forEach((item) => {
+      (item.evidence_utterance_ids || []).forEach((id) => evidenceIds.add(id));
+      (item.ignored_utterance_ids || []).forEach((id) => evidenceIds.add(id));
+    });
+    evidenceIds.forEach((id) => processedIdeaUtteranceIdsRef.current.add(id));
+  }, [canvasItems]);
+
+  useEffect(() => {
+    const normalizedRows = normalizeTranscriptRows(transcripts);
+    const latestRow = normalizedRows.at(-1) || null;
+    setLiveFlowHint(buildLiveFlowHint(latestRow));
+
+    if (stage !== "ideation" || !latestRow) {
+      return;
+    }
+
+    const hasUnprocessedRows = normalizedRows.some(
+      (row) => row.id && row.text.trim() && !processedIdeaUtteranceIdsRef.current.has(row.id),
+    );
+    if (!hasUnprocessedRows) {
+      return;
+    }
+
+    const now = Date.now();
+    if (!ideaBufferStartedAtRef.current) {
+      ideaBufferStartedAtRef.current = now;
+    }
+
+    if (ideaFlushTimerRef.current) {
+      window.clearTimeout(ideaFlushTimerRef.current);
+    }
+    const elapsed = now - ideaBufferStartedAtRef.current;
+    ideaFlushTimerRef.current = window.setTimeout(
+      () => void flushIdeaAssimilationBuffer("timer"),
+      Math.max(0, 90_000 - elapsed),
+    );
+
+    if (ideaSilenceTimerRef.current) {
+      window.clearTimeout(ideaSilenceTimerRef.current);
+    }
+    ideaSilenceTimerRef.current = window.setTimeout(() => void flushIdeaAssimilationBuffer("silence"), 12_000);
+
+    return () => {
+      if (ideaFlushTimerRef.current) {
+        window.clearTimeout(ideaFlushTimerRef.current);
+        ideaFlushTimerRef.current = null;
+      }
+      if (ideaSilenceTimerRef.current) {
+        window.clearTimeout(ideaSilenceTimerRef.current);
+        ideaSilenceTimerRef.current = null;
+      }
+    };
+  }, [flushIdeaAssimilationBuffer, stage, transcripts]);
+
+  useEffect(() => {
+    return () => {
+      if (ideaFlushTimerRef.current) {
+        window.clearTimeout(ideaFlushTimerRef.current);
+      }
+      if (ideaSilenceTimerRef.current) {
+        window.clearTimeout(ideaSilenceTimerRef.current);
+      }
+    };
+  }, []);
 
   const setProblemGroupsLoading = useCallback((groupIds: string[], loading: boolean) => {
     if (groupIds.length === 0) return;
@@ -3590,6 +3919,10 @@ export default function MeetingCanvasTab({
 
   const handleStageSelect = useCallback(
     async (nextStage: CanvasStage) => {
+      if (stage === "ideation" && nextStage !== "ideation") {
+        await flushIdeaAssimilationBuffer("stage-change");
+      }
+
       if (nextStage === "solution") {
         if (busy || solutionStagePending) {
           setActivityMessage(
@@ -3638,7 +3971,16 @@ export default function MeetingCanvasTab({
       setLeftPanelTab("detail");
       return;
     },
-    [busy, conclusionBatchBusy, handleGenerateSolutionStage, problemGroups, solutionStagePending, solutionTopics],
+    [
+      busy,
+      conclusionBatchBusy,
+      flushIdeaAssimilationBuffer,
+      handleGenerateSolutionStage,
+      problemGroups,
+      solutionStagePending,
+      solutionTopics,
+      stage,
+    ],
   );
 
   const handleAddPersonalNote = () => {
@@ -3873,6 +4215,11 @@ export default function MeetingCanvasTab({
         kind: tool,
         title: draftTitle,
         keywords: [],
+        key_evidence: [],
+        evidence_utterance_ids: [],
+        ignored_utterance_ids: [],
+        ai_generated: false,
+        user_edited: true,
         x: flowPosition.x,
         y: flowPosition.y,
         body: draftBody,
@@ -4384,6 +4731,7 @@ export default function MeetingCanvasTab({
               ...item,
               title: nextTitle,
               body: nextBody,
+              user_edited: true,
             }
           : item,
       );
@@ -5009,6 +5357,11 @@ export default function MeetingCanvasTab({
     void handleGenerateProblemDefinition();
   }, [agendaModels.length, busy, problemGroups.length, stage]);
 
+  const handleEndMeetingClick = async () => {
+    await flushIdeaAssimilationBuffer("stage-change");
+    await onEndMeeting?.();
+  };
+
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
 
   return (
@@ -5019,7 +5372,7 @@ export default function MeetingCanvasTab({
             <div className="flex flex-wrap items-center justify-start gap-2 justify-self-start">
               <button
                 type="button"
-                onClick={() => void onEndMeeting?.()}
+                onClick={() => void handleEndMeetingClick()}
                 className="h-[43px] rounded-[8px] bg-[#ef4e4e] px-6 text-xl font-semibold text-white hover:bg-[#df3f3f]"
               >
                 종료
@@ -6015,7 +6368,17 @@ export default function MeetingCanvasTab({
           </aside>
 
           <section ref={canvasSurfaceRef} className="relative flex h-full min-h-0 flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:border-b-0">
-            <div className="grid min-h-[135px] shrink-0 grid-cols-1 divide-y divide-black/10 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] md:grid-cols-3 md:divide-x md:divide-y-0">
+            <div className="relative grid min-h-[135px] shrink-0 grid-cols-1 divide-y divide-black/10 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] md:grid-cols-3 md:divide-x md:divide-y-0">
+              <div className="pointer-events-none absolute left-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap gap-2">
+                <span className="rounded-full border border-blue-100 bg-blue-50/95 px-3 py-1 text-xs font-semibold text-blue-700 shadow-sm">
+                  {liveFlowHint || "현재 발언 흐름 대기 중"}
+                </span>
+                {ideaAssimilationStatus ? (
+                  <span className="rounded-full border border-black/10 bg-white/95 px-3 py-1 text-xs font-medium text-[#4d4d4d] shadow-sm">
+                    {ideaAssimilationStatus}
+                  </span>
+                ) : null}
+              </div>
               {transcriptStripItems.slice(0, 3).map((item, index) => (
                 <div key={`${item.timestamp || index}-${index}`} className="flex min-h-[135px] items-center gap-8 px-9 py-4">
                   <span className="h-12 w-12 shrink-0 rounded-full bg-[#d9d9d9]" />

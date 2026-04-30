@@ -523,24 +523,24 @@ function HomeContent() {
     setAutoSyncing(true);
     setCanvasSyncStatus(
       transcriptsRef.current.length > 0
-        ? "새 전사를 canvas 분석 상태에 자동 반영하는 중입니다."
-        : "회의 상태를 canvas에 자동 반영하는 중입니다.",
+        ? "새 전사를 회의 세션에 저장하는 중입니다."
+        : "회의 상태를 세션에 저장하는 중입니다.",
     );
 
     try {
-      const state = await syncBackendFromMeeting(true);
+      const state = await syncBackendFromMeeting(false);
       lastSyncedSignatureRef.current = signature;
       const agendaCount = state?.analysis?.agenda_outcomes?.length || 0;
       if (agendaCount > 0) {
-        setCanvasSyncStatus(`실시간 전사가 자동 동기화되었습니다. 안건 ${agendaCount}개가 canvas에 반영되었습니다.`);
+        setCanvasSyncStatus(`실시간 전사가 저장되었습니다. 기존 안건 ${agendaCount}개를 유지합니다.`);
       } else if (transcriptsRef.current.length > 0) {
-        setCanvasSyncStatus("실시간 전사를 자동 반영했지만 분석된 안건은 아직 없습니다.");
+        setCanvasSyncStatus("실시간 전사를 세션에 저장했습니다.");
       } else {
-        setCanvasSyncStatus("canvas가 현재 회의 상태와 자동 동기화되었습니다.");
+        setCanvasSyncStatus("canvas가 현재 회의 상태와 동기화되었습니다.");
       }
     } catch (error) {
       console.error("Failed to auto-sync canvas state:", error);
-      setCanvasSyncStatus("실시간 전사를 canvas에 자동 반영하지 못했습니다. 잠시 후 다시 시도합니다.");
+      setCanvasSyncStatus("실시간 전사를 세션에 저장하지 못했습니다. 잠시 후 다시 시도합니다.");
     } finally {
       autoSyncInFlightRef.current = false;
       setAutoSyncing(false);

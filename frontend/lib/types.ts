@@ -251,8 +251,49 @@ export interface CanvasWorkspaceItem {
   title: string;
   body: string;
   keywords?: string[];
+  key_evidence?: string[];
+  evidence_utterance_ids?: string[];
+  ignored_utterance_ids?: string[];
+  ai_generated?: boolean;
+  user_edited?: boolean;
   x?: number;
   y?: number;
+}
+
+export interface CanvasIdeaAssimilationUtterance {
+  id: string;
+  speaker: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface CanvasIdeaAssimilationIdea {
+  id: string;
+  title: string;
+  summary: string;
+  keywords: string[];
+  key_evidence?: string[];
+  evidence_utterance_ids?: string[];
+  user_edited?: boolean;
+}
+
+export interface CanvasIdeaAssimilationUpdate {
+  action: "merge" | "create";
+  targetIdeaId?: string;
+  title: string;
+  summary: string;
+  keywords: string[];
+  keyEvidence: string[];
+  evidenceUtteranceIds: string[];
+  ignoredUtteranceIds: string[];
+}
+
+export interface CanvasIdeaAssimilationResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  updates: CanvasIdeaAssimilationUpdate[];
 }
 
 export interface CanvasCustomGroup {

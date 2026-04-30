@@ -6,6 +6,9 @@ import type {
   AudioImportJobStatusResponse,
   CanvasLocalState,
   CanvasCustomGroup,
+  CanvasIdeaAssimilationIdea,
+  CanvasIdeaAssimilationResponse,
+  CanvasIdeaAssimilationUtterance,
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasPersonalNotesStateResponse,
@@ -198,6 +201,20 @@ export async function generateCanvasSolutionStage(payload: {
   }>;
 }): Promise<CanvasSolutionStageResponse> {
   return requestJson<CanvasSolutionStageResponse>("/api/canvas/solution-stage", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function assimilateCanvasIdeas(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  context_utterances?: CanvasIdeaAssimilationUtterance[];
+  target_utterances: CanvasIdeaAssimilationUtterance[];
+  existing_ideas: CanvasIdeaAssimilationIdea[];
+}) {
+  return requestJson<CanvasIdeaAssimilationResponse>("/api/canvas/idea-assimilation", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),

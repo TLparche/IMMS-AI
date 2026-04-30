@@ -507,6 +507,11 @@ def _normalize_canvas_workspace_items(
             "title": _safe_text(item.title),
             "body": _safe_text(item.body),
             "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
+            "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:6],
+            "evidence_utterance_ids": [_safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)][:80],
+            "ignored_utterance_ids": [_safe_text(value) for value in (item.ignored_utterance_ids or []) if _safe_text(value)][:80],
+            "ai_generated": bool(item.ai_generated),
+            "user_edited": bool(item.user_edited),
         }
 
         try:
@@ -1495,6 +1500,31 @@ class MeetingGoalGenerateInput(BaseModel):
     topic: str = ""
 
 
+class CanvasIdeaAssimilationUtteranceInput(BaseModel):
+    id: str = ""
+    speaker: str = ""
+    text: str = ""
+    timestamp: str = ""
+
+
+class CanvasIdeaAssimilationIdeaInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    summary: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    key_evidence: list[str] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    user_edited: bool = False
+
+
+class CanvasIdeaAssimilationInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    context_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+    target_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+    existing_ideas: list[CanvasIdeaAssimilationIdeaInput] = Field(default_factory=list)
+
+
 class SolutionStageTopicInput(BaseModel):
     group_id: str
     topic_no: int = 0
@@ -1523,6 +1553,11 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     title: str = ""
     body: str = ""
     keywords: list[str] = Field(default_factory=list)
+    key_evidence: list[str] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    ignored_utterance_ids: list[str] = Field(default_factory=list)
+    ai_generated: bool = False
+    user_edited: bool = False
     x: float | None = None
     y: float | None = None
 
@@ -1935,6 +1970,183 @@ def _build_meeting_goal_prompt(topic: str) -> str:
         "- goal은 한국어 1문장.\n"
         "- 제목 복붙이 아니라 회의 목적이 드러나는 재작성 문장.\n"
         "- 18~40자 정도의 짧고 분명한 문장.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _idea_assimilation_utterance_dict(item: CanvasIdeaAssimilationUtteranceInput) -> dict[str, str]:
+    return {
+        "id": _safe_text(item.id),
+        "speaker": _safe_text(item.speaker, "참가자"),
+        "text": _safe_text(item.text),
+        "timestamp": _safe_text(item.timestamp),
+    }
+
+
+def _idea_assimilation_existing_idea_dict(item: CanvasIdeaAssimilationIdeaInput) -> dict[str, Any]:
+    return {
+        "id": _safe_text(item.id),
+        "title": _safe_text(item.title),
+        "summary": _safe_text(item.summary),
+        "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
+        "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:6],
+        "evidence_utterance_ids": [
+            _safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)
+        ][:40],
+        "user_edited": bool(item.user_edited),
+    }
+
+
+def _extract_light_keywords(text: str, limit: int = 4) -> list[str]:
+    tokens: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9가-힣]{2,}", _strip_leading_timestamp(text)):
+        cleaned = _safe_text(token)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in STOPWORDS or _is_title_keyword_noise(cleaned):
+            continue
+        if cleaned not in tokens:
+            tokens.append(cleaned)
+        if len(tokens) >= limit:
+            break
+    return tokens
+
+
+def _normalize_idea_assimilation_update(raw: Any, fallback_ids: list[str]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    action = _safe_text(raw.get("action")).lower()
+    if action not in {"merge", "create"}:
+        return None
+
+    target_id = _safe_text(raw.get("targetIdeaId") or raw.get("target_idea_id") or raw.get("target_id"))
+    if action == "merge" and not target_id:
+        return None
+
+    title = _safe_text(raw.get("title"), "새 아이디어")[:80]
+    summary = _safe_text(raw.get("summary") or raw.get("body"), title)[:500]
+    keywords = [_safe_text(value) for value in (raw.get("keywords") or []) if _safe_text(value)][:8]
+    key_evidence = [
+        _strip_leading_timestamp(_safe_text(value))
+        for value in (raw.get("keyEvidence") or raw.get("key_evidence") or [])
+        if _safe_text(value)
+    ][:6]
+    evidence_ids = [
+        _safe_text(value)
+        for value in (raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or [])
+        if _safe_text(value)
+    ][:40]
+    ignored_ids = [
+        _safe_text(value)
+        for value in (raw.get("ignoredUtteranceIds") or raw.get("ignored_utterance_ids") or [])
+        if _safe_text(value)
+    ][:40]
+
+    if not evidence_ids and not ignored_ids:
+        evidence_ids = fallback_ids[:40]
+
+    return {
+        "action": action,
+        "targetIdeaId": target_id,
+        "title": title,
+        "summary": summary,
+        "keywords": keywords or _extract_light_keywords(f"{title} {summary}", 6),
+        "keyEvidence": key_evidence,
+        "evidenceUtteranceIds": evidence_ids,
+        "ignoredUtteranceIds": ignored_ids,
+    }
+
+
+def _build_idea_assimilation_local(payload: CanvasIdeaAssimilationInput) -> list[dict[str, Any]]:
+    utterances = [_idea_assimilation_utterance_dict(item) for item in payload.target_utterances]
+    useful = [
+        item
+        for item in utterances
+        if len(item["text"]) >= 8
+        and not re.fullmatch(r"(네|예|응|맞아|좋아요|감사|감사합니다|음|어)\.?", item["text"].strip())
+    ]
+    ignored_ids = [item["id"] for item in utterances if item not in useful]
+    if not useful:
+        return []
+
+    joined = " ".join(item["text"] for item in useful)
+    keywords = _extract_light_keywords(joined, 6)
+    title = " ".join(keywords[:2]) if keywords else _to_summary_point(useful[0]["text"], 36)
+    summary = _to_summary_point(joined, 180)
+    existing = payload.existing_ideas or []
+    target_id = ""
+    action = "create"
+    if existing and keywords:
+        lowered = {keyword.lower() for keyword in keywords}
+        best: tuple[int, str] = (0, "")
+        for idea in existing:
+            idea_keywords = {_safe_text(keyword).lower() for keyword in (idea.keywords or []) if _safe_text(keyword)}
+            score = len(lowered & idea_keywords)
+            if score > best[0]:
+                best = (score, idea.id)
+        if best[0] > 0:
+            action = "merge"
+            target_id = best[1]
+
+    return [
+        {
+            "action": action,
+            "targetIdeaId": target_id,
+            "title": title,
+            "summary": summary,
+            "keywords": keywords,
+            "keyEvidence": [f"{item['speaker']}: {_to_summary_point(item['text'], 90)}" for item in useful[:4]],
+            "evidenceUtteranceIds": [item["id"] for item in useful],
+            "ignoredUtteranceIds": ignored_ids,
+        }
+    ]
+
+
+def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str:
+    prompt_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "context_utterances": [
+            _idea_assimilation_utterance_dict(item) for item in (payload.context_utterances or [])[-8:]
+        ],
+        "target_utterances": [
+            _idea_assimilation_utterance_dict(item) for item in (payload.target_utterances or [])[:80]
+        ],
+        "existing_ideas": [
+            _idea_assimilation_existing_idea_dict(item) for item in (payload.existing_ideas or [])[:40]
+        ],
+    }
+    return (
+        "너는 회의 발화를 아이디어 캔버스에 반영하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- target_utterances의 원문 발화를 보고 기존 아이디어에 편입할지, 새 아이디어를 만들지 결정한다.\n"
+        "- 잡담, 단순 맞장구, 반복 확인, 감사 인사는 아이디어 노드에 넣지 말고 ignoredUtteranceIds에만 포함한다.\n"
+        "- 아이디어 노드에는 불필요한 대화 흐름이 아니라 실행/기획에 의미 있는 핵심 아이디어만 정제해서 넣는다.\n"
+        "- 기존 아이디어와 의미가 같으면 merge, 명확히 다른 의미면 create를 사용한다.\n"
+        "- user_edited가 true인 기존 아이디어는 제목과 요약을 덮어쓰지 않도록 merge 대상으로 삼더라도 근거/키워드 보강 중심으로 응답한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "updates": [\n'
+        "    {\n"
+        '      "action": "merge",\n'
+        '      "targetIdeaId": "idea-id",\n'
+        '      "title": "짧은 아이디어 제목",\n'
+        '      "summary": "아이디어 내용을 1~2문장으로 정리",\n'
+        '      "keywords": ["키워드1", "키워드2"],\n'
+        '      "keyEvidence": ["A: 핵심 근거 발화 요약"],\n'
+        '      "evidenceUtteranceIds": ["utterance-id-1"],\n'
+        '      "ignoredUtteranceIds": ["utterance-id-2"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- updates는 0~5개까지 가능하다.\n"
+        "- 하나의 target_utterance는 evidenceUtteranceIds 또는 ignoredUtteranceIds 중 하나에만 넣는다.\n"
+        "- create의 targetIdeaId는 빈 문자열로 둔다.\n"
+        "- title은 12자 이내의 한국어 명사구를 우선한다.\n"
+        "- summary는 회의 잡담을 제거하고 아이디어만 남긴다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 
@@ -5605,6 +5817,68 @@ def get_last_llm_json():
             "has_json": bool(RT.last_llm_parsed_json),
             "json": RT.last_llm_parsed_json if isinstance(RT.last_llm_parsed_json, dict) else {},
         }
+
+
+@app.post("/api/canvas/idea-assimilation")
+def post_canvas_idea_assimilation(payload: CanvasIdeaAssimilationInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        fallback_updates = _build_idea_assimilation_local(payload)
+        updates = fallback_updates
+        used_llm = False
+        warning = ""
+        fallback_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if payload.target_utterances and llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_idea_assimilation_prompt(payload),
+                    stage="canvas_idea_assimilation",
+                    temperature=0.2,
+                    max_tokens=1200,
+                )
+                parsed_updates = parsed.get("updates") if isinstance(parsed, dict) else None
+                normalized_updates: list[dict[str, Any]] = []
+                if isinstance(parsed_updates, list):
+                    for item in parsed_updates:
+                        normalized = _normalize_idea_assimilation_update(item, fallback_ids)
+                        if normalized:
+                            normalized_updates.append(normalized)
+                if normalized_updates:
+                    updates = normalized_updates[:5]
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_idea_assimilation",
+                        "updates": copy.deepcopy(updates),
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 아이디어 병합 결과를 사용했습니다."
+            except Exception as exc:
+                warning = f"아이디어 병합 LLM 생성 실패: {exc}"
+        elif payload.target_utterances:
+            warning = llm_note or "LLM 미연결 상태로 로컬 아이디어 병합 결과를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "updates": updates,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "idea_assimilation",
+        signature,
+        _compute,
+    )
 
 
 @app.post("/api/canvas/problem-definition")
