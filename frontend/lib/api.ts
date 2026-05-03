@@ -210,6 +210,7 @@ export async function generateCanvasSolutionStage(payload: {
 export async function assimilateCanvasIdeas(payload: {
   meeting_id: string;
   meeting_topic: string;
+  selected_agenda_id?: string;
   context_utterances?: CanvasIdeaAssimilationUtterance[];
   target_utterances: CanvasIdeaAssimilationUtterance[];
   existing_ideas: CanvasIdeaAssimilationIdea[];
@@ -218,6 +219,52 @@ export async function assimilateCanvasIdeas(payload: {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
+  });
+}
+
+export async function startCanvasIdeaAssimilationWorkspace(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  selected_agenda_id?: string;
+  context_utterances?: CanvasIdeaAssimilationUtterance[];
+  target_utterances: CanvasIdeaAssimilationUtterance[];
+}): Promise<{
+  ok: boolean;
+  job_id: string;
+  meeting_id: string;
+  status: "idle" | "processing" | "completed" | "error" | "missing" | string;
+  detail?: string;
+  used_llm?: boolean;
+  warning?: string;
+  pending_item_id?: string;
+  target_count?: number;
+  workspace?: CanvasWorkspaceStateResponse;
+}> {
+  return requestJson("/api/canvas/idea-assimilation-workspace/start", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getCanvasIdeaAssimilationWorkspaceJob(
+  meetingId: string,
+  jobId: string,
+): Promise<{
+  ok: boolean;
+  job_id: string;
+  meeting_id: string;
+  status: "idle" | "processing" | "completed" | "error" | "missing" | string;
+  detail?: string;
+  used_llm?: boolean;
+  warning?: string;
+  pending_item_id?: string;
+  target_count?: number;
+  workspace?: CanvasWorkspaceStateResponse;
+}> {
+  const params = new URLSearchParams({ meeting_id: meetingId });
+  return requestJson(`/api/canvas/idea-assimilation-workspace/jobs/${encodeURIComponent(jobId)}?${params.toString()}`, {
+    cache: "no-store",
   });
 }
 

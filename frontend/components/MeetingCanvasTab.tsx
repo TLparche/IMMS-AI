@@ -21,8 +21,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getCanvasWorkspaceState,
   getCanvasPersonalNotes,
-  assimilateCanvasIdeas,
   confirmCanvasPlacement,
+  getCanvasIdeaAssimilationWorkspaceJob,
   generateMeetingGoal,
   generateProblemGroupConclusion,
   generateCanvasProblemDefinition,
@@ -32,19 +32,19 @@ import {
   importAgendaSnapshot,
   saveCanvasPersonalNotes,
   saveCanvasWorkspacePatch,
+  startCanvasIdeaAssimilationWorkspace,
 } from "@/lib/api";
 import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
   CanvasCustomGroup,
-  CanvasIdeaAssimilationIdea,
-  CanvasIdeaAssimilationUpdate,
   CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
   CanvasRealtimeSyncPayload,
   CanvasRefinedUtterance,
   CanvasSolutionTopicResponse,
+  CanvasWorkspaceStateResponse,
   CanvasWorkspaceItem,
   MeetingState,
   TranscriptUtterance,
@@ -240,6 +240,7 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
     ignored_utterance_ids: (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
     ai_generated: Boolean(item.ai_generated),
     user_edited: Boolean(item.user_edited),
+    ai_pending: Boolean(item.ai_pending),
     x: typeof item.x === "number" ? item.x : undefined,
     y: typeof item.y === "number" ? item.y : undefined,
   }));
@@ -977,6 +978,7 @@ function makeCanvasItemNodeLabel(
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
   const keywords = (item.keywords || []).filter(Boolean).slice(0, 3);
+  const pending = Boolean(item.ai_pending);
 
   return (
     <div className="min-w-0 p-1">
@@ -991,14 +993,28 @@ function makeCanvasItemNodeLabel(
             </span>
           ) : null}
         </div>
-        <strong className="mt-4 block text-[17px] leading-7 text-slate-900">{item.title}</strong>
+        <strong className="mt-4 block text-[17px] leading-7 text-slate-900">{pending ? "AI 정리 중" : item.title}</strong>
         <div className="mt-4 rounded-[18px] border border-white/90 bg-white/90 px-4 py-3">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Content</p>
-          <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">
-            {item.body || "내용을 입력해 주세요."}
-          </p>
+          {pending ? (
+            <div className="mt-3 space-y-2">
+              <div className="h-3.5 w-full animate-pulse rounded-full bg-slate-200" />
+              <div className="h-3.5 w-3/4 animate-pulse rounded-full bg-slate-200" />
+              <p className="pt-1 text-xs font-medium text-slate-400">키워드와 content 생성 중</p>
+            </div>
+          ) : (
+            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+              {item.body || "내용을 입력해 주세요."}
+            </p>
+          )}
         </div>
-        {keywords.length > 0 ? (
+        {pending ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {[0, 1, 2].map((index) => (
+              <span key={`${item.id}-pending-keyword-${index}`} className="h-6 w-16 animate-pulse rounded-full bg-white/80" />
+            ))}
+          </div>
+        ) : keywords.length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-2">
             {keywords.map((keyword) => (
               <span key={`${item.id}-${keyword}`} className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium text-slate-600">
@@ -1345,6 +1361,7 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       ignored_utterance_ids: ignoredUtteranceIds.slice(0, 400),
       ai_generated: Boolean(item.ai_generated),
       user_edited: Boolean(item.user_edited),
+      ai_pending: Boolean(item.ai_pending),
     };
   });
 }
@@ -1654,7 +1671,6 @@ export default function MeetingCanvasTab({
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
-  const [ideaAssimilationLoading, setIdeaAssimilationLoading] = useState(false);
   const [showTranscriptCollection, setShowTranscriptCollection] = useState(false);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
@@ -1859,7 +1875,6 @@ export default function MeetingCanvasTab({
     setArmedCanvasTool(null);
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
-    setIdeaAssimilationLoading(false);
     setShowTranscriptCollection(false);
     setPlacementFeedback(null);
     if (workspaceSaveTimerRef.current) {
@@ -2378,6 +2393,56 @@ export default function MeetingCanvasTab({
     ],
   );
 
+  const applyServerIdeaWorkspace = useCallback(
+    (workspace: CanvasWorkspaceStateResponse | undefined | null) => {
+      if (!workspace || workspace.meeting_id !== meetingId) return;
+
+      const nextCanvasItems = hydrateCanvasItems(workspace.canvas_items || []);
+      const nextNodePositions = workspace.node_positions || {};
+
+      setCanvasItems(nextCanvasItems);
+      setNodePositions(nextNodePositions);
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItems,
+        nodePositions: nextNodePositions,
+        importedState: persistedSharedImportedState,
+      };
+
+      if (sharedSyncEnabled) {
+        writeSharedWorkspaceSessionCache(
+          meetingId,
+          buildFullWorkspacePatchPayload({
+            meetingId,
+            stage,
+            agendaOverrides,
+            canvasItems: nextCanvasItems,
+            customGroups,
+            problemGroups,
+            solutionTopics,
+            nodePositions: nextNodePositions,
+            importedState: persistedSharedImportedState,
+          }),
+        );
+        forceBroadcastSharedCanvas({
+          canvasItems: nextCanvasItems,
+          nodePositions: nextNodePositions,
+        });
+      }
+    },
+    [
+      agendaOverrides,
+      customGroups,
+      forceBroadcastSharedCanvas,
+      meetingId,
+      persistedSharedImportedState,
+      problemGroups,
+      sharedSyncEnabled,
+      solutionTopics,
+      stage,
+    ],
+  );
+
   const flushIdeaAssimilationBuffer = useCallback(
     async (reason: "timer" | "silence" | "stage-change" | "manual") => {
       if (!meetingId || stage !== "ideation" || ideaAssimilationInFlightRef.current) {
@@ -2397,29 +2462,16 @@ export default function MeetingCanvasTab({
       }
 
       ideaAssimilationInFlightRef.current = true;
-      setIdeaAssimilationLoading(true);
       setIdeaAssimilationStatus("AI가 키워드와 content를 생성 중");
 
       try {
         const firstTargetIndex = transcripts.findIndex((row) => row.id === targetRows[0]?.id);
         const contextRows =
           firstTargetIndex > 0 ? normalizeTranscriptRows(transcripts.slice(Math.max(0, firstTargetIndex - 6), firstTargetIndex)) : [];
-        const existingIdeas: CanvasIdeaAssimilationIdea[] = canvasItems
-          .filter((item) => item.kind !== "comment")
-          .map((item) => ({
-            id: item.id,
-            title: item.title,
-            summary: item.body || item.title,
-            keywords: item.keywords || [],
-            key_evidence: item.key_evidence || [],
-            refined_utterances: item.refined_utterances || [],
-            evidence_utterance_ids: item.evidence_utterance_ids || [],
-            user_edited: Boolean(item.user_edited),
-          }));
-
-        const result = await assimilateCanvasIdeas({
+        const started = await startCanvasIdeaAssimilationWorkspace({
           meeting_id: meetingId,
           meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+          selected_agenda_id: selectedAgendaId || agendaModels[0]?.id || "",
           context_utterances: contextRows.map((row) => ({
             id: row.id,
             speaker: row.speaker || "참가자",
@@ -2432,162 +2484,52 @@ export default function MeetingCanvasTab({
             text: stripLeadingTimestamp(row.text),
             timestamp: row.timestamp || "",
           })),
-          existing_ideas: existingIdeas,
         });
 
-        const updates = (result.updates || []).filter((update) => update.action === "merge" || update.action === "create");
-        if (updates.length === 0) {
-          targetRows.forEach((row) => processedIds.add(row.id));
-          setIdeaAssimilationStatus("정리할 새 아이디어 없음");
+        applyServerIdeaWorkspace(started.workspace);
+        if (started.status !== "processing" || !started.job_id) {
+          if (started.status === "idle") {
+            setIdeaAssimilationStatus(started.detail || "아이디어 정리 대기 중");
+          } else {
+            setIdeaAssimilationStatus(started.detail || "아이디어 정리 상태를 확인했습니다.");
+          }
           return;
         }
 
-        const nextNodePositions: CanvasNodePositionsByStage = {
-          ...nodePositions,
-          ideation: {
-            ...(nodePositions.ideation || {}),
-          },
-        };
-        const knownItems = [...canvasItems];
-        const now = Date.now();
-        const createdItems: CanvasItemViewModel[] = [];
-
-        const applyUpdateToItem = (item: CanvasItemViewModel, update: CanvasIdeaAssimilationUpdate) => {
-          const nextEvidenceIds = Array.from(
-            new Set([...(item.evidence_utterance_ids || []), ...(update.evidenceUtteranceIds || [])]),
-          ).slice(0, 400);
-          const nextIgnoredIds = Array.from(
-            new Set([...(item.ignored_utterance_ids || []), ...(update.ignoredUtteranceIds || [])]),
-          ).slice(0, 400);
-          const nextKeyEvidence = Array.from(new Set([...(item.key_evidence || []), ...(update.keyEvidence || [])])).slice(0, 8);
-          const nextKeywords = Array.from(new Set([...(item.keywords || []), ...(update.keywords || [])])).slice(0, 8);
-          const nextRefinedUtterances = normalizeRefinedUtterances([
-            ...(item.refined_utterances || []),
-            ...(update.refinedUtterances || []),
-          ]);
-
-          return {
-            ...item,
-            title: item.user_edited ? item.title : update.title || item.title,
-            body: item.user_edited ? item.body : update.summary || item.body,
-            keywords: nextKeywords,
-            key_evidence: nextKeyEvidence,
-            refined_utterances: nextRefinedUtterances,
-            evidence_utterance_ids: nextEvidenceIds,
-            ignored_utterance_ids: nextIgnoredIds,
-            ai_generated: item.ai_generated || result.used_llm,
-          };
-        };
-
-        let nextCanvasItemsSnapshot = knownItems.map((item) => {
-          const update = updates.find((candidate) => candidate.action === "merge" && candidate.targetIdeaId === item.id);
-          return update ? applyUpdateToItem(item, update) : item;
-        });
-
-        updates
-          .filter((update) => update.action === "create")
-          .forEach((update, index) => {
-            const id = `ai-idea-${now}-${index}-${Math.random().toString(16).slice(2, 6)}`;
-            const nodeId = `canvas-item-${id}`;
-            const layoutIndex = nextCanvasItemsSnapshot.length + createdItems.length;
-            const x = 180 + (layoutIndex % 3) * 300;
-            const y = 300 + Math.floor(layoutIndex / 3) * 230;
-            const nextItem: CanvasItemViewModel = {
-              id,
-              agenda_id: selectedAgendaId || agendaModels[0]?.id || "",
-              point_id: "",
-              kind: "note",
-              title: update.title || "새 아이디어",
-              body: update.summary || "",
-              keywords: (update.keywords || []).slice(0, 8),
-              key_evidence: (update.keyEvidence || []).slice(0, 8),
-              refined_utterances: normalizeRefinedUtterances(update.refinedUtterances),
-              evidence_utterance_ids: (update.evidenceUtteranceIds || []).slice(0, 400),
-              ignored_utterance_ids: (update.ignoredUtteranceIds || []).slice(0, 400),
-              ai_generated: true,
-              user_edited: false,
-              x,
-              y,
-            };
-            nextNodePositions.ideation = {
-              ...(nextNodePositions.ideation || {}),
-              [nodeId]: { x, y },
-            };
-            createdItems.push(nextItem);
-          });
-
-        nextCanvasItemsSnapshot = [...createdItems, ...nextCanvasItemsSnapshot];
-        updates.forEach((update) => {
-          [...(update.evidenceUtteranceIds || []), ...(update.ignoredUtteranceIds || [])].forEach((id) => {
-            if (id) processedIds.add(id);
-          });
-        });
-        targetRows.forEach((row) => processedIds.add(row.id));
-        ideaBufferStartedAtRef.current = null;
-
-        setCanvasItems(nextCanvasItemsSnapshot);
-        setNodePositions(nextNodePositions);
-        latestSharedWorkspaceRef.current = {
-          ...latestSharedWorkspaceRef.current,
-          canvasItems: nextCanvasItemsSnapshot,
-          nodePositions: nextNodePositions,
-          importedState: persistedSharedImportedState,
-        };
-
-        if (sharedSyncEnabled) {
-          writeSharedWorkspaceSessionCache(
-            meetingId,
-            buildFullWorkspacePatchPayload({
-              meetingId,
-              stage,
-              agendaOverrides,
-              canvasItems: nextCanvasItemsSnapshot,
-              customGroups,
-              problemGroups,
-              solutionTopics,
-              nodePositions: nextNodePositions,
-              importedState: persistedSharedImportedState,
-            }),
-          );
-          forceBroadcastSharedCanvas({
-            canvasItems: nextCanvasItemsSnapshot,
-            nodePositions: nextNodePositions,
-          });
-          void saveCanvasWorkspacePatch({
-            meeting_id: meetingId,
-            canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-            node_positions: nextNodePositions,
-            imported_state: persistedSharedImportedState,
-          }).catch((error) => {
-            console.error("Failed to save AI idea assimilation:", error);
-          });
+        let finalResult = started;
+        for (let attempt = 0; attempt < 90; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 900));
+          finalResult = await getCanvasIdeaAssimilationWorkspaceJob(meetingId, started.job_id);
+          if (finalResult.status !== "processing") {
+            applyServerIdeaWorkspace(finalResult.workspace);
+            break;
+          }
         }
 
-        setIdeaAssimilationStatus(result.used_llm ? "AI 아이디어 정리 반영됨" : "로컬 기준으로 아이디어 정리됨");
+        if (finalResult.status === "completed") {
+          targetRows.forEach((row) => processedIds.add(row.id));
+          ideaBufferStartedAtRef.current = null;
+          setIdeaAssimilationStatus(finalResult.used_llm ? "AI 아이디어 정리 반영됨" : "로컬 기준으로 아이디어 정리됨");
+        } else if (finalResult.status === "error") {
+          setIdeaAssimilationStatus(finalResult.detail || "아이디어 정리 실패");
+        } else {
+          setIdeaAssimilationStatus("아이디어 정리 응답 대기 중");
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setIdeaAssimilationStatus(`아이디어 정리 실패: ${message}`);
       } finally {
         ideaAssimilationInFlightRef.current = false;
-        setIdeaAssimilationLoading(false);
       }
     },
     [
       agendaModels,
-      agendaOverrides,
-      canvasItems,
-      customGroups,
+      applyServerIdeaWorkspace,
       effectiveState?.meeting_goal,
-      forceBroadcastSharedCanvas,
       generatedMeetingGoal,
       meetingId,
       meetingTitle,
-      nodePositions,
-      persistedSharedImportedState,
-      problemGroups,
       selectedAgendaId,
-      sharedSyncEnabled,
-      solutionTopics,
       stage,
       transcripts,
     ],
@@ -6744,25 +6686,6 @@ export default function MeetingCanvasTab({
                     {problemGroups.some((group) => group.status === "final")
                       ? "해결책 토픽을 준비하는 중입니다."
                       : "확정된 문제 정의 그룹이 있어야 해결책을 만들 수 있습니다."}
-                  </p>
-                </div>
-              </div>
-            ) : null}
-
-            {stage === "ideation" && ideaAssimilationLoading ? (
-              <div className="pointer-events-none absolute inset-0 z-[6] flex items-center justify-center bg-white/72 backdrop-blur-[2px]">
-                <div className="w-[min(440px,90%)] rounded-[28px] border border-blue-100 bg-white px-8 py-7 text-center shadow-[0_24px_60px_rgba(15,23,42,0.12)]">
-                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-blue-50">
-                    <span className="h-10 w-10 animate-spin rounded-full border-[3px] border-blue-100 border-t-[#1b59f8]" />
-                  </div>
-                  <p className="mt-5 text-sm font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">
-                    AI Ideation
-                  </p>
-                  <h3 className="mt-2 text-2xl font-semibold text-slate-900">
-                    키워드와 content 생성 중
-                  </h3>
-                  <p className="mt-3 text-base leading-7 text-slate-500">
-                    최근 전사문을 하나로 묶어 핵심만 추리고 있습니다.
                   </p>
                 </div>
               </div>

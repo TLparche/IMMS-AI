@@ -257,6 +257,7 @@ export interface CanvasWorkspaceItem {
   ignored_utterance_ids?: string[];
   ai_generated?: boolean;
   user_edited?: boolean;
+  ai_pending?: boolean;
   x?: number;
   y?: number;
 }
