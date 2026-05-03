@@ -54,7 +54,8 @@ export class WebSocketClient {
           messageType !== 'stt_debug' &&
           messageType !== 'audio_selection' &&
           messageType !== 'transcript' &&
-          messageType !== 'transcript_created'
+          messageType !== 'transcript_created' &&
+          messageType !== 'stt_summary_updated'
         ) {
           console.log('📨 WebSocket message:', message)
         }

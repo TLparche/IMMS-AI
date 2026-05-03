@@ -102,21 +102,6 @@ function readNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function summarizeTranscriptForConsole(speaker: string, text: string) {
-  const cleanText = text.replace(/\s+/g, " ").trim();
-  const shortText = cleanText.length > 64 ? `${cleanText.slice(0, 63).trim()}…` : cleanText;
-  const intent =
-    /[?？]|궁금|어떻게|왜|가능|될까|되나/.test(cleanText)
-      ? "질문 중"
-      : /문제|불편|어렵|리스크|걱정|한계|부족/.test(cleanText)
-        ? "문제 제기 중"
-        : /하자|하면|아이디어|제안|추가|개선|만들|넣|도입|활용/.test(cleanText)
-          ? "아이디어 제시 중"
-          : "의견 공유 중";
-
-  return `${speaker || "참가자"}: ${shortText} · ${intent}`;
-}
-
 function hasLikelySpeech(metrics: RecordedAudioChunk["metrics"]) {
   return metrics.rms >= 0.0045 || metrics.speechRatio >= 0.045 || metrics.peak >= 0.04;
 }
@@ -143,6 +128,7 @@ function HomeContent() {
   const [fusionSelectedUserId, setFusionSelectedUserId] = useState<string | null>(null);
   const [fusionSelectedSpeaker, setFusionSelectedSpeaker] = useState<string>("");
   const [liveSpeechPreview, setLiveSpeechPreview] = useState<LiveSpeechPreview | null>(null);
+  const [sttProgressText, setSttProgressText] = useState("");
   const [audioImportJob, setAudioImportJob] = useState<AudioImportJobStatusResponse | null>(null);
   const [audioImportRevision, setAudioImportRevision] = useState(0);
 
@@ -242,6 +228,7 @@ function HomeContent() {
     setIncomingCanvasSync(null);
     setIncomingCanvasStateRequestId("");
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
+    setSttProgressText("");
     setAudioImportJob(null);
     setAudioImportRevision(0);
     stopAudioImportPolling();
@@ -317,8 +304,10 @@ function HomeContent() {
         new Date().toISOString(),
       );
       const transcriptId = readString(transcriptPayload.id, `${nextTimestamp}-${speaker}-${text}`);
-      const summary = summarizeTranscriptForConsole(speaker, text);
-      console.info("[STT] 요약 발언", summary);
+      const summary = readString(payload.summary_text);
+      if (summary) {
+        console.info("[STT] 서버 요약 발언", summary);
+      }
       console.info("[STT] 전사", { id: transcriptId, speaker, text, timestamp: nextTimestamp });
       setTranscripts((prev) =>
         dedupeTranscripts([
@@ -332,6 +321,16 @@ function HomeContent() {
         ]),
       );
       showLiveSpeechPreview(speaker, text, nextTimestamp);
+    });
+
+    wsClient.on("stt_summary_updated", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      const summary = isRecord(payload.summary) ? payload.summary : {};
+      const text = readString(summary.text || payload.summary_text);
+      if (!text.trim()) return;
+      setSttProgressText(text);
     });
 
     wsClient.on("stt_debug", (message) => {
@@ -367,6 +366,10 @@ function HomeContent() {
           thresholds: payload.thresholds,
           candidates: payload.candidates,
         });
+        return;
+      }
+
+      if (stage === "transcription_audio_buffered") {
         return;
       }
 
@@ -790,7 +793,9 @@ function HomeContent() {
         audioImportRevision={audioImportRevision}
         isRecording={isRecording}
         onToggleRecording={toggleRecording}
+        onStopRecording={toggleRecording}
         onEndMeeting={endMeeting}
+        sttProgressText={sttProgressText}
         recordingStatusText={
           calibrationState === "running"
             ? `마이크 캘리브레이션 ${calibrationSecondsLeft}s`

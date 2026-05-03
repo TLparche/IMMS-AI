@@ -51,6 +51,7 @@ export class AudioRecorder {
   private chunkMetrics: ChunkMetricsAccumulator = createAccumulator()
   private learnedNoiseFloor = 0.0025
   private teardownPromise: Promise<void> | null = null
+  private pendingDataResolvers: Array<() => void> = []
 
   private consumeMetrics = (event: MessageEvent) => {
     const data = event.data as {
@@ -128,6 +129,7 @@ export class AudioRecorder {
 
         this.chunkMetrics = createAccumulator()
         this.chunkStartedAt = endedAtMs
+        this.resolvePendingData()
       }
 
       this.audioContext = new AudioContext()
@@ -176,6 +178,25 @@ export class AudioRecorder {
     }
   }
 
+  private resolvePendingData() {
+    const resolvers = this.pendingDataResolvers.splice(0)
+    resolvers.forEach((resolve) => resolve())
+  }
+
+  private waitForNextDataAvailable(timeoutMs: number) {
+    return new Promise<void>((resolve) => {
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        window.clearTimeout(timer)
+        resolve()
+      }
+      const timer = window.setTimeout(finish, timeoutMs)
+      this.pendingDataResolvers.push(finish)
+    })
+  }
+
   private async releaseResources() {
     if (this.metricsNode) {
       this.metricsNode.port.onmessage = null
@@ -213,6 +234,7 @@ export class AudioRecorder {
 
     this.mediaRecorder = null
     this.onChunkReady = null
+    this.pendingDataResolvers = []
     this.chunkMetrics = createAccumulator()
     this.chunkStartedAt = null
     this.teardownPromise = null
@@ -229,6 +251,15 @@ export class AudioRecorder {
     if (!recorder || recorder.state === 'inactive') {
       await this.releaseResources()
       return
+    }
+
+    try {
+      if (recorder.state === 'recording') {
+        recorder.requestData()
+        await this.waitForNextDataAvailable(1800)
+      }
+    } catch (error) {
+      console.warn('⚠️ Failed to flush final audio chunk before stop:', error)
     }
 
     this.teardownPromise = new Promise<void>((resolve) => {

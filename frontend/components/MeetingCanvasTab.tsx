@@ -418,6 +418,8 @@ type MeetingCanvasTabProps = {
   isRecording?: boolean;
   onToggleRecording?: () => void | Promise<void>;
   onEndMeeting?: () => void | Promise<void>;
+  onStopRecording?: () => void | Promise<void>;
+  sttProgressText?: string;
   recordingStatusText?: string;
 };
 
@@ -1534,6 +1536,8 @@ export default function MeetingCanvasTab({
   isRecording = false,
   onToggleRecording,
   onEndMeeting,
+  onStopRecording,
+  sttProgressText = "",
   recordingStatusText = "",
 }: MeetingCanvasTabProps) {
   const [stage, setStage] = useState<CanvasStage>("ideation");
@@ -2303,7 +2307,10 @@ export default function MeetingCanvasTab({
         .slice(-80);
 
       const targetTextLength = targetRows.reduce((sum, row) => sum + stripLeadingTimestamp(row.text).length, 0);
-      if (targetRows.length === 0 || (reason !== "stage-change" && targetTextLength < 80)) {
+      if (targetRows.length === 0 || (reason !== "stage-change" && reason !== "manual" && targetTextLength < 40)) {
+        if (targetRows.length > 0) {
+          setIdeaAssimilationStatus(`아이디어 정리 대기 중 · ${targetRows.length}개 발화`);
+        }
         return;
       }
 
@@ -5357,6 +5364,11 @@ export default function MeetingCanvasTab({
     void handleGenerateProblemDefinition();
   }, [agendaModels.length, busy, problemGroups.length, stage]);
 
+  const handleStopRecordingClick = async () => {
+    await onStopRecording?.();
+    await flushIdeaAssimilationBuffer("manual");
+  };
+
   const handleEndMeetingClick = async () => {
     await flushIdeaAssimilationBuffer("stage-change");
     await onEndMeeting?.();
@@ -5379,7 +5391,13 @@ export default function MeetingCanvasTab({
               </button>
               <button
                 type="button"
-                onClick={() => void onToggleRecording?.()}
+                onClick={() => {
+                  if (isRecording) {
+                    void handleStopRecordingClick();
+                  } else {
+                    void onToggleRecording?.();
+                  }
+                }}
                 className={`h-[43px] rounded-[8px] px-4 text-sm font-semibold ${
                   isRecording ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100" : "bg-[#1b59f8] text-white"
                 }`}
@@ -6371,7 +6389,7 @@ export default function MeetingCanvasTab({
             <div className="relative grid min-h-[135px] shrink-0 grid-cols-1 divide-y divide-black/10 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] md:grid-cols-3 md:divide-x md:divide-y-0">
               <div className="pointer-events-none absolute left-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap gap-2">
                 <span className="rounded-full border border-blue-100 bg-blue-50/95 px-3 py-1 text-xs font-semibold text-blue-700 shadow-sm">
-                  {liveFlowHint || "현재 발언 흐름 대기 중"}
+                  {sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중"}
                 </span>
                 {ideaAssimilationStatus ? (
                   <span className="rounded-full border border-black/10 bg-white/95 px-3 py-1 text-xs font-medium text-[#4d4d4d] shadow-sm">

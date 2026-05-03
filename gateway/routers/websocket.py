@@ -18,6 +18,7 @@ router = APIRouter()
 # 회의방별 연결 관리
 active_connections: Dict[str, List[Dict]] = {}
 latest_canvas_workspace_by_meeting: Dict[str, Dict[str, Any]] = {}
+latest_stt_summary_by_meeting: Dict[str, Dict[str, Any]] = {}
 
 # AI 백엔드 URL
 AI_BACKEND_URL = settings.ai_module_url.rstrip("/")
@@ -182,6 +183,64 @@ def remove_previous_transcript_prefix(text: str, previous_text: str) -> str:
     return clean
 
 
+def build_transcript_summary(speaker: str, text: str) -> str:
+    clean_text = " ".join((text or "").split()).strip()
+    if len(clean_text) > 64:
+        clean_text = clean_text[:63].strip() + "…"
+    lowered = clean_text.lower()
+    if any(token in lowered for token in ["?", "？", "궁금", "어떻게", "왜", "가능", "될까", "되나"]):
+        intent = "질문 중"
+    elif any(token in lowered for token in ["문제", "불편", "어렵", "리스크", "걱정", "한계", "부족"]):
+        intent = "문제 제기 중"
+    elif any(token in lowered for token in ["하자", "하면", "아이디어", "제안", "추가", "개선", "만들", "넣", "도입", "활용"]):
+        intent = "아이디어 제시 중"
+    else:
+        intent = "의견 공유 중"
+    return f"{speaker or '참가자'}: {clean_text} · {intent}" if clean_text else "현재 발언 흐름 대기 중"
+
+
+def build_stt_progress_summary(stage: str, data: dict[str, Any]) -> str:
+    if stage in {"audio_chunk_received", "audio_chunk_queued"}:
+        return "오디오 수신 중 · 전사 대기"
+    if stage == "audio_candidate_selected":
+        return "발화 구간 선택됨 · 전사 준비 중"
+    if stage == "audio_candidate_dropped":
+        return "입력이 작아 전사하지 않음"
+    if stage == "transcription_audio_buffered":
+        return f"최근 발화 누적 중 · {int(data.get('stream_chunk_count') or 0)}개 청크"
+    if stage == "transcription_started":
+        return "Whisper 전사 중 · 잠시만 기다려 주세요"
+    if stage == "transcription_empty":
+        return "전사 결과 없음 · 다음 발화 대기"
+    if stage == "transcript_saved":
+        return "전사 저장 완료 · 화면 반영 대기"
+    if stage == "transcript_save_failed":
+        return "전사 DB 저장 실패"
+    if stage == "transcription_duplicate_skipped":
+        return "중복 전사 감지 · 새 내용 대기"
+    if stage == "mic_calibrated":
+        return "마이크 캘리브레이션 완료"
+    return ""
+
+
+async def update_stt_summary(meeting_id: str, text: str, source: str, user_id: str | None = None, **extra):
+    summary = {
+        "text": text,
+        "source": source,
+        "user_id": user_id or "",
+        "updated_at": datetime.utcnow().isoformat(),
+        **extra,
+    }
+    latest_stt_summary_by_meeting[meeting_id] = copy.deepcopy(summary)
+    await broadcast_to_meeting(meeting_id, {
+        "type": "stt_summary_updated",
+        "meeting_id": meeting_id,
+        "summary": summary,
+        "summary_text": text,
+        "timestamp": summary["updated_at"],
+    })
+
+
 async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
@@ -338,6 +397,17 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         text_length=len(transcribed_text),
         transcript_id=saved_transcript.get("id"),
     )
+    summary_text = build_transcript_summary(
+        str(saved_transcript.get("speaker") or winner["speaker"]),
+        str(saved_transcript.get("text") or transcribed_text),
+    )
+    await update_stt_summary(
+        meeting_id,
+        summary_text,
+        "transcript_created",
+        winner["user_id"],
+        transcript_id=saved_transcript.get("id"),
+    )
     transcript_message = {
         'type': 'transcript_created',
         'meeting_id': meeting_id,
@@ -350,6 +420,7 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
             'timestamp': saved_transcript.get("timestamp") or datetime.utcnow().isoformat(),
             'created_at': saved_transcript.get("created_at") or saved_transcript.get("timestamp"),
         },
+        'summary_text': summary_text,
         'audio_meta': winner.get("audio_meta") or {},
         'fusion': {
             'bucket_id': bucket_id,
@@ -433,6 +504,10 @@ async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str
 
 
 async def send_stt_debug(meeting_id: str, user_id: str | None, stage: str, **data):
+    summary_text = build_stt_progress_summary(stage, data)
+    if summary_text:
+        await update_stt_summary(meeting_id, summary_text, stage, user_id)
+
     message = {
         "type": "stt_debug",
         "meeting_id": meeting_id,
@@ -529,6 +604,19 @@ async def websocket_endpoint(
             })
         except Exception as e:
             print(f"❌ Failed to send initial canvas sync to {user_id}: {e}")
+
+    current_stt_summary = copy.deepcopy(latest_stt_summary_by_meeting.get(meeting_id))
+    if isinstance(current_stt_summary, dict) and current_stt_summary.get("text"):
+        try:
+            await websocket.send_json({
+                'type': 'stt_summary_updated',
+                'meeting_id': meeting_id,
+                'summary': current_stt_summary,
+                'summary_text': current_stt_summary.get("text"),
+                'timestamp': current_stt_summary.get("updated_at") or datetime.utcnow().isoformat(),
+            })
+        except Exception as e:
+            print(f"❌ Failed to send initial STT summary to {user_id}: {e}")
 
     await broadcast_to_meeting(meeting_id, {
         'type': 'canvas_state_request',
@@ -682,6 +770,7 @@ async def websocket_endpoint(
             del active_connections[meeting_id]
             fusion_states.pop(meeting_id, None)
             latest_canvas_workspace_by_meeting.pop(meeting_id, None)
+            latest_stt_summary_by_meeting.pop(meeting_id, None)
         
         # 참가자 퇴장 알림
         await broadcast_to_meeting(meeting_id, {
@@ -697,3 +786,4 @@ async def websocket_endpoint(
             active_connections.pop(meeting_id, None)
             fusion_states.pop(meeting_id, None)
             latest_canvas_workspace_by_meeting.pop(meeting_id, None)
+            latest_stt_summary_by_meeting.pop(meeting_id, None)
