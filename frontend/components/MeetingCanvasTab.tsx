@@ -3625,6 +3625,14 @@ export default function MeetingCanvasTab({
     () => canvasItems.find((item) => item.id === selectedCanvasItemId) || null,
     [canvasItems, selectedCanvasItemId],
   );
+  const allRefinedTranscriptSentences = useMemo(
+    () =>
+      splitRefinedUtteranceSentences(
+        canvasItems.flatMap((item) => item.refined_utterances || []),
+        80,
+      ),
+    [canvasItems],
+  );
   const autoLinkEdges = useMemo<Edge[]>(() => {
     if (stage !== "ideation") return [];
 
@@ -6399,15 +6407,7 @@ export default function MeetingCanvasTab({
                     ) : null}
                   </div>
                   <div className="mt-4 space-y-3">
-                    {agendaModels.map((agenda) => {
-                      const linkedRefinedSentences = splitRefinedUtteranceSentences(
-                        canvasItems
-                          .filter((item) => item.agenda_id === agenda.id)
-                          .flatMap((item) => item.refined_utterances || []),
-                        6,
-                      );
-
-                      return (
+                    {agendaModels.map((agenda) => (
                         <button
                           key={agenda.id}
                           type="button"
@@ -6427,18 +6427,28 @@ export default function MeetingCanvasTab({
                             ) : null}
                           </div>
                           <p className="mt-2 text-sm leading-6 text-slate-500">{agenda.summaryBullets[0] || "요약이 아직 없습니다."}</p>
-                          {linkedRefinedSentences.length > 0 ? (
-                            <div className="mt-3 space-y-1.5 rounded-xl bg-white/80 px-3 py-2">
-                              {linkedRefinedSentences.map((item, index) => (
-                                <p key={`${agenda.id}-refined-${item.utterance_id}-${index}`} className="text-xs leading-5 text-slate-500">
-                                  <span className="font-semibold text-slate-600">{item.speaker}</span>: {item.text}
-                                </p>
-                              ))}
-                            </div>
-                          ) : null}
                         </button>
-                      );
-                    })}
+                    ))}
+                  </div>
+                  <div className="mt-6 rounded-2xl border border-slate-200 bg-white/75 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <h5 className="text-base font-semibold text-slate-900">전사 내용 모음</h5>
+                      <span className="text-xs font-medium text-slate-400">{allRefinedTranscriptSentences.length}개 문장</span>
+                    </div>
+                    {allRefinedTranscriptSentences.length > 0 ? (
+                      <div className="mt-3 space-y-2">
+                        {allRefinedTranscriptSentences.map((item, index) => (
+                          <div key={`all-refined-${item.utterance_id}-${index}`} className="rounded-xl bg-[#fafafa] px-3 py-2">
+                            <p className="text-xs font-semibold text-slate-500">{item.speaker || `발화 ${index + 1}`}</p>
+                            <p className="mt-1 text-sm leading-6 text-slate-700">{stripLeadingTimestamp(item.text)}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm leading-6 text-slate-500">
+                        LLM이 아이디어 노드를 생성하면 핵심 요약에 영향을 준 주요 발화가 여기에 문장 단위로 정리됩니다.
+                      </p>
+                    )}
                   </div>
                 </section>
 

@@ -2186,13 +2186,26 @@ def _build_idea_assimilation_local(payload: CanvasIdeaAssimilationInput) -> list
 
 
 def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str:
+    context_rows = [_idea_assimilation_utterance_dict(item) for item in (payload.context_utterances or [])[-8:]]
+    target_rows = [_idea_assimilation_utterance_dict(item) for item in (payload.target_utterances or [])]
+    context_transcript_text = " ".join(
+        f"{row['speaker']}: {row['text']}" for row in context_rows if _safe_text(row.get("text"))
+    )
+    target_transcript_text = " ".join(
+        f"{row['speaker']}: {row['text']}" for row in target_rows if _safe_text(row.get("text"))
+    )
     prompt_payload = {
         "meeting_topic": _safe_text(payload.meeting_topic),
-        "context_utterances": [
-            _idea_assimilation_utterance_dict(item) for item in (payload.context_utterances or [])[-8:]
-        ],
-        "target_utterances": [
-            _idea_assimilation_utterance_dict(item) for item in (payload.target_utterances or [])
+        "context_transcript_text": context_transcript_text,
+        "target_transcript_text": target_transcript_text,
+        "target_utterance_refs": [
+            {
+                "id": row["id"],
+                "speaker": row["speaker"],
+                "timestamp": row["timestamp"],
+            }
+            for row in target_rows
+            if _safe_text(row.get("id"))
         ],
         "existing_ideas": [
             _idea_assimilation_existing_idea_dict(item) for item in (payload.existing_ideas or [])[:40]
@@ -2201,11 +2214,12 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
     return (
         "너는 회의 발화를 아이디어 캔버스에 반영하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
         "[목표]\n"
-        "- target_utterances의 원문 발화를 보고 기존 아이디어에 편입할지, 새 아이디어를 만들지 결정한다.\n"
+        "- target_transcript_text 전체를 하나의 이어진 전사문으로 보고 기존 아이디어에 편입할지, 새 아이디어를 만들지 결정한다.\n"
         "- 잡담, 단순 맞장구, 반복 확인, 감사 인사는 아이디어 노드에 넣지 말고 ignoredUtteranceIds에만 포함한다.\n"
-        "- 아이디어 노드에는 불필요한 대화 흐름이 아니라 실행/기획에 의미 있는 핵심 아이디어만 정제해서 넣는다.\n"
-        "- summary는 노드 본문에 들어갈 핵심 요약이고, refinedUtterances는 안건 목록/상세에서 볼 다듬은 발화 내용이다.\n"
-        "- refinedUtterances는 원문 의미를 바꾸지 말고 말버릇, 중복, 불필요한 추임새만 제거해 자연스러운 문장으로 정리한다.\n"
+        "- 아이디어 노드에는 불필요한 대화 흐름이 아니라 전체 전사문에서 드러난 실행/기획 핵심만 정제해서 넣는다.\n"
+        "- summary는 노드 본문에 들어갈 핵심 요약이며, 전체 전사문을 1~2줄로 압축한 문장이어야 한다.\n"
+        "- keywords는 target_transcript_text 전체를 보고 핵심 용어만 추출한다.\n"
+        "- refinedUtterances는 summary에 영향을 준 주요 발화들을 각각 한 줄씩 요약한 것이다.\n"
         "- 기존 아이디어와 의미가 같으면 merge, 명확히 다른 의미면 create를 사용한다.\n"
         "- user_edited가 true인 기존 아이디어는 제목과 요약을 덮어쓰지 않도록 merge 대상으로 삼더라도 근거/키워드 보강 중심으로 응답한다.\n\n"
         "[입력 JSON]\n"
@@ -2217,11 +2231,11 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         '      "action": "merge",\n'
         '      "targetIdeaId": "idea-id",\n'
         '      "title": "짧은 아이디어 제목",\n'
-        '      "summary": "아이디어 내용을 1~2문장으로 정리",\n'
+        '      "summary": "전체 전사문을 1~2줄로 압축한 핵심 요약",\n'
         '      "keywords": ["키워드1", "키워드2"],\n'
         '      "keyEvidence": ["A: 핵심 근거 발화 요약"],\n'
         '      "refinedUtterances": [\n'
-        '        {"utterance_id": "utterance-id-1", "speaker": "A", "text": "다듬은 발화 내용", "timestamp": "ISO time"}\n'
+        '        {"utterance_id": "utterance-id-1", "speaker": "A", "text": "핵심 요약에 영향을 준 주요 발화 한 줄 요약", "timestamp": "ISO time"}\n'
         "      ],\n"
         '      "evidenceUtteranceIds": ["utterance-id-1"],\n'
         '      "ignoredUtteranceIds": ["utterance-id-2"]\n'
@@ -2233,9 +2247,10 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         "- 하나의 target_utterance는 evidenceUtteranceIds 또는 ignoredUtteranceIds 중 하나에만 넣는다.\n"
         "- create의 targetIdeaId는 빈 문자열로 둔다.\n"
         "- title은 12자 이내의 한국어 명사구를 우선한다.\n"
-        "- summary는 회의 잡담을 제거하고 아이디어만 남긴다.\n"
-        "- refinedUtterances에는 evidenceUtteranceIds에 포함한 발화만 넣고, ignoredUtteranceIds에 포함한 잡담은 넣지 않는다.\n"
-        "- refinedUtterances의 utterance_id, speaker, timestamp는 입력 발화 값을 그대로 사용한다.\n"
+        "- summary는 회의 잡담을 제거하고 전체 전사문의 핵심만 1~2줄로 남긴다.\n"
+        "- refinedUtterances에는 핵심 요약문에 직접 영향을 준 주요 발화만 넣고, 잡담은 넣지 않는다.\n"
+        "- refinedUtterances의 utterance_id, speaker, timestamp는 target_utterance_refs 중 가장 가까운 입력값을 사용한다.\n"
+        "- evidenceUtteranceIds와 ignoredUtteranceIds는 target_utterance_refs의 id만 사용한다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 
