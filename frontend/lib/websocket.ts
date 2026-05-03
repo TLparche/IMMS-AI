@@ -49,9 +49,10 @@ export class WebSocketClient {
     this.ws.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data) as WebSocketMessage
-        console.log('📨 WebSocket message:', message)
-
         const messageType = typeof message.type === 'string' ? message.type : ''
+        if (messageType !== 'stt_debug' && messageType !== 'audio_selection' && messageType !== 'transcript') {
+          console.log('📨 WebSocket message:', message)
+        }
         if (messageType && this.messageHandlers.has(messageType)) {
           const handler = this.messageHandlers.get(messageType)
           if (handler) handler(message)
@@ -154,11 +155,6 @@ export class WebSocketClient {
       }
 
       this.ws?.send(JSON.stringify(message))
-      console.log('🎤 Sent audio chunk', {
-        bytes: audioBlob.size,
-        mimeType: audioBlob.type,
-        metrics: audioMeta,
-      })
     }
     reader.onerror = () => {
       console.error('❌ Failed to read audio chunk for WebSocket send', reader.error)

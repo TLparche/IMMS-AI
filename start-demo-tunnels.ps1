@@ -118,7 +118,7 @@ try {
   $started += Start-LoggedProcess `
     -Name "backend" `
     -FilePath $python `
-    -ArgumentList @("-m", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "$BackendPort") `
+    -ArgumentList @("-m", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "$BackendPort", "--reload") `
     -WorkingDirectory $projectRoot `
     -LogDirectory $logDir
 
@@ -126,7 +126,7 @@ try {
   $started += Start-LoggedProcess `
     -Name "gateway" `
     -FilePath $python `
-    -ArgumentList @("-m", "uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "$GatewayPort") `
+    -ArgumentList @("-m", "uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "$GatewayPort", "--reload") `
     -WorkingDirectory $projectRoot `
     -LogDirectory $logDir
 
@@ -165,7 +165,15 @@ try {
   Write-Host ""
   Write-Host "Vercel 환경변수에 넣을 때는 보통:"
   Write-Host "NEXT_PUBLIC_GATEWAY_URL=$gatewayTunnel"
+  if ($gatewayTunnel) {
+    Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL=$($gatewayTunnel -replace '^https://', 'wss://')/gateway/ws"
+  } else {
+    Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL="
+  }
   Write-Host "NEXT_PUBLIC_API_BASE_URL=$backendTunnel"
+  Write-Host ""
+  Write-Host "backend/gateway는 --reload로 실행 중입니다. Python 코드 변경은 이 창을 끄지 않으면 자동 반영됩니다."
+  Write-Host "Cloudflare quick tunnel 링크는 이 창을 끄지 않는 동안 유지됩니다."
   Write-Host ""
   Write-Host "Logs: $logDir"
   Write-Host ""

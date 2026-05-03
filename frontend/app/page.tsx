@@ -98,6 +98,25 @@ function readString(value: unknown, fallback = "") {
   return typeof value === "string" ? value : fallback;
 }
 
+function summarizeTranscriptForConsole(speaker: string, text: string) {
+  const cleanText = text.replace(/\s+/g, " ").trim();
+  const shortText = cleanText.length > 64 ? `${cleanText.slice(0, 63).trim()}…` : cleanText;
+  const intent =
+    /[?？]|궁금|어떻게|왜|가능|될까|되나/.test(cleanText)
+      ? "질문 중"
+      : /문제|불편|어렵|리스크|걱정|한계|부족/.test(cleanText)
+        ? "문제 제기 중"
+        : /하자|하면|아이디어|제안|추가|개선|만들|넣|도입|활용/.test(cleanText)
+          ? "아이디어 제시 중"
+          : "의견 공유 중";
+
+  return `${speaker || "참가자"}: ${shortText} · ${intent}`;
+}
+
+function hasLikelySpeech(metrics: RecordedAudioChunk["metrics"]) {
+  return metrics.rms >= 0.0035 || metrics.speechRatio >= 0.04 || metrics.peak >= 0.035;
+}
+
 function HomeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -285,6 +304,9 @@ function HomeContent() {
       const speaker = readString(payload.speaker, "알 수 없음");
       const text = readString(payload.text);
       const nextTimestamp = readString(payload.timestamp, new Date().toISOString());
+      const summary = summarizeTranscriptForConsole(speaker, text);
+      console.info("[STT] 요약 발언", summary);
+      console.info("[STT] 전사", { speaker, text, timestamp: nextTimestamp });
       setTranscripts((prev) =>
         dedupeTranscripts([
           ...prev,
@@ -592,7 +614,6 @@ function HomeContent() {
     if (!user) return;
 
     if (isRecording) {
-      console.info("[STT] stopping recording");
       const recorder = audioRecorderRef.current;
       audioRecorderRef.current = null;
       await recorder?.stopAndCleanup();
@@ -612,16 +633,8 @@ function HomeContent() {
     }
 
     beginCalibration();
-    console.info("[STT] recording started; first 4 seconds are calibration and will not be sent");
     audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
       const calibrated = deviceCalibratedRef.current;
-      console.info("[STT] audio chunk ready", {
-        bytes: blob.size,
-        calibrated,
-        calibrationActive: calibrationActiveRef.current,
-        websocketConnected: Boolean(wsClientRef.current?.isConnected()),
-        metrics,
-      });
       if (calibrationActiveRef.current || !calibrated) {
         calibrationAccumulatorRef.current.chunks += 1;
         calibrationAccumulatorRef.current.sumRms += metrics.rms;
@@ -630,17 +643,12 @@ function HomeContent() {
         calibrationAccumulatorRef.current.sumNoiseFloor += metrics.noiseFloor;
       }
       if (calibrationActiveRef.current || !calibrated) {
-        console.info("[STT] audio chunk kept for calibration only", {
-          bytes: blob.size,
-          metrics,
-        });
+        return;
+      }
+      if (!hasLikelySpeech(metrics)) {
         return;
       }
       if (wsClientRef.current?.isConnected()) {
-        console.info("[STT] sending audio chunk to gateway", {
-          bytes: blob.size,
-          metrics,
-        });
         wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);
       } else {
         console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
