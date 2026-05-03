@@ -114,7 +114,7 @@ function summarizeTranscriptForConsole(speaker: string, text: string) {
 }
 
 function hasLikelySpeech(metrics: RecordedAudioChunk["metrics"]) {
-  return metrics.rms >= 0.0035 || metrics.speechRatio >= 0.04 || metrics.peak >= 0.035;
+  return metrics.rms >= 0.0018 || metrics.speechRatio >= 0.015 || metrics.peak >= 0.018;
 }
 
 function HomeContent() {
@@ -157,6 +157,7 @@ function HomeContent() {
   const deviceCalibratedRef = useRef(false);
   const liveSpeechClearTimerRef = useRef<number | null>(null);
   const audioImportPollTimerRef = useRef<number | null>(null);
+  const lastSttStatusLogAtRef = useRef(0);
 
   useEffect(() => {
     meetingTitleRef.current = meetingTitle;
@@ -646,9 +647,23 @@ function HomeContent() {
         return;
       }
       if (!hasLikelySpeech(metrics)) {
+        const now = Date.now();
+        if (now - lastSttStatusLogAtRef.current > 5000) {
+          lastSttStatusLogAtRef.current = now;
+          console.info("[STT] 듣는 중 - 무음으로 판단해서 전송하지 않음", {
+            rms: metrics.rms,
+            peak: metrics.peak,
+            speechRatio: metrics.speechRatio,
+          });
+        }
         return;
       }
       if (wsClientRef.current?.isConnected()) {
+        console.info("[STT] 음성 감지 - 전사 요청 전송", {
+          rms: metrics.rms,
+          peak: metrics.peak,
+          speechRatio: metrics.speechRatio,
+        });
         wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);
       } else {
         console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
