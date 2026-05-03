@@ -38,6 +38,7 @@ type WorkletMessage = {
 
 const TARGET_WAV_SAMPLE_RATE = 16000
 const MIN_FLUSH_DURATION_MS = 350
+const AUDIO_WORKLET_VERSION = "pcm-wav-v3"
 
 function clampPcm16(sample: number) {
   const clipped = Math.max(-1, Math.min(1, sample))
@@ -104,6 +105,62 @@ function encodeWav(samples: Float32Array, sourceRate: number, targetRate = TARGE
   }
 }
 
+function calculatePcmMetrics(samples: Float32Array, sampleRate: number): WorkletChunkMetrics {
+  const frameSize = Math.max(1, Math.round(sampleRate * 0.02))
+  let frames = 0
+  let speechFrames = 0
+  let sumRms = 0
+  let sumZeroCrossingRate = 0
+  let peak = 0
+  let noiseFrames = 0
+  let noiseRmsSum = 0
+
+  for (let offset = 0; offset < samples.length; offset += frameSize) {
+    const count = Math.min(frameSize, samples.length - offset)
+    if (count <= 0) continue
+
+    let sumSquares = 0
+    let zeroCrossings = 0
+    let prev = samples[offset] || 0
+
+    for (let index = 0; index < count; index += 1) {
+      const sample = samples[offset + index] || 0
+      const abs = Math.abs(sample)
+      sumSquares += sample * sample
+      peak = Math.max(peak, abs)
+      if (index > 0 && ((sample >= 0 && prev < 0) || (sample < 0 && prev >= 0))) {
+        zeroCrossings += 1
+      }
+      prev = sample
+    }
+
+    const rms = Math.sqrt(sumSquares / count)
+    const zeroCrossingRate = count > 1 ? zeroCrossings / (count - 1) : 0
+    const voiced = rms > 0.015 || (rms > 0.006 && zeroCrossingRate > 0.01 && zeroCrossingRate < 0.35)
+
+    frames += 1
+    sumRms += rms
+    sumZeroCrossingRate += zeroCrossingRate
+    if (voiced) {
+      speechFrames += 1
+    } else {
+      noiseFrames += 1
+      noiseRmsSum += rms
+    }
+  }
+
+  const safeFrames = Math.max(frames, 1)
+  return {
+    durationMs: Math.max(1, Math.round((samples.length / Math.max(sampleRate, 1)) * 1000)),
+    rms: sumRms / safeFrames,
+    peak,
+    speechRatio: speechFrames / safeFrames,
+    zeroCrossingRate: sumZeroCrossingRate / safeFrames,
+    noiseFloor: noiseFrames > 0 ? noiseRmsSum / noiseFrames : 0.0015,
+    sampleCount: samples.length,
+  }
+}
+
 export class AudioRecorder {
   private stream: MediaStream | null = null
   private recordingInterval = 7000
@@ -119,6 +176,9 @@ export class AudioRecorder {
   private recording = false
   private teardownPromise: Promise<void> | null = null
   private pendingFlushResolvers: Array<() => void> = []
+  private chunkWatchdogTimer: number | null = null
+  private emittedChunkCount = 0
+  private lastMeterAtMs = 0
 
   private handleWorkletMessage = (event: MessageEvent<WorkletMessage>) => {
     const data = event.data || {}
@@ -130,6 +190,7 @@ export class AudioRecorder {
     if (data.type === "meter") {
       const now = Date.now()
       const metrics = this.normalizeMetrics(data.metrics, now - Number(data.metrics?.durationMs || 0), now, data.sampleRate)
+      this.lastMeterAtMs = now
       this.onMeterReady?.(metrics)
       return
     }
@@ -147,12 +208,34 @@ export class AudioRecorder {
     const startedAtMs = this.recordingStartedAtMs + chunkIndex * this.recordingInterval
     const endedAtMs = startedAtMs + durationMs
     const wav = encodeWav(samples, sourceSampleRate)
+    this.emittedChunkCount += 1
+    this.scheduleChunkWatchdog()
 
-    const metrics = this.normalizeMetrics(data.metrics, startedAtMs, endedAtMs, sourceSampleRate)
+    const sampleMetrics = calculatePcmMetrics(samples, sourceSampleRate)
+    const metrics = this.normalizeMetrics(sampleMetrics, startedAtMs, endedAtMs, sourceSampleRate)
     metrics.sourceSampleRate = sourceSampleRate
     metrics.sampleRate = wav.sampleRate
     metrics.chunkIndex = chunkIndex
     metrics.mimeType = "audio/wav"
+
+    if (
+      data.metrics &&
+      Number(data.metrics.rms || 0) === 0 &&
+      Number(data.metrics.peak || 0) === 0 &&
+      Number(data.metrics.speechRatio || 0) === 0 &&
+      (metrics.rms > 0 || metrics.peak > 0)
+    ) {
+      console.info("[STT] chunk metrics recovered from PCM samples", {
+        chunkIndex,
+        workletMetrics: data.metrics,
+        recoveredMetrics: {
+          rms: metrics.rms,
+          peak: metrics.peak,
+          speechRatio: metrics.speechRatio,
+          durationMs: metrics.durationMs,
+        },
+      })
+    }
 
     this.onChunkReady({
       blob: wav.blob,
@@ -195,10 +278,13 @@ export class AudioRecorder {
       })
 
       this.audioContext = new AudioContext()
-      await this.audioContext.audioWorklet.addModule("/audio-metrics-processor.js")
+      await this.audioContext.audioWorklet.addModule(`/audio-metrics-processor.js?v=${AUDIO_WORKLET_VERSION}`)
       this.sourceNode = this.audioContext.createMediaStreamSource(this.stream)
       this.chunkNode = new AudioWorkletNode(this.audioContext, "audio-metrics-processor")
       this.chunkNode.port.onmessage = this.handleWorkletMessage
+      this.chunkNode.onprocessorerror = (event) => {
+        console.error("❌ AudioWorklet processor crashed:", event)
+      }
       this.chunkNode.port.postMessage({
         type: "configure",
         intervalMs: this.recordingInterval,
@@ -212,7 +298,11 @@ export class AudioRecorder {
       this.chunkNode.connect(this.sinkGainNode)
       this.sinkGainNode.connect(this.audioContext.destination)
 
-      console.log("✅ PCM/WAV audio recorder initialized")
+      console.log("✅ PCM/WAV audio recorder initialized", {
+        workletVersion: AUDIO_WORKLET_VERSION,
+        sampleRate: this.audioContext.sampleRate,
+        intervalMs: this.recordingInterval,
+      })
       return true
     } catch (error) {
       console.error("❌ Failed to initialize audio recorder:", error)
@@ -233,12 +323,21 @@ export class AudioRecorder {
     this.onChunkReady = onChunkReady
     this.recordingStartedAtMs = Date.now()
     this.recording = true
-    void this.audioContext.resume()
+    this.emittedChunkCount = 0
+    this.lastMeterAtMs = 0
+    void this.audioContext.resume().then(() => {
+      console.info("[STT] audio context resumed", {
+        state: this.audioContext?.state,
+        sampleRate: this.audioContext?.sampleRate,
+        intervalMs: this.recordingInterval,
+      })
+    })
     this.chunkNode.port.postMessage({
       type: "start",
       intervalMs: this.recordingInterval,
       minFlushDurationMs: MIN_FLUSH_DURATION_MS,
     })
+    this.scheduleChunkWatchdog()
     console.log("🎙️ Recording started")
   }
 
@@ -248,6 +347,7 @@ export class AudioRecorder {
     }
 
     this.recording = false
+    this.clearChunkWatchdog()
     this.chunkNode?.port.postMessage({ type: "stop" })
     console.log("⏹️ Recording stopped")
   }
@@ -273,6 +373,37 @@ export class AudioRecorder {
       const timer = window.setTimeout(finish, timeoutMs)
       this.pendingFlushResolvers.push(finish)
     })
+  }
+
+  private clearChunkWatchdog() {
+    if (this.chunkWatchdogTimer) {
+      window.clearTimeout(this.chunkWatchdogTimer)
+      this.chunkWatchdogTimer = null
+    }
+  }
+
+  private scheduleChunkWatchdog() {
+    this.clearChunkWatchdog()
+    if (!this.recording) {
+      return
+    }
+
+    const expectedChunkCount = this.emittedChunkCount
+    this.chunkWatchdogTimer = window.setTimeout(() => {
+      if (!this.recording || this.emittedChunkCount !== expectedChunkCount) {
+        return
+      }
+
+      console.warn("[STT] PCM 청크가 아직 생성되지 않음", {
+        elapsedMs: Date.now() - this.recordingStartedAtMs,
+        emittedChunkCount: this.emittedChunkCount,
+        audioContextState: this.audioContext?.state,
+        sampleRate: this.audioContext?.sampleRate,
+        lastMeterAgoMs: this.lastMeterAtMs ? Date.now() - this.lastMeterAtMs : null,
+        intervalMs: this.recordingInterval,
+      })
+      this.scheduleChunkWatchdog()
+    }, this.recordingInterval + 1500)
   }
 
   private async releaseResources() {
@@ -311,6 +442,7 @@ export class AudioRecorder {
     }
 
     this.recording = false
+    this.clearChunkWatchdog()
     this.onChunkReady = null
     this.onMeterReady = null
     this.pendingFlushResolvers = []

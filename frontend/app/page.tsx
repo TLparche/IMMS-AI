@@ -33,6 +33,25 @@ interface CalibrationAccumulator {
   sumNoiseFloor: number;
 }
 
+interface SpeechDetectionProfile {
+  rms: number;
+  peak: number;
+  speechRatio: number;
+  noiseFloor: number;
+  sampleCount: number;
+}
+
+interface SpeechDetectionDecision {
+  likely: boolean;
+  snr: number;
+  thresholds: {
+    rms: number;
+    peak: number;
+    speechRatio: number;
+    noiseFloor: number;
+  };
+}
+
 export interface LiveSpeechPreview {
   speaker: string;
   text: string;
@@ -102,8 +121,34 @@ function readNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function hasLikelySpeech(metrics: RecordedAudioChunk["metrics"]) {
-  return metrics.rms >= 0.0045 || metrics.speechRatio >= 0.045 || metrics.peak >= 0.04;
+function getSpeechDetectionDecision(
+  metrics: RecordedAudioChunk["metrics"],
+  profile: SpeechDetectionProfile | null,
+): SpeechDetectionDecision {
+  const noiseFloor = Math.max(metrics.noiseFloor || 0, profile?.noiseFloor || 0, 0.0005);
+  const baselineRms = Math.max(profile?.rms || noiseFloor, noiseFloor);
+  const baselinePeak = Math.max(profile?.peak || noiseFloor * 6, noiseFloor * 6);
+  const baselineSpeechRatio = Math.max(profile?.speechRatio || 0, 0);
+
+  const rmsThreshold = Math.max(0.0018, Math.min(0.0045, Math.max(noiseFloor * 2.6, baselineRms * 1.8)));
+  const peakThreshold = Math.max(0.012, Math.min(0.04, Math.max(noiseFloor * 8, baselinePeak * 1.6)));
+  const speechRatioThreshold = Math.max(0.012, Math.min(0.045, baselineSpeechRatio * 1.8));
+  const snr = metrics.rms / noiseFloor;
+
+  return {
+    likely:
+      metrics.rms >= rmsThreshold ||
+      metrics.peak >= peakThreshold ||
+      metrics.speechRatio >= speechRatioThreshold ||
+      (snr >= 2.4 && metrics.peak >= 0.01),
+    snr,
+    thresholds: {
+      rms: rmsThreshold,
+      peak: peakThreshold,
+      speechRatio: speechRatioThreshold,
+      noiseFloor,
+    },
+  };
 }
 
 function HomeContent() {
@@ -145,6 +190,7 @@ function HomeContent() {
   const calibrationAccumulatorRef = useRef<CalibrationAccumulator>(createCalibrationAccumulator());
   const calibrationActiveRef = useRef(false);
   const deviceCalibratedRef = useRef(false);
+  const speechDetectionProfileRef = useRef<SpeechDetectionProfile | null>(null);
   const liveSpeechClearTimerRef = useRef<number | null>(null);
   const audioImportPollTimerRef = useRef<number | null>(null);
   const lastSttStatusLogAtRef = useRef(0);
@@ -475,6 +521,14 @@ function HomeContent() {
     const avgPeak = stats.chunks > 0 ? stats.sumPeak / sampleCount : 0.04;
     const avgSpeechRatio = stats.chunks > 0 ? stats.sumSpeechRatio / sampleCount : 0.045;
     const avgNoiseFloor = stats.chunks > 0 ? stats.sumNoiseFloor / sampleCount : 0.0015;
+    const profile: SpeechDetectionProfile = {
+      rms: avgRms,
+      peak: avgPeak,
+      speechRatio: avgSpeechRatio,
+      noiseFloor: avgNoiseFloor,
+      sampleCount: stats.chunks,
+    };
+    speechDetectionProfileRef.current = profile;
 
     if (stats.chunks === 0) {
       console.info("[STT] mic calibration finished before first audio chunk; using fallback profile");
@@ -482,19 +536,19 @@ function HomeContent() {
 
     if (wsClientRef.current?.isConnected()) {
       console.info("[STT] mic calibration finished", {
-        rms: avgRms,
-        peak: avgPeak,
-        speechRatio: avgSpeechRatio,
-        noiseFloor: avgNoiseFloor,
-        sampleCount: stats.chunks,
+        rms: profile.rms,
+        peak: profile.peak,
+        speechRatio: profile.speechRatio,
+        noiseFloor: profile.noiseFloor,
+        sampleCount: profile.sampleCount,
       });
       wsClientRef.current.sendMessage("mic_calibration", {
         profile: {
-          rms: avgRms,
-          peak: avgPeak,
-          speech_ratio: avgSpeechRatio,
-          noise_floor: avgNoiseFloor,
-          sample_count: stats.chunks,
+          rms: profile.rms,
+          peak: profile.peak,
+          speech_ratio: profile.speechRatio,
+          noise_floor: profile.noiseFloor,
+          sample_count: profile.sampleCount,
         },
       });
     }
@@ -689,12 +743,28 @@ function HomeContent() {
     }
 
     beginCalibration();
+    console.info("[STT] 녹음 파이프라인 시작", {
+      intervalMs: 7000,
+      mode: "pcm-wav-chunk",
+      wsConnected: wsClientRef.current?.isConnected() || false,
+    });
     audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
       const calibrated = deviceCalibratedRef.current;
+      console.info("[STT] 7초 WAV 청크 생성", {
+        bytes: blob.size,
+        chunkIndex: metrics.chunkIndex,
+        durationMs: metrics.durationMs,
+        rms: metrics.rms,
+        peak: metrics.peak,
+        speechRatio: metrics.speechRatio,
+        calibrated,
+        calibrationActive: calibrationActiveRef.current,
+      });
       if (calibrationActiveRef.current || !calibrated) {
         return;
       }
-      if (!hasLikelySpeech(metrics)) {
+      const speechDecision = getSpeechDetectionDecision(metrics, speechDetectionProfileRef.current);
+      if (!speechDecision.likely) {
         const now = Date.now();
         if (now - lastSttStatusLogAtRef.current > 5000) {
           lastSttStatusLogAtRef.current = now;
@@ -702,6 +772,9 @@ function HomeContent() {
             rms: metrics.rms,
             peak: metrics.peak,
             speechRatio: metrics.speechRatio,
+            snr: speechDecision.snr,
+            thresholds: speechDecision.thresholds,
+            profile: speechDetectionProfileRef.current,
           });
         }
         return;
@@ -711,6 +784,8 @@ function HomeContent() {
           rms: metrics.rms,
           peak: metrics.peak,
           speechRatio: metrics.speechRatio,
+          snr: speechDecision.snr,
+          thresholds: speechDecision.thresholds,
           chunkIndex: metrics.chunkIndex,
           durationMs: metrics.durationMs,
           bytes: blob.size,

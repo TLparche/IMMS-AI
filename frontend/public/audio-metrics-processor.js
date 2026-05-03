@@ -138,6 +138,19 @@ class AudioMetricsProcessor extends AudioWorkletProcessor {
     }
   }
 
+  summarizeSamples(samples) {
+    const frameSize = Math.max(1, Math.round(sampleRate * 0.02))
+    const accumulator = createAccumulator()
+
+    for (let offset = 0; offset < samples.length; offset += frameSize) {
+      const count = Math.min(frameSize, samples.length - offset)
+      const metrics = this.measureSamples(samples, offset, count)
+      this.mergeMetrics(accumulator, metrics)
+    }
+
+    return this.summarizeMetrics(accumulator, samples.length)
+  }
+
   emitMeterIfReady() {
     if (this.meterMetrics.sampleCount < this.meterSampleTarget) {
       return
@@ -168,7 +181,7 @@ class AudioMetricsProcessor extends AudioWorkletProcessor {
     }
 
     const samples = this.chunkBuffer.slice(0, this.writeIndex)
-    const metrics = this.summarizeMetrics(this.chunkMetrics, this.writeIndex)
+    const metrics = this.summarizeSamples(samples)
     this.port.postMessage(
       {
         type: 'audio_chunk',
