@@ -489,6 +489,51 @@ def _normalize_canvas_workspace_solution_topics(
     ]
 
 
+def _normalize_refined_utterances(raw_rows: Any, limit: int = 120) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for idx, raw in enumerate(raw_rows or []):
+        if isinstance(raw, dict):
+            utterance_id = _safe_text(raw.get("utterance_id") or raw.get("utteranceId") or raw.get("id"))
+            speaker = _safe_text(raw.get("speaker"), "참가자")
+            text = _strip_leading_timestamp(_safe_text(raw.get("text") or raw.get("refined_text") or raw.get("refinedText")))
+            timestamp = _safe_text(raw.get("timestamp"))
+        else:
+            utterance_id = _safe_text(
+                getattr(raw, "utterance_id", "") or getattr(raw, "utteranceId", "") or getattr(raw, "id", "")
+            )
+            speaker = _safe_text(getattr(raw, "speaker", ""), "참가자")
+            text = _strip_leading_timestamp(
+                _safe_text(
+                    getattr(raw, "text", "")
+                    or getattr(raw, "refined_text", "")
+                    or getattr(raw, "refinedText", "")
+                )
+            )
+            timestamp = _safe_text(getattr(raw, "timestamp", ""))
+
+        if not text:
+            continue
+        utterance_id = utterance_id or f"refined-{idx}"
+        key = utterance_id or f"{speaker}:{text}"
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "utterance_id": utterance_id,
+                "speaker": speaker,
+                "text": text,
+                "timestamp": timestamp,
+            }
+        )
+        if len(normalized) >= limit:
+            break
+
+    return normalized
+
+
 def _normalize_canvas_workspace_items(
     items: list[CanvasWorkspaceCanvasItemInput] | None,
 ) -> list[dict[str, Any]]:
@@ -508,8 +553,9 @@ def _normalize_canvas_workspace_items(
             "body": _safe_text(item.body),
             "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
             "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:6],
-            "evidence_utterance_ids": [_safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)][:80],
-            "ignored_utterance_ids": [_safe_text(value) for value in (item.ignored_utterance_ids or []) if _safe_text(value)][:80],
+            "refined_utterances": _normalize_refined_utterances(item.refined_utterances),
+            "evidence_utterance_ids": [_safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)][:400],
+            "ignored_utterance_ids": [_safe_text(value) for value in (item.ignored_utterance_ids or []) if _safe_text(value)][:400],
             "ai_generated": bool(item.ai_generated),
             "user_edited": bool(item.user_edited),
         }
@@ -1439,6 +1485,18 @@ class TranscriptSyncInput(BaseModel):
     transcript: list[TranscriptSyncItemInput] = Field(default_factory=list)
 
 
+class SttFlowSummaryTurnInput(BaseModel):
+    speaker: str = "화자"
+    text: str = ""
+    timestamp: str | None = None
+
+
+class SttFlowSummaryInput(BaseModel):
+    meeting_id: str = ""
+    turns: list[SttFlowSummaryTurnInput] = Field(default_factory=list, min_length=1, max_length=6)
+    max_chars: int = Field(default=30, ge=8, le=60)
+
+
 class CanvasPlacementConfirmInput(BaseModel):
     tool: str = "note"
     ui_x: float = 0.0
@@ -1507,12 +1565,20 @@ class CanvasIdeaAssimilationUtteranceInput(BaseModel):
     timestamp: str = ""
 
 
+class CanvasRefinedUtteranceInput(BaseModel):
+    utterance_id: str = ""
+    speaker: str = ""
+    text: str = ""
+    timestamp: str = ""
+
+
 class CanvasIdeaAssimilationIdeaInput(BaseModel):
     id: str = ""
     title: str = ""
     summary: str = ""
     keywords: list[str] = Field(default_factory=list)
     key_evidence: list[str] = Field(default_factory=list)
+    refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
     evidence_utterance_ids: list[str] = Field(default_factory=list)
     user_edited: bool = False
 
@@ -1554,6 +1620,7 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     body: str = ""
     keywords: list[str] = Field(default_factory=list)
     key_evidence: list[str] = Field(default_factory=list)
+    refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
     evidence_utterance_ids: list[str] = Field(default_factory=list)
     ignored_utterance_ids: list[str] = Field(default_factory=list)
     ai_generated: bool = False
@@ -1990,6 +2057,7 @@ def _idea_assimilation_existing_idea_dict(item: CanvasIdeaAssimilationIdeaInput)
         "summary": _safe_text(item.summary),
         "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
         "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:6],
+        "refined_utterances": _normalize_refined_utterances(item.refined_utterances, limit=12),
         "evidence_utterance_ids": [
             _safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)
         ][:40],
@@ -2032,19 +2100,23 @@ def _normalize_idea_assimilation_update(raw: Any, fallback_ids: list[str]) -> di
         for value in (raw.get("keyEvidence") or raw.get("key_evidence") or [])
         if _safe_text(value)
     ][:6]
+    refined_utterances = _normalize_refined_utterances(
+        raw.get("refinedUtterances") or raw.get("refined_utterances") or raw.get("refined_utterance") or [],
+        limit=120,
+    )
     evidence_ids = [
         _safe_text(value)
         for value in (raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or [])
         if _safe_text(value)
-    ][:40]
+    ][:400]
     ignored_ids = [
         _safe_text(value)
         for value in (raw.get("ignoredUtteranceIds") or raw.get("ignored_utterance_ids") or [])
         if _safe_text(value)
-    ][:40]
+    ][:400]
 
     if not evidence_ids and not ignored_ids:
-        evidence_ids = fallback_ids[:40]
+        evidence_ids = fallback_ids[:400]
 
     return {
         "action": action,
@@ -2053,6 +2125,7 @@ def _normalize_idea_assimilation_update(raw: Any, fallback_ids: list[str]) -> di
         "summary": summary,
         "keywords": keywords or _extract_light_keywords(f"{title} {summary}", 6),
         "keyEvidence": key_evidence,
+        "refinedUtterances": refined_utterances,
         "evidenceUtteranceIds": evidence_ids,
         "ignoredUtteranceIds": ignored_ids,
     }
@@ -2097,6 +2170,15 @@ def _build_idea_assimilation_local(payload: CanvasIdeaAssimilationInput) -> list
             "summary": summary,
             "keywords": keywords,
             "keyEvidence": [f"{item['speaker']}: {_to_summary_point(item['text'], 90)}" for item in useful[:4]],
+            "refinedUtterances": [
+                {
+                    "utterance_id": item["id"],
+                    "speaker": item["speaker"],
+                    "text": _to_summary_point(item["text"], 180),
+                    "timestamp": item["timestamp"],
+                }
+                for item in useful
+            ],
             "evidenceUtteranceIds": [item["id"] for item in useful],
             "ignoredUtteranceIds": ignored_ids,
         }
@@ -2110,7 +2192,7 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
             _idea_assimilation_utterance_dict(item) for item in (payload.context_utterances or [])[-8:]
         ],
         "target_utterances": [
-            _idea_assimilation_utterance_dict(item) for item in (payload.target_utterances or [])[:80]
+            _idea_assimilation_utterance_dict(item) for item in (payload.target_utterances or [])
         ],
         "existing_ideas": [
             _idea_assimilation_existing_idea_dict(item) for item in (payload.existing_ideas or [])[:40]
@@ -2122,6 +2204,8 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         "- target_utterances의 원문 발화를 보고 기존 아이디어에 편입할지, 새 아이디어를 만들지 결정한다.\n"
         "- 잡담, 단순 맞장구, 반복 확인, 감사 인사는 아이디어 노드에 넣지 말고 ignoredUtteranceIds에만 포함한다.\n"
         "- 아이디어 노드에는 불필요한 대화 흐름이 아니라 실행/기획에 의미 있는 핵심 아이디어만 정제해서 넣는다.\n"
+        "- summary는 노드 본문에 들어갈 핵심 요약이고, refinedUtterances는 안건 목록/상세에서 볼 다듬은 발화 내용이다.\n"
+        "- refinedUtterances는 원문 의미를 바꾸지 말고 말버릇, 중복, 불필요한 추임새만 제거해 자연스러운 문장으로 정리한다.\n"
         "- 기존 아이디어와 의미가 같으면 merge, 명확히 다른 의미면 create를 사용한다.\n"
         "- user_edited가 true인 기존 아이디어는 제목과 요약을 덮어쓰지 않도록 merge 대상으로 삼더라도 근거/키워드 보강 중심으로 응답한다.\n\n"
         "[입력 JSON]\n"
@@ -2136,6 +2220,9 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         '      "summary": "아이디어 내용을 1~2문장으로 정리",\n'
         '      "keywords": ["키워드1", "키워드2"],\n'
         '      "keyEvidence": ["A: 핵심 근거 발화 요약"],\n'
+        '      "refinedUtterances": [\n'
+        '        {"utterance_id": "utterance-id-1", "speaker": "A", "text": "다듬은 발화 내용", "timestamp": "ISO time"}\n'
+        "      ],\n"
         '      "evidenceUtteranceIds": ["utterance-id-1"],\n'
         '      "ignoredUtteranceIds": ["utterance-id-2"]\n'
         "    }\n"
@@ -2147,6 +2234,8 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         "- create의 targetIdeaId는 빈 문자열로 둔다.\n"
         "- title은 12자 이내의 한국어 명사구를 우선한다.\n"
         "- summary는 회의 잡담을 제거하고 아이디어만 남긴다.\n"
+        "- refinedUtterances에는 evidenceUtteranceIds에 포함한 발화만 넣고, ignoredUtteranceIds에 포함한 잡담은 넣지 않는다.\n"
+        "- refinedUtterances의 utterance_id, speaker, timestamp는 입력 발화 값을 그대로 사용한다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 
@@ -5322,6 +5411,86 @@ def _ensure_llm_ready(rt: RuntimeStore) -> tuple[Any, bool, str]:
         return client, False, f"LLM 자동 연결 실패: {exc}"
 
 
+def _fallback_stt_flow_summary(turns: list[SttFlowSummaryTurnInput], max_chars: int = 30) -> str:
+    text = " ".join(_safe_text(turn.text) for turn in turns if _safe_text(turn.text))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(음|어|네|예|일단|그러면|그럼|근데|그러니까)\s+", "", text)
+    if not text:
+        return "현재 발언 정리 중"
+    return _safe_text(text[:max_chars], "현재 발언 정리 중").strip(" .,!?:;/|")
+
+
+def _generate_stt_flow_summary(payload: SttFlowSummaryInput) -> dict[str, Any]:
+    max_chars = int(payload.max_chars or 30)
+    turns = [turn for turn in payload.turns if _safe_text(turn.text)]
+    if not turns:
+        return {
+            "ok": True,
+            "summary": "현재 발언 정리 중",
+            "used_llm": False,
+            "warning": "요약할 발화가 없습니다.",
+        }
+
+    lines = []
+    for index, turn in enumerate(turns, start=1):
+        speaker = _safe_text(turn.speaker, f"화자 {index}")
+        text = _safe_text(turn.text)
+        lines.append(f"{index}. {speaker}: {text}")
+
+    prompt = f"""
+너는 회의 실시간 발언 흐름 요약기다. 출력은 JSON 객체 하나만 반환한다.
+
+[입력 발화]
+{chr(10).join(lines)}
+
+[목표]
+- 위 발화들이 지금 어떤 발언 흐름인지 한국어로 요약한다.
+- 참가자에게 현재 논의 방향을 빠르게 보여주는 짧은 문구여야 한다.
+
+[규칙]
+1) summary는 반드시 {max_chars}자 이내.
+2) "요약", "논의 중", "발언 중" 같은 형식 문구로 채우지 않는다.
+3) 발화 원문을 그대로 복사하지 않는다.
+4) 시간 정보, 화자명, 따옴표, 마침표는 쓰지 않는다.
+5) 핵심 명사와 행동/의도를 포함한다.
+
+[출력 JSON]
+{{
+  "summary": "string"
+}}
+""".strip()
+
+    client, llm_ready, warning = _ensure_llm_ready(RT)
+    if llm_ready:
+        try:
+            parsed = _call_llm_json(
+                rt=RT,
+                client=client,
+                prompt=prompt,
+                stage="stt.flow_summary",
+                temperature=0.15,
+                max_tokens=120,
+            )
+            summary = _safe_text(parsed.get("summary"))
+            summary = re.sub(r"\s+", " ", summary).strip().strip(" .,!?:;/|\"'")
+            if summary:
+                return {
+                    "ok": True,
+                    "summary": _safe_text(summary[:max_chars], "현재 발언 정리 중"),
+                    "used_llm": True,
+                    "warning": "",
+                }
+        except Exception as exc:
+            warning = f"LLM 요약 실패: {exc}"
+
+    return {
+        "ok": True,
+        "summary": _fallback_stt_flow_summary(turns, max_chars=max_chars),
+        "used_llm": False,
+        "warning": warning,
+    }
+
+
 def _normalize_canvas_node_positions(
     payload: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, dict[str, float]]]:
@@ -5527,7 +5696,12 @@ def post_transcript_sync(payload: TranscriptSyncInput):
             if not ok:
                 RT.last_analysis_warning = "meeting_sync_analyze_failed"
 
-        return _state_response(RT)
+    return _state_response(RT)
+
+
+@app.post("/api/stt/flow-summary")
+def post_stt_flow_summary(payload: SttFlowSummaryInput):
+    return _generate_stt_flow_summary(payload)
 
 
 @app.post("/api/transcript/import-json-dir")

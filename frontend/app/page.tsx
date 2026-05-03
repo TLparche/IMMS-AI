@@ -58,6 +58,12 @@ export interface LiveSpeechPreview {
   timestamp: string;
 }
 
+export interface SttFlowSummaryItem {
+  id: string;
+  text: string;
+  timestamp: string;
+}
+
 function createCalibrationAccumulator(): CalibrationAccumulator {
   return {
     chunks: 0,
@@ -188,6 +194,7 @@ function HomeContent() {
   const [fusionSelectedSpeaker, setFusionSelectedSpeaker] = useState<string>("");
   const [liveSpeechPreview, setLiveSpeechPreview] = useState<LiveSpeechPreview | null>(null);
   const [sttProgressText, setSttProgressText] = useState("");
+  const [sttFlowSummaries, setSttFlowSummaries] = useState<SttFlowSummaryItem[]>([]);
   const [audioImportJob, setAudioImportJob] = useState<AudioImportJobStatusResponse | null>(null);
   const [audioImportRevision, setAudioImportRevision] = useState(0);
 
@@ -294,6 +301,7 @@ function HomeContent() {
     setIncomingCanvasStateRequestId("");
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
     setSttProgressText("");
+    setSttFlowSummaries([]);
     setAudioImportJob(null);
     setAudioImportRevision(0);
     stopAudioImportPolling();
@@ -374,10 +382,6 @@ function HomeContent() {
       const audioEndedAt = readString(transcriptPayload.audio_ended_at || audioMetaPayload.ended_at);
       const chunkIndex = readNumber(transcriptPayload.audio_chunk_index || audioMetaPayload.chunk_index, -1);
       const recordingNow = isRecordingRef.current || Boolean(audioRecorderRef.current?.isRecording());
-      const summary = readString(payload.summary_text);
-      if (summary) {
-        console.info("[STT] 서버 요약 발언", summary);
-      }
       console.info("[STT] 서버 전사 수신", {
         id: transcriptId,
         speaker,
@@ -405,6 +409,23 @@ function HomeContent() {
         ]),
       );
       showLiveSpeechPreview(speaker, text, nextTimestamp);
+    });
+
+    wsClient.on("stt_flow_summaries_updated", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      const rawSummaries = Array.isArray(payload.summaries) ? payload.summaries : [];
+      const nextSummaries = rawSummaries
+        .filter(isRecord)
+        .map((item, index) => ({
+          id: readString(item.id, `stt-flow-summary-${index}`),
+          text: readString(item.text).slice(0, 30),
+          timestamp: readString(item.timestamp, new Date().toISOString()),
+        }))
+        .filter((item) => item.text.trim())
+        .slice(-3);
+      setSttFlowSummaries(nextSummaries);
     });
 
     wsClient.on("stt_summary_updated", (message) => {
@@ -938,6 +959,7 @@ function HomeContent() {
         syncStatusText={canvasSyncStatus}
         autoSyncing={autoSyncing}
         liveSpeechPreview={liveSpeechPreview}
+        sttFlowSummaries={sttFlowSummaries}
         onImportAudioFile={handleAudioImport}
         audioImportBusy={audioImportBusy}
         audioImportStatusText={audioImportStatusText}

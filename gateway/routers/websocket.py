@@ -76,6 +76,10 @@ def get_fusion_state(meeting_id: str) -> Dict[str, Any]:
             "buckets": {},
             "tasks": {},
             "transcription_lock": asyncio.Lock(),
+            "flow_summary_lock": asyncio.Lock(),
+            "flow_summary_buffer": [],
+            "flow_summaries": [],
+            "flow_summary_seq": 0,
             "last_winner_user_id": None,
             "last_winner_bucket": None,
             "device_profiles": {},
@@ -314,6 +318,92 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
         }
 
 
+async def request_flow_summary(turns: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(
+                f"{AI_BACKEND_URL}/api/stt/flow-summary",
+                json={
+                    "meeting_id": str(turns[0].get("meeting_id") or "") if turns else "",
+                    "turns": [
+                        {
+                            "speaker": str(turn.get("speaker") or "화자"),
+                            "text": str(turn.get("text") or ""),
+                            "timestamp": str(turn.get("timestamp") or ""),
+                        }
+                        for turn in turns
+                    ],
+                    "max_chars": 30,
+                },
+            )
+            if response.status_code >= 400:
+                return {
+                    "ok": False,
+                    "summary": "",
+                    "warning": response.text[:240],
+                }
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {"ok": False, "summary": ""}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "summary": "",
+            "warning": str(exc),
+        }
+
+
+async def maybe_generate_flow_summary(meeting_id: str, transcript: dict[str, Any]):
+    state = get_fusion_state(meeting_id)
+    row = {
+        "id": transcript.get("id"),
+        "meeting_id": meeting_id,
+        "speaker": transcript.get("speaker") or "화자",
+        "text": transcript.get("text") or "",
+        "timestamp": transcript.get("timestamp") or transcript.get("created_at") or datetime.utcnow().isoformat(),
+    }
+    if not str(row.get("text") or "").strip():
+        return
+
+    async with state.setdefault("flow_summary_lock", asyncio.Lock()):
+        buffer = state.setdefault("flow_summary_buffer", [])
+        buffer.append(row)
+        if len(buffer) < 3:
+            return
+        turns = [dict(item) for item in buffer[:3]]
+        del buffer[:3]
+        state["flow_summary_seq"] = int(state.get("flow_summary_seq") or 0) + 1
+        seq = int(state["flow_summary_seq"])
+
+    result = await request_flow_summary(turns)
+    summary = str(result.get("summary") or "").strip()
+    if not summary:
+        summary = "현재 발언 정리 중"
+    summary = summary[:30].strip(" .,!?:;/|\"'")
+    item = {
+        "id": f"{meeting_id}:flow-summary:{seq}",
+        "text": summary or "현재 발언 정리 중",
+        "timestamp": datetime.utcnow().isoformat(),
+        "source_turn_ids": [str(turn.get("id") or "") for turn in turns],
+        "source_timestamps": [str(turn.get("timestamp") or "") for turn in turns],
+        "used_llm": bool(result.get("used_llm")),
+        "warning": str(result.get("warning") or ""),
+    }
+
+    async with state.setdefault("flow_summary_lock", asyncio.Lock()):
+        summaries = state.setdefault("flow_summaries", [])
+        summaries.append(item)
+        state["flow_summaries"] = summaries[-3:]
+        payload_summaries = copy.deepcopy(state["flow_summaries"])
+
+    await broadcast_to_meeting(meeting_id, {
+        "type": "stt_flow_summaries_updated",
+        "meeting_id": meeting_id,
+        "summaries": payload_summaries,
+        "latest_summary": item,
+        "timestamp": item["timestamp"],
+    })
+
+
 async def transcribe_and_broadcast_winner(
     meeting_id: str,
     bucket_id: int,
@@ -388,17 +478,6 @@ async def transcribe_and_broadcast_winner(
         elapsed_ms=transcription.get("elapsed_ms"),
         backend_elapsed_ms=transcription.get("backend_elapsed_ms"),
     )
-    summary_text = build_transcript_summary(
-        str(saved_transcript.get("speaker") or winner["speaker"]),
-        str(saved_transcript.get("text") or transcribed_text),
-    )
-    await update_stt_summary(
-        meeting_id,
-        summary_text,
-        "transcript_created",
-        winner["user_id"],
-        transcript_id=saved_transcript.get("id"),
-    )
     transcript_message = {
         'type': 'transcript_created',
         'meeting_id': meeting_id,
@@ -414,7 +493,6 @@ async def transcribe_and_broadcast_winner(
             'audio_ended_at': audio_ended_at,
             'audio_chunk_index': chunk_index,
         },
-        'summary_text': summary_text,
         'stt_elapsed_ms': transcription.get("elapsed_ms"),
         'backend_elapsed_ms': transcription.get("backend_elapsed_ms"),
         'audio_meta': audio_meta,
@@ -428,6 +506,7 @@ async def transcribe_and_broadcast_winner(
         'timestamp': datetime.utcnow().isoformat(),
     }
     await broadcast_to_meeting(meeting_id, transcript_message)
+    asyncio.create_task(maybe_generate_flow_summary(meeting_id, saved_transcript))
 
     async with state["lock"]:
         state["last_winner_user_id"] = winner["user_id"]
@@ -683,6 +762,22 @@ async def websocket_endpoint(
             })
         except Exception as e:
             print(f"❌ Failed to send initial STT summary to {user_id}: {e}")
+
+    current_flow_summaries = []
+    current_fusion_state = fusion_states.get(meeting_id)
+    if isinstance(current_fusion_state, dict):
+        current_flow_summaries = copy.deepcopy(current_fusion_state.get("flow_summaries") or [])
+    if current_flow_summaries:
+        try:
+            await websocket.send_json({
+                'type': 'stt_flow_summaries_updated',
+                'meeting_id': meeting_id,
+                'summaries': current_flow_summaries,
+                'latest_summary': current_flow_summaries[-1],
+                'timestamp': datetime.utcnow().isoformat(),
+            })
+        except Exception as e:
+            print(f"❌ Failed to send initial STT flow summaries to {user_id}: {e}")
 
     await broadcast_to_meeting(meeting_id, {
         'type': 'canvas_state_request',

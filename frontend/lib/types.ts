@@ -252,12 +252,20 @@ export interface CanvasWorkspaceItem {
   body: string;
   keywords?: string[];
   key_evidence?: string[];
+  refined_utterances?: CanvasRefinedUtterance[];
   evidence_utterance_ids?: string[];
   ignored_utterance_ids?: string[];
   ai_generated?: boolean;
   user_edited?: boolean;
   x?: number;
   y?: number;
+}
+
+export interface CanvasRefinedUtterance {
+  utterance_id: string;
+  speaker: string;
+  text: string;
+  timestamp?: string;
 }
 
 export interface CanvasIdeaAssimilationUtterance {
@@ -273,6 +281,7 @@ export interface CanvasIdeaAssimilationIdea {
   summary: string;
   keywords: string[];
   key_evidence?: string[];
+  refined_utterances?: CanvasRefinedUtterance[];
   evidence_utterance_ids?: string[];
   user_edited?: boolean;
 }
@@ -284,6 +293,7 @@ export interface CanvasIdeaAssimilationUpdate {
   summary: string;
   keywords: string[];
   keyEvidence: string[];
+  refinedUtterances?: CanvasRefinedUtterance[];
   evidenceUtteranceIds: string[];
   ignoredUtteranceIds: string[];
 }

@@ -43,12 +43,13 @@ import type {
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
   CanvasRealtimeSyncPayload,
+  CanvasRefinedUtterance,
   CanvasSolutionTopicResponse,
   CanvasWorkspaceItem,
   MeetingState,
   TranscriptUtterance,
 } from "@/lib/types";
-import type { LiveSpeechPreview } from "@/app/page";
+import type { LiveSpeechPreview, SttFlowSummaryItem } from "@/app/page";
 
 export type MeetingTranscript = {
   id: string;
@@ -168,6 +169,62 @@ function buildWorkspaceSolutionTopicsPayload(topics: SolutionTopicViewModel[]) {
   }));
 }
 
+function normalizeRefinedUtterances(
+  rows: CanvasRefinedUtterance[] | undefined,
+  limit = 120,
+): CanvasRefinedUtterance[] {
+  const seen = new Set<string>();
+  const normalized: CanvasRefinedUtterance[] = [];
+
+  (rows || []).forEach((row, index) => {
+    const text = stripLeadingTimestamp(row.text || "");
+    if (!text) return;
+    const utteranceId = (row.utterance_id || `refined-${index}`).trim();
+    const key = utteranceId || `${row.speaker || ""}:${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push({
+      utterance_id: utteranceId,
+      speaker: (row.speaker || "참가자").trim(),
+      text,
+      timestamp: (row.timestamp || "").trim(),
+    });
+  });
+
+  return normalized.slice(0, limit);
+}
+
+function splitRefinedUtteranceSentences(
+  rows: CanvasRefinedUtterance[] | undefined,
+  limit = 6,
+): CanvasRefinedUtterance[] {
+  const sentenceRows: CanvasRefinedUtterance[] = [];
+
+  normalizeRefinedUtterances(rows).forEach((row) => {
+    const normalizedText = stripLeadingTimestamp(row.text || "")
+      .replace(/\s+/g, " ")
+      .replace(/([.!?。！？])\s+/g, "$1\n")
+      .replace(/(습니다|합니다|됩니다|입니다|니다|어요|예요|이에요|네요|죠|까요|다|요)\s+(?=[가-힣A-Za-z0-9])/g, "$1\n")
+      .trim();
+
+    const sentences = normalizedText
+      .split(/\n+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+
+    (sentences.length > 0 ? sentences : [row.text]).forEach((sentence, sentenceIndex) => {
+      if (sentenceRows.length >= limit) return;
+      sentenceRows.push({
+        ...row,
+        utterance_id: `${row.utterance_id || "refined"}-sentence-${sentenceIndex}`,
+        text: sentence,
+      });
+    });
+  });
+
+  return sentenceRows.slice(0, limit);
+}
+
 function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
   return items.map((item) => ({
     id: item.id,
@@ -178,6 +235,7 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
     body: item.body,
     keywords: (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean),
     key_evidence: (item.key_evidence || []).map((value) => value.trim()).filter(Boolean),
+    refined_utterances: normalizeRefinedUtterances(item.refined_utterances),
     evidence_utterance_ids: (item.evidence_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
     ignored_utterance_ids: (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
     ai_generated: Boolean(item.ai_generated),
@@ -411,6 +469,7 @@ type MeetingCanvasTabProps = {
   syncStatusText: string;
   autoSyncing: boolean;
   liveSpeechPreview: LiveSpeechPreview | null;
+  sttFlowSummaries?: SttFlowSummaryItem[];
   onImportAudioFile: (file: File) => Promise<void>;
   audioImportBusy: boolean;
   audioImportStatusText: string;
@@ -1274,14 +1333,16 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
   return items.map((item) => {
     const keywords = (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean);
     const keyEvidence = (item.key_evidence || []).map((value) => value.trim()).filter(Boolean);
+    const refinedUtterances = normalizeRefinedUtterances(item.refined_utterances);
     const evidenceUtteranceIds = (item.evidence_utterance_ids || []).map((value) => value.trim()).filter(Boolean);
     const ignoredUtteranceIds = (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean);
     return {
       ...item,
       keywords: keywords.slice(0, 8),
       key_evidence: keyEvidence.slice(0, 8),
-      evidence_utterance_ids: evidenceUtteranceIds.slice(0, 80),
-      ignored_utterance_ids: ignoredUtteranceIds.slice(0, 80),
+      refined_utterances: refinedUtterances,
+      evidence_utterance_ids: evidenceUtteranceIds.slice(0, 400),
+      ignored_utterance_ids: ignoredUtteranceIds.slice(0, 400),
       ai_generated: Boolean(item.ai_generated),
       user_edited: Boolean(item.user_edited),
     };
@@ -1529,6 +1590,7 @@ export default function MeetingCanvasTab({
   syncStatusText,
   autoSyncing,
   liveSpeechPreview,
+  sttFlowSummaries = [],
   onImportAudioFile,
   audioImportBusy,
   audioImportStatusText,
@@ -1710,6 +1772,23 @@ export default function MeetingCanvasTab({
   );
   const displayMeetingGoal = generatedMeetingGoal || buildFallbackMeetingGoal(meetingGoalTopic);
   const transcriptStripItems = useMemo(() => {
+    const summaryRows = sttFlowSummaries
+      .slice(-3)
+      .map((item, index) => ({
+        speaker: `AI 요약 ${index + 1}`,
+        text: item.text || "요약 생성 중",
+        timestamp: item.timestamp || "",
+      }));
+
+    if (summaryRows.length > 0) {
+      const placeholders = [
+        { speaker: "AI 요약", text: "다음 3개 발화 요약 대기 중", timestamp: "" },
+        { speaker: "AI 요약", text: "다음 3개 발화 요약 대기 중", timestamp: "" },
+        { speaker: "AI 요약", text: "다음 3개 발화 요약 대기 중", timestamp: "" },
+      ];
+      return [...summaryRows, ...placeholders].slice(0, 3);
+    }
+
     const normalized = normalizeTranscriptRows(transcripts);
     const recentRows = normalized.slice(-3);
     const rows = recentRows.length
@@ -1731,7 +1810,7 @@ export default function MeetingCanvasTab({
       text: row.text || "발언 내용 없음",
       timestamp: row.timestamp || "",
     }));
-  }, [liveSpeechPreview, transcripts]);
+  }, [liveSpeechPreview, sttFlowSummaries, transcripts]);
 
   useEffect(() => {
     if (!selectedAgendaId && agendaModels[0]) {
@@ -2303,8 +2382,7 @@ export default function MeetingCanvasTab({
 
       const processedIds = processedIdeaUtteranceIdsRef.current;
       const targetRows = normalizeTranscriptRows(transcripts)
-        .filter((row) => row.id && row.text.trim() && !processedIds.has(row.id))
-        .slice(-80);
+        .filter((row) => row.id && row.text.trim() && !processedIds.has(row.id));
 
       const targetTextLength = targetRows.reduce((sum, row) => sum + stripLeadingTimestamp(row.text).length, 0);
       if (targetRows.length === 0 || (reason !== "stage-change" && reason !== "manual" && targetTextLength < 40)) {
@@ -2329,6 +2407,7 @@ export default function MeetingCanvasTab({
             summary: item.body || item.title,
             keywords: item.keywords || [],
             key_evidence: item.key_evidence || [],
+            refined_utterances: item.refined_utterances || [],
             evidence_utterance_ids: item.evidence_utterance_ids || [],
             user_edited: Boolean(item.user_edited),
           }));
@@ -2371,12 +2450,16 @@ export default function MeetingCanvasTab({
         const applyUpdateToItem = (item: CanvasItemViewModel, update: CanvasIdeaAssimilationUpdate) => {
           const nextEvidenceIds = Array.from(
             new Set([...(item.evidence_utterance_ids || []), ...(update.evidenceUtteranceIds || [])]),
-          ).slice(0, 80);
+          ).slice(0, 400);
           const nextIgnoredIds = Array.from(
             new Set([...(item.ignored_utterance_ids || []), ...(update.ignoredUtteranceIds || [])]),
-          ).slice(0, 80);
+          ).slice(0, 400);
           const nextKeyEvidence = Array.from(new Set([...(item.key_evidence || []), ...(update.keyEvidence || [])])).slice(0, 8);
           const nextKeywords = Array.from(new Set([...(item.keywords || []), ...(update.keywords || [])])).slice(0, 8);
+          const nextRefinedUtterances = normalizeRefinedUtterances([
+            ...(item.refined_utterances || []),
+            ...(update.refinedUtterances || []),
+          ]);
 
           return {
             ...item,
@@ -2384,6 +2467,7 @@ export default function MeetingCanvasTab({
             body: item.user_edited ? item.body : update.summary || item.body,
             keywords: nextKeywords,
             key_evidence: nextKeyEvidence,
+            refined_utterances: nextRefinedUtterances,
             evidence_utterance_ids: nextEvidenceIds,
             ignored_utterance_ids: nextIgnoredIds,
             ai_generated: item.ai_generated || result.used_llm,
@@ -2412,8 +2496,9 @@ export default function MeetingCanvasTab({
               body: update.summary || "",
               keywords: (update.keywords || []).slice(0, 8),
               key_evidence: (update.keyEvidence || []).slice(0, 8),
-              evidence_utterance_ids: (update.evidenceUtteranceIds || []).slice(0, 80),
-              ignored_utterance_ids: (update.ignoredUtteranceIds || []).slice(0, 80),
+              refined_utterances: normalizeRefinedUtterances(update.refinedUtterances),
+              evidence_utterance_ids: (update.evidenceUtteranceIds || []).slice(0, 400),
+              ignored_utterance_ids: (update.ignoredUtteranceIds || []).slice(0, 400),
               ai_generated: true,
               user_edited: false,
               x,
@@ -3752,6 +3837,7 @@ export default function MeetingCanvasTab({
     if (stage === "ideation" && selectedCanvasItem) {
       const linkedAgenda =
         agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id) || null;
+      const refinedItems = normalizeRefinedUtterances(selectedCanvasItem.refined_utterances);
 
       return {
         title: selectedCanvasItem.title,
@@ -3779,6 +3865,10 @@ export default function MeetingCanvasTab({
           },
         ],
         organizeTitle: "연결 정보",
+        refinedItems: refinedItems.map((item, index) => ({
+          label: item.speaker || `발화 ${index + 1}`,
+          value: item.text,
+        })),
       };
     }
 
@@ -4223,6 +4313,7 @@ export default function MeetingCanvasTab({
         title: draftTitle,
         keywords: [],
         key_evidence: [],
+        refined_utterances: [],
         evidence_utterance_ids: [],
         ignored_utterance_ids: [],
         ai_generated: false,
@@ -6221,6 +6312,19 @@ export default function MeetingCanvasTab({
                       </section>
                     )
                     )}
+                    {stage === "ideation" && selectedCanvasItem && leftPanelDetail.refinedItems?.length ? (
+                      <section className="pt-6">
+                        <h4 className="text-lg font-semibold text-slate-900">정리된 발화</h4>
+                        <div className="mt-4 space-y-3">
+                          {leftPanelDetail.refinedItems.map((item, index) => (
+                            <div key={`${leftPanelDetail.title}-refined-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                              <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
                     {stage === "problem-definition" && leftPanelDetail.evidenceItems?.length ? (
                       <section className="pt-6">
                         <h4 className="text-lg font-semibold text-slate-900">근거 요약</h4>
@@ -6295,28 +6399,46 @@ export default function MeetingCanvasTab({
                     ) : null}
                   </div>
                   <div className="mt-4 space-y-3">
-                    {agendaModels.map((agenda) => (
-                      <button
-                        key={agenda.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedAgendaId(agenda.id);
-                          setSelectedNodeId("");
-                          setLeftPanelTab("detail");
-                        }}
-                        className={`w-full rounded-xl border px-4 py-4 text-left transition ${selectedAgendaId === agenda.id ? "border-slate-300 bg-white" : "border-slate-200 bg-[#fafafa] hover:bg-white"}`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <strong className="text-base text-slate-900">{agenda.title}</strong>
-                          {agenda.isCustom ? (
-                            <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
-                              프로젝트 분류
-                            </span>
+                    {agendaModels.map((agenda) => {
+                      const linkedRefinedSentences = splitRefinedUtteranceSentences(
+                        canvasItems
+                          .filter((item) => item.agenda_id === agenda.id)
+                          .flatMap((item) => item.refined_utterances || []),
+                        6,
+                      );
+
+                      return (
+                        <button
+                          key={agenda.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedAgendaId(agenda.id);
+                            setSelectedNodeId("");
+                            setLeftPanelTab("detail");
+                          }}
+                          className={`w-full rounded-xl border px-4 py-4 text-left transition ${selectedAgendaId === agenda.id ? "border-slate-300 bg-white" : "border-slate-200 bg-[#fafafa] hover:bg-white"}`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <strong className="text-base text-slate-900">{agenda.title}</strong>
+                            {agenda.isCustom ? (
+                              <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
+                                프로젝트 분류
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-2 text-sm leading-6 text-slate-500">{agenda.summaryBullets[0] || "요약이 아직 없습니다."}</p>
+                          {linkedRefinedSentences.length > 0 ? (
+                            <div className="mt-3 space-y-1.5 rounded-xl bg-white/80 px-3 py-2">
+                              {linkedRefinedSentences.map((item, index) => (
+                                <p key={`${agenda.id}-refined-${item.utterance_id}-${index}`} className="text-xs leading-5 text-slate-500">
+                                  <span className="font-semibold text-slate-600">{item.speaker}</span>: {item.text}
+                                </p>
+                              ))}
+                            </div>
                           ) : null}
-                        </div>
-                        <p className="mt-2 text-sm leading-6 text-slate-500">{agenda.summaryBullets[0] || "요약이 아직 없습니다."}</p>
-                      </button>
-                    ))}
+                        </button>
+                      );
+                    })}
                   </div>
                 </section>
 
