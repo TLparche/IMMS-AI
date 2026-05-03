@@ -9,6 +9,7 @@ import httpx
 import json
 import base64
 import copy
+import time
 from datetime import datetime, timezone
 from ..config import get_supabase, settings
 from security_utils import extract_client_ip, is_ip_allowed, parse_ip_whitelist
@@ -268,11 +269,13 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
     audio_bytes = candidate.get("audio_bytes") or b""
     audio_mime = str(candidate.get("audio_mime") or candidate.get("audio_meta", {}).get("mime_type") or "audio/wav")
     audio_filename = str(candidate.get("audio_filename") or ("chunk.wav" if audio_mime.lower().startswith("audio/wav") else "chunk.webm"))
+    started_at = time.perf_counter()
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{AI_BACKEND_URL}/api/transcribe-chunk",
             files={'audio_file': (audio_filename, audio_bytes, audio_mime)}
         )
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
         if response.status_code != 200:
             print(f"❌ Transcription failed: {response.status_code}")
             return {
@@ -280,6 +283,7 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
                 "status": "http_error",
                 "status_code": response.status_code,
                 "error": response.text[:300],
+                "elapsed_ms": elapsed_ms,
             }
         result = response.json()
         if result.get("error"):
@@ -299,6 +303,8 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
             "status": "ok" if text else "empty",
             "status_code": response.status_code,
             "error": result.get("error") or "",
+            "elapsed_ms": elapsed_ms,
+            "backend_elapsed_ms": result.get("elapsed_ms"),
         }
 
 
@@ -343,6 +349,8 @@ async def transcribe_and_broadcast_winner(
             error=transcription.get("error") or "",
             audio_meta=audio_meta,
             bytes=len(winner.get("audio_bytes") or b""),
+            elapsed_ms=transcription.get("elapsed_ms"),
+            backend_elapsed_ms=transcription.get("backend_elapsed_ms"),
         )
         return
 
@@ -371,6 +379,8 @@ async def transcribe_and_broadcast_winner(
         text_preview=transcribed_text[:120],
         text_length=len(transcribed_text),
         transcript_id=saved_transcript.get("id"),
+        elapsed_ms=transcription.get("elapsed_ms"),
+        backend_elapsed_ms=transcription.get("backend_elapsed_ms"),
     )
     summary_text = build_transcript_summary(
         str(saved_transcript.get("speaker") or winner["speaker"]),
@@ -399,6 +409,8 @@ async def transcribe_and_broadcast_winner(
             'audio_chunk_index': chunk_index,
         },
         'summary_text': summary_text,
+        'stt_elapsed_ms': transcription.get("elapsed_ms"),
+        'backend_elapsed_ms': transcription.get("backend_elapsed_ms"),
         'audio_meta': audio_meta,
         'fusion': {
             'bucket_id': bucket_id,

@@ -387,6 +387,8 @@ function HomeContent() {
         audioEndedAt,
         chunkIndex,
         recording: recordingNow,
+        elapsedMs: payload.stt_elapsed_ms,
+        backendElapsedMs: payload.backend_elapsed_ms,
       });
       setTranscripts((prev) =>
         dedupeTranscripts([
@@ -480,6 +482,8 @@ function HomeContent() {
           statusCode: payload.status_code,
           error: payload.error,
           bytes: payload.bytes,
+          elapsedMs: payload.elapsed_ms,
+          backendElapsedMs: payload.backend_elapsed_ms,
           audioMeta: payload.audio_meta,
         });
         return;
@@ -489,6 +493,8 @@ function HomeContent() {
         console.info("[STT] 전사 저장 완료", {
           preview: payload.text_preview,
           length: payload.text_length,
+          elapsedMs: payload.elapsed_ms,
+          backendElapsedMs: payload.backend_elapsed_ms,
         });
         return;
       }

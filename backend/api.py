@@ -6554,16 +6554,24 @@ async def post_transcribe_chunk(
     오디오 청크를 받아서 Whisper로 전사한 후 텍스트 반환
     """
     try:
+        started_at = time.perf_counter()
         blob = await audio_file.read()
         if not blob:
             return {"text": "", "language": "ko", "error": "empty audio"}
         
         suffix = Path(audio_file.filename or "chunk.webm").suffix or ".webm"
         text = _transcribe_with_whisper(blob, suffix=suffix)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        print(
+            f"[STT] transcribed chunk model={WHISPER_MODEL_NAME} "
+            f"bytes={len(blob)} suffix={suffix} elapsed_ms={elapsed_ms} chars={len(_safe_text(text))}"
+        )
         
         return {
             "text": _safe_text(text),
-            "language": "ko"
+            "language": "ko",
+            "elapsed_ms": elapsed_ms,
+            "model": WHISPER_MODEL_NAME,
         }
     except Exception as exc:
         return {
