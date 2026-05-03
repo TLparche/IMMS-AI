@@ -24,7 +24,7 @@ latest_stt_summary_by_meeting: Dict[str, Dict[str, Any]] = {}
 AI_BACKEND_URL = settings.ai_module_url.rstrip("/")
 IP_WHITELIST = parse_ip_whitelist(settings.ip_whitelist)
 FUSION_BUCKET_MS = 1200
-FUSION_WAIT_MS = 450
+FUSION_WAIT_MS = 250
 FUSION_STICKY_BONUS = 0.35
 FUSION_MIN_RMS = 0.004
 FUSION_MIN_SPEECH_RATIO = 0.05
@@ -223,7 +223,8 @@ def build_transcript_summary(speaker: str, text: str) -> str:
 
 def build_stt_progress_summary(stage: str, data: dict[str, Any]) -> str:
     if stage in {"audio_chunk_received", "audio_chunk_queued"}:
-        return "오디오 수신 중 · 전사 대기"
+        wait_ms = int(data.get("fusion_wait_ms") or FUSION_WAIT_MS)
+        return f"오디오 수신 중 · 후보 {wait_ms}ms 수집"
     if stage == "audio_candidate_selected":
         return "발화 구간 선택됨 · 전사 준비 중"
     if stage == "audio_candidate_dropped":
@@ -320,6 +321,7 @@ async def transcribe_and_broadcast_winner(
         bytes=len(winner.get("audio_bytes") or b""),
         audio_mime=winner.get("audio_mime") or winner.get("audio_meta", {}).get("mime_type") or "audio/wav",
         audio_meta=audio_meta,
+        fusion_wait_ms=FUSION_WAIT_MS,
     )
     await send_stt_debug(
         meeting_id,
@@ -437,6 +439,7 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
             bucket_id=bucket_id,
             candidate_count=len(candidates),
             reason="below_rms_and_speech_ratio_threshold",
+            fusion_wait_ms=FUSION_WAIT_MS,
             thresholds={
                 "min_rms": FUSION_MIN_RMS,
                 "min_speech_ratio": FUSION_MIN_SPEECH_RATIO,
@@ -461,6 +464,7 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         candidate_count=len(candidates),
         bytes=len(winner.get("audio_bytes") or b""),
         audio_meta=winner.get("audio_meta") or {},
+        fusion_wait_ms=FUSION_WAIT_MS,
     )
     await broadcast_to_meeting(meeting_id, {
         'type': 'audio_selection',
@@ -700,6 +704,7 @@ async def websocket_endpoint(
                         bytes=len(audio_bytes),
                         speaker=speaker,
                         audio_meta=audio_meta,
+                        fusion_wait_ms=FUSION_WAIT_MS,
                     )
                     candidate = {
                         "meeting_id": meeting_id,
@@ -719,6 +724,7 @@ async def websocket_endpoint(
                         bucket_id=int(candidate["started_at_ms"] // FUSION_BUCKET_MS),
                         bytes=len(audio_bytes),
                         audio_meta=audio_meta,
+                        fusion_wait_ms=FUSION_WAIT_MS,
                     )
                 except Exception as e:
                     import traceback

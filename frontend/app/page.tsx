@@ -424,6 +424,7 @@ function HomeContent() {
         console.info("[STT] gateway가 오디오를 받는 중", {
           stage,
           bytes: readNumber(payload.bytes),
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
           audioMeta: payload.audio_meta,
         });
         return;
@@ -434,6 +435,7 @@ function HomeContent() {
           bucketId: payload.bucket_id,
           candidateCount: payload.candidate_count,
           bytes: payload.bytes,
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
           audioMeta: payload.audio_meta,
         });
         return;
@@ -442,6 +444,7 @@ function HomeContent() {
       if (stage === "audio_candidate_dropped") {
         console.warn("[STT] gateway가 오디오를 음성 아님으로 버림", {
           reason: payload.reason,
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
           thresholds: payload.thresholds,
           candidates: payload.candidates,
         });
@@ -453,6 +456,7 @@ function HomeContent() {
           bucketId: payload.bucket_id,
           bytes: payload.bytes,
           audioMime: payload.audio_mime,
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
           audioMeta: payload.audio_meta,
         });
         return;
