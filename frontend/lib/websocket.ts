@@ -133,6 +133,12 @@ export class WebSocketClient {
       sampleRate?: number
       chunkIndex?: number
       mimeType?: string
+      originalStartedAt?: string
+      originalEndedAt?: string
+      originalDurationMs?: number
+      removedSilenceMs?: number
+      combinedChunkCount?: number
+      trimmedFromSilence?: boolean
     },
   ) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -166,6 +172,12 @@ export class WebSocketClient {
               sample_rate: audioMeta.sampleRate,
               chunk_index: audioMeta.chunkIndex,
               mime_type: audioMeta.mimeType,
+              original_started_at: audioMeta.originalStartedAt,
+              original_ended_at: audioMeta.originalEndedAt,
+              original_duration_ms: audioMeta.originalDurationMs,
+              removed_silence_ms: audioMeta.removedSilenceMs,
+              combined_chunk_count: audioMeta.combinedChunkCount,
+              trimmed_from_silence: audioMeta.trimmedFromSilence,
             }
           : undefined
       }

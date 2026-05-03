@@ -389,6 +389,9 @@ function HomeContent() {
         recording: recordingNow,
         elapsedMs: payload.stt_elapsed_ms,
         backendElapsedMs: payload.backend_elapsed_ms,
+        originalDurationMs: audioMetaPayload.original_duration_ms,
+        removedSilenceMs: audioMetaPayload.removed_silence_ms,
+        combinedChunkCount: audioMetaPayload.combined_chunk_count,
       });
       setTranscripts((prev) =>
         dedupeTranscripts([
@@ -454,11 +457,15 @@ function HomeContent() {
       }
 
       if (stage === "transcription_audio_prepared") {
-        console.info("[STT] 7초 WAV 청크 준비 완료", {
+        const audioMeta = isRecord(payload.audio_meta) ? payload.audio_meta : {};
+        console.info("[STT] STT WAV 청크 준비 완료", {
           bucketId: payload.bucket_id,
           bytes: payload.bytes,
           audioMime: payload.audio_mime,
           fusionWaitMs: readNumber(payload.fusion_wait_ms),
+          originalDurationMs: audioMeta.original_duration_ms,
+          removedSilenceMs: audioMeta.removed_silence_ms,
+          combinedChunkCount: audioMeta.combined_chunk_count,
           audioMeta: payload.audio_meta,
         });
         return;
@@ -793,10 +800,14 @@ function HomeContent() {
     });
     audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
       const calibrated = deviceCalibratedRef.current;
-      console.info("[STT] 7초 WAV 청크 생성", {
+      console.info("[STT] STT WAV 청크 생성", {
         bytes: blob.size,
         chunkIndex: metrics.chunkIndex,
         durationMs: metrics.durationMs,
+        originalDurationMs: metrics.originalDurationMs,
+        removedSilenceMs: metrics.removedSilenceMs,
+        combinedChunkCount: metrics.combinedChunkCount,
+        trimmedFromSilence: metrics.trimmedFromSilence,
         rms: metrics.rms,
         peak: metrics.peak,
         speechRatio: metrics.speechRatio,
@@ -831,6 +842,9 @@ function HomeContent() {
           thresholds: speechDecision.thresholds,
           chunkIndex: metrics.chunkIndex,
           durationMs: metrics.durationMs,
+          originalDurationMs: metrics.originalDurationMs,
+          removedSilenceMs: metrics.removedSilenceMs,
+          combinedChunkCount: metrics.combinedChunkCount,
           bytes: blob.size,
         });
         wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);

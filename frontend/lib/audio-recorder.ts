@@ -11,6 +11,12 @@ export interface AudioChunkMetrics {
   sampleRate?: number
   chunkIndex?: number
   mimeType?: string
+  originalStartedAt?: string
+  originalEndedAt?: string
+  originalDurationMs?: number
+  removedSilenceMs?: number
+  combinedChunkCount?: number
+  trimmedFromSilence?: boolean
 }
 
 export interface RecordedAudioChunk {
@@ -38,7 +44,29 @@ type WorkletMessage = {
 
 const TARGET_WAV_SAMPLE_RATE = 16000
 const MIN_FLUSH_DURATION_MS = 350
-const AUDIO_WORKLET_VERSION = "pcm-wav-v3"
+const AUDIO_WORKLET_VERSION = "pcm-wav-v4"
+const LONG_SILENCE_TRIM_MS = 1000
+const SILENCE_EDGE_PADDING_MS = 120
+const MIN_STT_SEND_DURATION_MS = 4000
+
+type TrimmedPcmChunk = {
+  samples: Float32Array
+  removedSilenceMs: number
+  originalDurationMs: number
+  removedRangeCount: number
+}
+
+type PendingPcmChunk = {
+  samples: Float32Array
+  sourceSampleRate: number
+  startedAtMs: number
+  endedAtMs: number
+  chunkIndexes: number[]
+  originalDurationMs: number
+  removedSilenceMs: number
+  originalStartedAtMs: number
+  originalEndedAtMs: number
+}
 
 function clampPcm16(sample: number) {
   const clipped = Math.max(-1, Math.min(1, sample))
@@ -161,6 +189,115 @@ function calculatePcmMetrics(samples: Float32Array, sampleRate: number): Worklet
   }
 }
 
+function concatFloat32Arrays(chunks: Float32Array[]) {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+  const result = new Float32Array(totalLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    result.set(chunk, offset)
+    offset += chunk.length
+  }
+  return result
+}
+
+function trimLongSilence(samples: Float32Array, sampleRate: number): TrimmedPcmChunk {
+  if (!samples.length) {
+    return {
+      samples,
+      removedSilenceMs: 0,
+      originalDurationMs: 0,
+      removedRangeCount: 0,
+    }
+  }
+
+  const originalDurationMs = Math.max(1, Math.round((samples.length / Math.max(sampleRate, 1)) * 1000))
+  const frameSize = Math.max(1, Math.round(sampleRate * 0.02))
+  const minSilentFrames = Math.max(1, Math.ceil(LONG_SILENCE_TRIM_MS / 20))
+  const paddingFrames = Math.max(0, Math.ceil(SILENCE_EDGE_PADDING_MS / 20))
+  const frameCount = Math.ceil(samples.length / frameSize)
+  const chunkMetrics = calculatePcmMetrics(samples, sampleRate)
+  const silenceRmsThreshold = Math.max(0.004, Math.min(0.012, (chunkMetrics.noiseFloor || 0.0015) * 2.6))
+  const silencePeakThreshold = Math.max(0.014, Math.min(0.04, silenceRmsThreshold * 4))
+  const silentFrames: boolean[] = []
+
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    const offset = frameIndex * frameSize
+    const count = Math.min(frameSize, samples.length - offset)
+    let sumSquares = 0
+    let peak = 0
+
+    for (let index = 0; index < count; index += 1) {
+      const sample = samples[offset + index] || 0
+      const abs = Math.abs(sample)
+      sumSquares += sample * sample
+      peak = Math.max(peak, abs)
+    }
+
+    const rms = count > 0 ? Math.sqrt(sumSquares / count) : 0
+    silentFrames.push(rms <= silenceRmsThreshold && peak <= silencePeakThreshold)
+  }
+
+  const removalRanges: Array<{ start: number; end: number }> = []
+  let runStart = -1
+
+  const closeRun = (runEnd: number) => {
+    if (runStart < 0) return
+    const runLength = runEnd - runStart
+    if (runLength >= minSilentFrames) {
+      const removeStartFrame = runStart + paddingFrames
+      const removeEndFrame = runEnd - paddingFrames
+      if (removeEndFrame > removeStartFrame) {
+        removalRanges.push({
+          start: Math.min(removeStartFrame * frameSize, samples.length),
+          end: Math.min(removeEndFrame * frameSize, samples.length),
+        })
+      }
+    }
+    runStart = -1
+  }
+
+  for (let frameIndex = 0; frameIndex < silentFrames.length; frameIndex += 1) {
+    if (silentFrames[frameIndex]) {
+      if (runStart < 0) runStart = frameIndex
+    } else {
+      closeRun(frameIndex)
+    }
+  }
+  closeRun(silentFrames.length)
+
+  if (removalRanges.length === 0) {
+    return {
+      samples,
+      removedSilenceMs: 0,
+      originalDurationMs,
+      removedRangeCount: 0,
+    }
+  }
+
+  let removedSamples = 0
+  let cursor = 0
+  const kept: Float32Array[] = []
+
+  for (const range of removalRanges) {
+    if (range.start > cursor) {
+      kept.push(samples.slice(cursor, range.start))
+    }
+    removedSamples += Math.max(0, range.end - range.start)
+    cursor = Math.max(cursor, range.end)
+  }
+
+  if (cursor < samples.length) {
+    kept.push(samples.slice(cursor))
+  }
+
+  return {
+    samples: concatFloat32Arrays(kept),
+    removedSilenceMs: Math.round((removedSamples / Math.max(sampleRate, 1)) * 1000),
+    originalDurationMs,
+    removedRangeCount: removalRanges.length,
+  }
+}
+
 export class AudioRecorder {
   private stream: MediaStream | null = null
   private recordingInterval = 7000
@@ -179,6 +316,7 @@ export class AudioRecorder {
   private chunkWatchdogTimer: number | null = null
   private emittedChunkCount = 0
   private lastMeterAtMs = 0
+  private pendingPcmChunk: PendingPcmChunk | null = null
 
   private handleWorkletMessage = (event: MessageEvent<WorkletMessage>) => {
     const data = event.data || {}
@@ -207,41 +345,122 @@ export class AudioRecorder {
     const chunkIndex = Number(data.chunkIndex || 0)
     const startedAtMs = this.recordingStartedAtMs + chunkIndex * this.recordingInterval
     const endedAtMs = startedAtMs + durationMs
-    const wav = encodeWav(samples, sourceSampleRate)
     this.emittedChunkCount += 1
     this.scheduleChunkWatchdog()
 
-    const sampleMetrics = calculatePcmMetrics(samples, sourceSampleRate)
-    const metrics = this.normalizeMetrics(sampleMetrics, startedAtMs, endedAtMs, sourceSampleRate)
-    metrics.sourceSampleRate = sourceSampleRate
+    const trimmedChunk = trimLongSilence(samples, sourceSampleRate)
+    this.queuePcmChunkForStt(trimmedChunk, sourceSampleRate, startedAtMs, endedAtMs, chunkIndex)
+    this.resolvePendingFlush()
+  }
+
+  private queuePcmChunkForStt(
+    trimmedChunk: TrimmedPcmChunk,
+    sourceSampleRate: number,
+    startedAtMs: number,
+    endedAtMs: number,
+    chunkIndex: number,
+  ) {
+    if (!trimmedChunk.samples.length) {
+      console.info("[STT] long silence trim removed entire chunk", {
+        chunkIndex,
+        originalDurationMs: trimmedChunk.originalDurationMs,
+        removedSilenceMs: trimmedChunk.removedSilenceMs,
+      })
+      return
+    }
+
+    if (this.pendingPcmChunk && this.pendingPcmChunk.sourceSampleRate !== sourceSampleRate) {
+      this.emitPendingPcmChunk(true)
+    }
+
+    if (!this.pendingPcmChunk) {
+      this.pendingPcmChunk = {
+        samples: trimmedChunk.samples,
+        sourceSampleRate,
+        startedAtMs,
+        endedAtMs,
+        chunkIndexes: [chunkIndex],
+        originalDurationMs: trimmedChunk.originalDurationMs,
+        removedSilenceMs: trimmedChunk.removedSilenceMs,
+        originalStartedAtMs: startedAtMs,
+        originalEndedAtMs: endedAtMs,
+      }
+    } else {
+      this.pendingPcmChunk.samples = concatFloat32Arrays([this.pendingPcmChunk.samples, trimmedChunk.samples])
+      this.pendingPcmChunk.endedAtMs = endedAtMs
+      this.pendingPcmChunk.originalEndedAtMs = endedAtMs
+      this.pendingPcmChunk.chunkIndexes.push(chunkIndex)
+      this.pendingPcmChunk.originalDurationMs += trimmedChunk.originalDurationMs
+      this.pendingPcmChunk.removedSilenceMs += trimmedChunk.removedSilenceMs
+    }
+
+    const pendingDurationMs = Math.round(
+      (this.pendingPcmChunk.samples.length / Math.max(this.pendingPcmChunk.sourceSampleRate, 1)) * 1000,
+    )
+
+    if (pendingDurationMs < MIN_STT_SEND_DURATION_MS) {
+      console.info("[STT] trimmed chunk held until next chunk", {
+        chunkIndex,
+        pendingDurationMs,
+        minSendDurationMs: MIN_STT_SEND_DURATION_MS,
+        removedSilenceMs: this.pendingPcmChunk.removedSilenceMs,
+        combinedChunkCount: this.pendingPcmChunk.chunkIndexes.length,
+      })
+      return
+    }
+
+    this.emitPendingPcmChunk(false)
+  }
+
+  private emitPendingPcmChunk(force: boolean) {
+    if (!this.pendingPcmChunk || !this.onChunkReady) {
+      return
+    }
+
+    const pending = this.pendingPcmChunk
+    const pendingDurationMs = Math.round((pending.samples.length / Math.max(pending.sourceSampleRate, 1)) * 1000)
+
+    if (!force && pendingDurationMs < MIN_STT_SEND_DURATION_MS) {
+      return
+    }
+
+    if (force && pendingDurationMs < MIN_FLUSH_DURATION_MS) {
+      this.pendingPcmChunk = null
+      return
+    }
+
+    const wav = encodeWav(pending.samples, pending.sourceSampleRate)
+    const sampleMetrics = calculatePcmMetrics(pending.samples, pending.sourceSampleRate)
+    const chunkIndex = pending.chunkIndexes[0] ?? 0
+    const startedAtMs = pending.startedAtMs
+    const endedAtMs = pending.endedAtMs
+    const metrics = this.normalizeMetrics(sampleMetrics, startedAtMs, endedAtMs, pending.sourceSampleRate)
+    metrics.sourceSampleRate = pending.sourceSampleRate
     metrics.sampleRate = wav.sampleRate
     metrics.chunkIndex = chunkIndex
     metrics.mimeType = "audio/wav"
+    metrics.originalStartedAt = new Date(pending.originalStartedAtMs).toISOString()
+    metrics.originalEndedAt = new Date(pending.originalEndedAtMs).toISOString()
+    metrics.originalDurationMs = pending.originalDurationMs
+    metrics.removedSilenceMs = pending.removedSilenceMs
+    metrics.combinedChunkCount = pending.chunkIndexes.length
+    metrics.trimmedFromSilence = pending.removedSilenceMs > 0 || pending.chunkIndexes.length > 1
 
-    if (
-      data.metrics &&
-      Number(data.metrics.rms || 0) === 0 &&
-      Number(data.metrics.peak || 0) === 0 &&
-      Number(data.metrics.speechRatio || 0) === 0 &&
-      (metrics.rms > 0 || metrics.peak > 0)
-    ) {
-      console.info("[STT] chunk metrics recovered from PCM samples", {
-        chunkIndex,
-        workletMetrics: data.metrics,
-        recoveredMetrics: {
-          rms: metrics.rms,
-          peak: metrics.peak,
-          speechRatio: metrics.speechRatio,
-          durationMs: metrics.durationMs,
-        },
-      })
-    }
+    console.info("[STT] silence-trimmed WAV chunk ready", {
+      chunkIndexes: pending.chunkIndexes,
+      force,
+      sentDurationMs: metrics.durationMs,
+      originalDurationMs: metrics.originalDurationMs,
+      removedSilenceMs: metrics.removedSilenceMs,
+      combinedChunkCount: metrics.combinedChunkCount,
+      bytes: wav.blob.size,
+    })
 
     this.onChunkReady({
       blob: wav.blob,
       metrics,
     })
-    this.resolvePendingFlush()
+    this.pendingPcmChunk = null
   }
 
   private normalizeMetrics(
@@ -446,6 +665,7 @@ export class AudioRecorder {
     this.onChunkReady = null
     this.onMeterReady = null
     this.pendingFlushResolvers = []
+    this.pendingPcmChunk = null
     this.recordingStartedAtMs = 0
     this.teardownPromise = null
     console.log("🧹 Audio recorder cleaned up")
@@ -472,6 +692,7 @@ export class AudioRecorder {
         console.warn("⚠️ Failed to flush final PCM chunk before stop:", error)
       }
 
+      this.emitPendingPcmChunk(true)
       this.stop()
       await this.releaseResources()
     })()

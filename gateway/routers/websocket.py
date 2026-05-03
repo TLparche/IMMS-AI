@@ -59,6 +59,12 @@ def normalize_audio_meta(raw_meta: Any) -> dict[str, Any]:
         "sample_rate": _float_meta(meta, "sample_rate", "sampleRate"),
         "chunk_index": _float_meta(meta, "chunk_index", "chunkIndex", default=-1),
         "mime_type": meta.get("mime_type") or meta.get("mimeType"),
+        "original_started_at": meta.get("original_started_at") or meta.get("originalStartedAt"),
+        "original_ended_at": meta.get("original_ended_at") or meta.get("originalEndedAt"),
+        "original_duration_ms": _float_meta(meta, "original_duration_ms", "originalDurationMs"),
+        "removed_silence_ms": _float_meta(meta, "removed_silence_ms", "removedSilenceMs"),
+        "combined_chunk_count": _float_meta(meta, "combined_chunk_count", "combinedChunkCount"),
+        "trimmed_from_silence": bool(meta.get("trimmed_from_silence") or meta.get("trimmedFromSilence")),
     }
 
 
