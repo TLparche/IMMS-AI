@@ -27,6 +27,8 @@ FUSION_WAIT_MS = 450
 FUSION_STICKY_BONUS = 0.35
 FUSION_MIN_RMS = 0.004
 FUSION_MIN_SPEECH_RATIO = 0.05
+STREAM_AUDIO_MAX_BYTES = 2_500_000
+STREAM_AUDIO_MAX_CHUNKS = 8
 fusion_states: Dict[str, Dict[str, Any]] = {}
 
 
@@ -66,6 +68,8 @@ def get_fusion_state(meeting_id: str) -> Dict[str, Any]:
             "last_winner_user_id": None,
             "last_winner_bucket": None,
             "device_profiles": {},
+            "audio_streams": {},
+            "last_transcript_text_by_user": {},
         }
         fusion_states[meeting_id] = state
     return state
@@ -141,11 +145,48 @@ def pick_dominant_candidate(candidates: list[dict[str, Any]], sticky_user_id: st
     return best_candidate
 
 
+def build_streaming_audio_payload(state: Dict[str, Any], candidate: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    user_id = str(candidate.get("user_id") or "")
+    chunk = candidate.get("audio_bytes") or b""
+    streams = state.setdefault("audio_streams", {})
+    stream = streams.setdefault(user_id, {"chunks": [], "bytes": 0})
+    chunks = stream.setdefault("chunks", [])
+    chunks.append(chunk)
+    stream["bytes"] = int(stream.get("bytes") or 0) + len(chunk)
+
+    while len(chunks) > STREAM_AUDIO_MAX_CHUNKS or int(stream.get("bytes") or 0) > STREAM_AUDIO_MAX_BYTES:
+        removed = chunks.pop(0)
+        stream["bytes"] = max(0, int(stream.get("bytes") or 0) - len(removed))
+
+    audio_bytes = b"".join(chunks)
+    return audio_bytes, {
+        "stream_chunk_count": len(chunks),
+        "stream_bytes": len(audio_bytes),
+        "latest_chunk_bytes": len(chunk),
+    }
+
+
+def normalize_transcript_for_dedupe(text: str) -> str:
+    return "".join(ch for ch in (text or "").lower().strip() if not ch.isspace())
+
+
+def remove_previous_transcript_prefix(text: str, previous_text: str) -> str:
+    clean = (text or "").strip()
+    previous = (previous_text or "").strip()
+    if not clean or not previous:
+        return clean
+    if clean == previous:
+        return ""
+    if clean.startswith(previous):
+        return clean[len(previous):].strip(" \n\t,.，。")
+    return clean
+
+
 async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{AI_BACKEND_URL}/api/transcribe-chunk",
-            files={'audio_file': ('audio.webm', candidate['audio_bytes'], 'audio/webm')}
+            files={'audio_file': ('audio.webm', candidate['transcription_audio_bytes'], 'audio/webm')}
         )
         if response.status_code != 200:
             print(f"❌ Transcription failed: {response.status_code}")
@@ -238,6 +279,16 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         bucket_id=bucket_id,
         backend_url=AI_BACKEND_URL,
     )
+    async with state["lock"]:
+        transcription_audio_bytes, stream_meta = build_streaming_audio_payload(state, winner)
+        winner["transcription_audio_bytes"] = transcription_audio_bytes
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "transcription_audio_buffered",
+        bucket_id=bucket_id,
+        **stream_meta,
+    )
     transcription = await transcribe_selected_chunk(winner)
     transcribed_text = transcription.get("text") or ""
     if not transcribed_text:
@@ -251,6 +302,19 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
             error=transcription.get("error") or "",
             audio_meta=winner.get("audio_meta") or {},
             bytes=len(winner.get("audio_bytes") or b""),
+        )
+        return
+
+    async with state["lock"]:
+        previous_text = (state.get("last_transcript_text_by_user") or {}).get(winner["user_id"], "")
+    transcribed_text = remove_previous_transcript_prefix(transcribed_text, previous_text)
+    if not transcribed_text:
+        await send_stt_debug(
+            meeting_id,
+            winner["user_id"],
+            "transcription_duplicate_skipped",
+            bucket_id=bucket_id,
+            previous_text_preview=previous_text[:120],
         )
         return
 
@@ -298,6 +362,9 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
     async with state["lock"]:
         state["last_winner_user_id"] = winner["user_id"]
         state["last_winner_bucket"] = bucket_id
+        state.setdefault("last_transcript_text_by_user", {})[winner["user_id"]] = (
+            f"{previous_text} {transcribed_text}".strip()
+        )[-500:]
 
 
 async def queue_audio_for_fusion(meeting_id: str, candidate: dict[str, Any]):
