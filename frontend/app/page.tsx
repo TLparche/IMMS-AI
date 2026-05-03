@@ -441,34 +441,35 @@ function HomeContent() {
 
     const stats = calibrationAccumulatorRef.current;
     calibrationActiveRef.current = false;
-    if (stats.chunks > 0) {
-      const avgRms = stats.sumRms / stats.chunks;
-      const avgPeak = stats.sumPeak / stats.chunks;
-      const avgSpeechRatio = stats.sumSpeechRatio / stats.chunks;
-      const avgNoiseFloor = stats.sumNoiseFloor / stats.chunks;
+    const sampleCount = Math.max(stats.chunks, 1);
+    const avgRms = stats.chunks > 0 ? stats.sumRms / sampleCount : 0.0045;
+    const avgPeak = stats.chunks > 0 ? stats.sumPeak / sampleCount : 0.04;
+    const avgSpeechRatio = stats.chunks > 0 ? stats.sumSpeechRatio / sampleCount : 0.045;
+    const avgNoiseFloor = stats.chunks > 0 ? stats.sumNoiseFloor / sampleCount : 0.0015;
 
-      if (wsClientRef.current?.isConnected()) {
-        console.info("[STT] mic calibration finished", {
+    if (stats.chunks === 0) {
+      console.info("[STT] mic calibration finished before first audio chunk; using fallback profile");
+    }
+
+    if (wsClientRef.current?.isConnected()) {
+      console.info("[STT] mic calibration finished", {
+        rms: avgRms,
+        peak: avgPeak,
+        speechRatio: avgSpeechRatio,
+        noiseFloor: avgNoiseFloor,
+        sampleCount: stats.chunks,
+      });
+      wsClientRef.current.sendMessage("mic_calibration", {
+        profile: {
           rms: avgRms,
           peak: avgPeak,
-          speechRatio: avgSpeechRatio,
-          noiseFloor: avgNoiseFloor,
-          sampleCount: stats.chunks,
-        });
-        wsClientRef.current.sendMessage("mic_calibration", {
-          profile: {
-            rms: avgRms,
-            peak: avgPeak,
-            speech_ratio: avgSpeechRatio,
-            noise_floor: avgNoiseFloor,
-            sample_count: stats.chunks,
-          },
-        });
-      }
-      deviceCalibratedRef.current = true;
-    } else {
-      console.warn("[STT] mic calibration finished without audio chunks");
+          speech_ratio: avgSpeechRatio,
+          noise_floor: avgNoiseFloor,
+          sample_count: stats.chunks,
+        },
+      });
     }
+    deviceCalibratedRef.current = true;
 
     setCalibrationState("done");
     setCalibrationSecondsLeft(0);
