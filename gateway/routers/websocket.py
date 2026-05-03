@@ -28,8 +28,6 @@ FUSION_WAIT_MS = 450
 FUSION_STICKY_BONUS = 0.35
 FUSION_MIN_RMS = 0.004
 FUSION_MIN_SPEECH_RATIO = 0.05
-STREAM_AUDIO_MAX_BYTES = 2_500_000
-STREAM_AUDIO_MAX_CHUNKS = 8
 fusion_states: Dict[str, Dict[str, Any]] = {}
 
 
@@ -56,6 +54,10 @@ def normalize_audio_meta(raw_meta: Any) -> dict[str, Any]:
         "speech_ratio": _float_meta(meta, "speech_ratio", "speechRatio"),
         "zero_crossing_rate": _float_meta(meta, "zero_crossing_rate", "zeroCrossingRate"),
         "noise_floor": _float_meta(meta, "noise_floor", "noiseFloor", default=0.0015),
+        "source_sample_rate": _float_meta(meta, "source_sample_rate", "sourceSampleRate"),
+        "sample_rate": _float_meta(meta, "sample_rate", "sampleRate"),
+        "chunk_index": _float_meta(meta, "chunk_index", "chunkIndex", default=-1),
+        "mime_type": meta.get("mime_type") or meta.get("mimeType"),
     }
 
 
@@ -69,7 +71,6 @@ def get_fusion_state(meeting_id: str) -> Dict[str, Any]:
             "last_winner_user_id": None,
             "last_winner_bucket": None,
             "device_profiles": {},
-            "audio_streams": {},
             "last_transcript_text_by_user": {},
         }
         fusion_states[meeting_id] = state
@@ -146,40 +147,60 @@ def pick_dominant_candidate(candidates: list[dict[str, Any]], sticky_user_id: st
     return best_candidate
 
 
-def build_streaming_audio_payload(state: Dict[str, Any], candidate: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
-    user_id = str(candidate.get("user_id") or "")
-    chunk = candidate.get("audio_bytes") or b""
-    streams = state.setdefault("audio_streams", {})
-    stream = streams.setdefault(user_id, {"chunks": [], "bytes": 0})
-    chunks = stream.setdefault("chunks", [])
-    chunks.append(chunk)
-    stream["bytes"] = int(stream.get("bytes") or 0) + len(chunk)
-
-    while len(chunks) > STREAM_AUDIO_MAX_CHUNKS or int(stream.get("bytes") or 0) > STREAM_AUDIO_MAX_BYTES:
-        removed = chunks.pop(0)
-        stream["bytes"] = max(0, int(stream.get("bytes") or 0) - len(removed))
-
-    audio_bytes = b"".join(chunks)
-    return audio_bytes, {
-        "stream_chunk_count": len(chunks),
-        "stream_bytes": len(audio_bytes),
-        "latest_chunk_bytes": len(chunk),
-    }
-
-
 def normalize_transcript_for_dedupe(text: str) -> str:
-    return "".join(ch for ch in (text or "").lower().strip() if not ch.isspace())
+    return "".join(ch for ch in (text or "").lower().strip() if ch.isalnum())
 
 
-def remove_previous_transcript_prefix(text: str, previous_text: str) -> str:
-    clean = (text or "").strip()
-    previous = (previous_text or "").strip()
+def trim_text_prefix_by_chars(text: str, prefix_char_count: int) -> str:
+    if prefix_char_count <= 0:
+        return text.strip()
+    consumed = 0
+    cut_index = 0
+    for index, char in enumerate(text):
+        if char.isalnum():
+            consumed += 1
+        if consumed >= prefix_char_count:
+            cut_index = index + 1
+            break
+    return text[cut_index:].strip(" \n\t,.，。")
+
+
+def find_longest_normalized_overlap(previous_text: str, current_text: str) -> int:
+    previous = normalize_transcript_for_dedupe(previous_text)
+    current = normalize_transcript_for_dedupe(current_text)
+    if not previous or not current:
+        return 0
+    max_len = min(len(previous), len(current))
+    for size in range(max_len, 12, -1):
+        if previous[-size:] == current[:size]:
+            return size
+    return 0
+
+
+def extract_incremental_transcript(current_text: str, previous_cumulative_text: str) -> str:
+    clean = (current_text or "").strip()
+    previous = (previous_cumulative_text or "").strip()
     if not clean or not previous:
         return clean
     if clean == previous:
         return ""
     if clean.startswith(previous):
         return clean[len(previous):].strip(" \n\t,.，。")
+
+    previous_norm = normalize_transcript_for_dedupe(previous)
+    clean_norm = normalize_transcript_for_dedupe(clean)
+    if clean_norm and previous_norm and clean_norm.startswith(previous_norm):
+        return trim_text_prefix_by_chars(clean, len(previous_norm))
+
+    overlap = find_longest_normalized_overlap(previous, clean)
+    if overlap > 0:
+        return trim_text_prefix_by_chars(clean, overlap)
+
+    # If the new cumulative result is mostly old content with minor Whisper rewrites,
+    # avoid saving another duplicate sentence.
+    if previous_norm and clean_norm and (clean_norm in previous_norm or previous_norm in clean_norm):
+        return "" if len(clean_norm) <= len(previous_norm) + 8 else trim_text_prefix_by_chars(clean, len(previous_norm))
+
     return clean
 
 
@@ -206,8 +227,8 @@ def build_stt_progress_summary(stage: str, data: dict[str, Any]) -> str:
         return "발화 구간 선택됨 · 전사 준비 중"
     if stage == "audio_candidate_dropped":
         return "입력이 작아 전사하지 않음"
-    if stage == "transcription_audio_buffered":
-        return f"최근 발화 누적 중 · {int(data.get('stream_chunk_count') or 0)}개 청크"
+    if stage == "transcription_audio_prepared":
+        return "7초 발화 청크 준비됨 · 전사 준비 중"
     if stage == "transcription_started":
         return "Whisper 전사 중 · 잠시만 기다려 주세요"
     if stage == "transcription_empty":
@@ -242,10 +263,13 @@ async def update_stt_summary(meeting_id: str, text: str, source: str, user_id: s
 
 
 async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]:
+    audio_bytes = candidate.get("audio_bytes") or b""
+    audio_mime = str(candidate.get("audio_mime") or candidate.get("audio_meta", {}).get("mime_type") or "audio/wav")
+    audio_filename = str(candidate.get("audio_filename") or ("chunk.wav" if audio_mime.lower().startswith("audio/wav") else "chunk.webm"))
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{AI_BACKEND_URL}/api/transcribe-chunk",
-            files={'audio_file': ('audio.webm', candidate['transcription_audio_bytes'], 'audio/webm')}
+            files={'audio_file': (audio_filename, audio_bytes, audio_mime)}
         )
         if response.status_code != 200:
             print(f"❌ Transcription failed: {response.status_code}")
@@ -262,7 +286,8 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
             meta = candidate.get("audio_meta") or {}
             print(
                 "ℹ️ Empty transcription "
-                f"bytes={len(candidate.get('audio_bytes') or b'')} "
+                f"bytes={len(audio_bytes)} "
+                f"mime={audio_mime} "
                 f"rms={meta.get('rms')} speech_ratio={meta.get('speech_ratio')} "
                 f"duration_ms={meta.get('duration_ms')}"
             )
@@ -334,19 +359,18 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
     await send_stt_debug(
         meeting_id,
         winner["user_id"],
-        "transcription_started",
+        "transcription_audio_prepared",
         bucket_id=bucket_id,
-        backend_url=AI_BACKEND_URL,
+        bytes=len(winner.get("audio_bytes") or b""),
+        audio_mime=winner.get("audio_mime") or winner.get("audio_meta", {}).get("mime_type") or "audio/wav",
+        audio_meta=winner.get("audio_meta") or {},
     )
-    async with state["lock"]:
-        transcription_audio_bytes, stream_meta = build_streaming_audio_payload(state, winner)
-        winner["transcription_audio_bytes"] = transcription_audio_bytes
     await send_stt_debug(
         meeting_id,
         winner["user_id"],
-        "transcription_audio_buffered",
+        "transcription_started",
         bucket_id=bucket_id,
-        **stream_meta,
+        backend_url=AI_BACKEND_URL,
     )
     transcription = await transcribe_selected_chunk(winner)
     transcribed_text = transcription.get("text") or ""
@@ -361,19 +385,6 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
             error=transcription.get("error") or "",
             audio_meta=winner.get("audio_meta") or {},
             bytes=len(winner.get("audio_bytes") or b""),
-        )
-        return
-
-    async with state["lock"]:
-        previous_text = (state.get("last_transcript_text_by_user") or {}).get(winner["user_id"], "")
-    transcribed_text = remove_previous_transcript_prefix(transcribed_text, previous_text)
-    if not transcribed_text:
-        await send_stt_debug(
-            meeting_id,
-            winner["user_id"],
-            "transcription_duplicate_skipped",
-            bucket_id=bucket_id,
-            previous_text_preview=previous_text[:120],
         )
         return
 
@@ -433,9 +444,7 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
     async with state["lock"]:
         state["last_winner_user_id"] = winner["user_id"]
         state["last_winner_bucket"] = bucket_id
-        state.setdefault("last_transcript_text_by_user", {})[winner["user_id"]] = (
-            f"{previous_text} {transcribed_text}".strip()
-        )[-500:]
+        state.setdefault("last_transcript_text_by_user", {})[winner["user_id"]] = transcribed_text[-500:]
 
 
 async def queue_audio_for_fusion(meeting_id: str, candidate: dict[str, Any]):
@@ -644,6 +653,8 @@ async def websocket_endpoint(
                 audio_data = message.get('audio_data')  # base64 encoded
                 speaker = message.get('speaker', f'User_{user_id[:8]}')
                 audio_meta = normalize_audio_meta(message.get('audio_meta') or {})
+                audio_mime = str(message.get('audio_mime') or audio_meta.get("mime_type") or "audio/wav")
+                audio_filename = str(message.get('audio_filename') or ("chunk.wav" if audio_mime.lower().startswith("audio/wav") else "chunk.webm"))
                 
                 try:
                     audio_bytes = base64.b64decode(audio_data)
@@ -660,6 +671,8 @@ async def websocket_endpoint(
                         "user_id": user_id,
                         "speaker": speaker,
                         "audio_bytes": audio_bytes,
+                        "audio_mime": audio_mime,
+                        "audio_filename": audio_filename,
                         "audio_meta": audio_meta,
                         "started_at_ms": iso_to_epoch_ms(audio_meta.get("started_at") or message.get("timestamp")),
                     }

@@ -129,6 +129,10 @@ export class WebSocketClient {
       speechRatio: number
       zeroCrossingRate: number
       noiseFloor: number
+      sourceSampleRate?: number
+      sampleRate?: number
+      chunkIndex?: number
+      mimeType?: string
     },
   ) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -146,6 +150,8 @@ export class WebSocketClient {
         user_id: this.userId,
         speaker,
         audio_data: base64Audio,
+        audio_mime: audioBlob.type || audioMeta?.mimeType || 'audio/wav',
+        audio_filename: audioBlob.type === 'audio/wav' || audioMeta?.mimeType === 'audio/wav' ? 'chunk.wav' : 'chunk.webm',
         timestamp: new Date().toISOString(),
         audio_meta: audioMeta
           ? {
@@ -156,6 +162,10 @@ export class WebSocketClient {
               speech_ratio: audioMeta.speechRatio,
               zero_crossing_rate: audioMeta.zeroCrossingRate,
               noise_floor: audioMeta.noiseFloor,
+              source_sample_rate: audioMeta.sourceSampleRate,
+              sample_rate: audioMeta.sampleRate,
+              chunk_index: audioMeta.chunkIndex,
+              mime_type: audioMeta.mimeType,
             }
           : undefined
       }

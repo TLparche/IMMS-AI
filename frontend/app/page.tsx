@@ -369,6 +369,16 @@ function HomeContent() {
         return;
       }
 
+      if (stage === "transcription_audio_prepared") {
+        console.info("[STT] 7초 WAV 청크 준비 완료", {
+          bucketId: payload.bucket_id,
+          bytes: payload.bytes,
+          audioMime: payload.audio_mime,
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
       if (stage === "transcription_audio_buffered") {
         return;
       }
@@ -526,6 +536,17 @@ function HomeContent() {
     }, 4000);
   }, [finishCalibration]);
 
+  const accumulateCalibrationMetrics = useCallback((metrics: RecordedAudioChunk["metrics"]) => {
+    if (!calibrationActiveRef.current && deviceCalibratedRef.current) {
+      return;
+    }
+    calibrationAccumulatorRef.current.chunks += 1;
+    calibrationAccumulatorRef.current.sumRms += metrics.rms;
+    calibrationAccumulatorRef.current.sumPeak += metrics.peak;
+    calibrationAccumulatorRef.current.sumSpeechRatio += metrics.speechRatio;
+    calibrationAccumulatorRef.current.sumNoiseFloor += metrics.noiseFloor;
+  }, []);
+
   const syncBackendFromMeeting = async (analyze = true) => {
     const currentMeetingTitle = meetingTitleRef.current;
     const currentTranscripts = transcriptsRef.current;
@@ -660,21 +681,16 @@ function HomeContent() {
         return;
       }
       recorder.setRecordingInterval(7000);
+      recorder.setMeterCallback(accumulateCalibrationMetrics);
       audioRecorderRef.current = recorder;
     } else {
       audioRecorderRef.current.setRecordingInterval(7000);
+      audioRecorderRef.current.setMeterCallback(accumulateCalibrationMetrics);
     }
 
     beginCalibration();
     audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
       const calibrated = deviceCalibratedRef.current;
-      if (calibrationActiveRef.current || !calibrated) {
-        calibrationAccumulatorRef.current.chunks += 1;
-        calibrationAccumulatorRef.current.sumRms += metrics.rms;
-        calibrationAccumulatorRef.current.sumPeak += metrics.peak;
-        calibrationAccumulatorRef.current.sumSpeechRatio += metrics.speechRatio;
-        calibrationAccumulatorRef.current.sumNoiseFloor += metrics.noiseFloor;
-      }
       if (calibrationActiveRef.current || !calibrated) {
         return;
       }
@@ -695,6 +711,9 @@ function HomeContent() {
           rms: metrics.rms,
           peak: metrics.peak,
           speechRatio: metrics.speechRatio,
+          chunkIndex: metrics.chunkIndex,
+          durationMs: metrics.durationMs,
+          bytes: blob.size,
         });
         wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);
       } else {

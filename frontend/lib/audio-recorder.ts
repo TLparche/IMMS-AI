@@ -7,6 +7,10 @@ export interface AudioChunkMetrics {
   speechRatio: number
   zeroCrossingRate: number
   noiseFloor: number
+  sourceSampleRate?: number
+  sampleRate?: number
+  chunkIndex?: number
+  mimeType?: string
 }
 
 export interface RecordedAudioChunk {
@@ -14,176 +18,250 @@ export interface RecordedAudioChunk {
   metrics: AudioChunkMetrics
 }
 
-type ChunkMetricsAccumulator = {
-  frames: number
-  speechFrames: number
-  sumRms: number
-  sumZeroCrossingRate: number
-  peak: number
-  noiseSamples: number
-  noiseRmsSum: number
+type WorkletChunkMetrics = {
+  durationMs?: number
+  rms?: number
+  peak?: number
+  speechRatio?: number
+  zeroCrossingRate?: number
+  noiseFloor?: number
+  sampleCount?: number
 }
 
-function createAccumulator(): ChunkMetricsAccumulator {
+type WorkletMessage = {
+  type?: string
+  chunkIndex?: number
+  sampleRate?: number
+  samples?: Float32Array
+  metrics?: WorkletChunkMetrics
+}
+
+const TARGET_WAV_SAMPLE_RATE = 16000
+const MIN_FLUSH_DURATION_MS = 350
+
+function clampPcm16(sample: number) {
+  const clipped = Math.max(-1, Math.min(1, sample))
+  return clipped < 0 ? clipped * 0x8000 : clipped * 0x7fff
+}
+
+function resampleLinear(samples: Float32Array, sourceRate: number, targetRate: number) {
+  if (!samples.length || sourceRate === targetRate) {
+    return samples
+  }
+
+  const ratio = sourceRate / targetRate
+  const targetLength = Math.max(1, Math.round(samples.length / ratio))
+  const result = new Float32Array(targetLength)
+
+  for (let index = 0; index < targetLength; index += 1) {
+    const sourceIndex = index * ratio
+    const leftIndex = Math.floor(sourceIndex)
+    const rightIndex = Math.min(leftIndex + 1, samples.length - 1)
+    const weight = sourceIndex - leftIndex
+    result[index] = samples[leftIndex] * (1 - weight) + samples[rightIndex] * weight
+  }
+
+  return result
+}
+
+function encodeWav(samples: Float32Array, sourceRate: number, targetRate = TARGET_WAV_SAMPLE_RATE) {
+  const pcmSamples = resampleLinear(samples, sourceRate, targetRate)
+  const bytesPerSample = 2
+  const channelCount = 1
+  const dataSize = pcmSamples.length * bytesPerSample
+  const buffer = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buffer)
+
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index))
+    }
+  }
+
+  writeString(0, "RIFF")
+  view.setUint32(4, 36 + dataSize, true)
+  writeString(8, "WAVE")
+  writeString(12, "fmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, channelCount, true)
+  view.setUint32(24, targetRate, true)
+  view.setUint32(28, targetRate * channelCount * bytesPerSample, true)
+  view.setUint16(32, channelCount * bytesPerSample, true)
+  view.setUint16(34, 16, true)
+  writeString(36, "data")
+  view.setUint32(40, dataSize, true)
+
+  let offset = 44
+  for (let index = 0; index < pcmSamples.length; index += 1) {
+    view.setInt16(offset, clampPcm16(pcmSamples[index]), true)
+    offset += bytesPerSample
+  }
+
   return {
-    frames: 0,
-    speechFrames: 0,
-    sumRms: 0,
-    sumZeroCrossingRate: 0,
-    peak: 0,
-    noiseSamples: 0,
-    noiseRmsSum: 0,
+    blob: new Blob([buffer], { type: "audio/wav" }),
+    sampleRate: targetRate,
   }
 }
 
 export class AudioRecorder {
-  private mediaRecorder: MediaRecorder | null = null
   private stream: MediaStream | null = null
   private recordingInterval = 7000
   private onChunkReady: ((chunk: RecordedAudioChunk) => void) | null = null
+  private onMeterReady: ((metrics: AudioChunkMetrics) => void) | null = null
 
   private audioContext: AudioContext | null = null
   private sourceNode: MediaStreamAudioSourceNode | null = null
-  private metricsNode: AudioWorkletNode | null = null
+  private chunkNode: AudioWorkletNode | null = null
   private sinkGainNode: GainNode | null = null
 
-  private chunkStartedAt: number | null = null
-  private chunkMetrics: ChunkMetricsAccumulator = createAccumulator()
-  private learnedNoiseFloor = 0.0025
+  private recordingStartedAtMs = 0
+  private recording = false
   private teardownPromise: Promise<void> | null = null
-  private pendingDataResolvers: Array<() => void> = []
+  private pendingFlushResolvers: Array<() => void> = []
 
-  private consumeMetrics = (event: MessageEvent) => {
-    const data = event.data as {
-      rms?: number
-      peak?: number
-      zeroCrossingRate?: number
-      voiced?: boolean
+  private handleWorkletMessage = (event: MessageEvent<WorkletMessage>) => {
+    const data = event.data || {}
+    if (data.type === "flush_complete") {
+      this.resolvePendingFlush()
+      return
     }
 
-    const rms = Number(data?.rms || 0)
-    const peak = Number(data?.peak || 0)
-    const zeroCrossingRate = Number(data?.zeroCrossingRate || 0)
-    const voiced = Boolean(data?.voiced)
+    if (data.type === "meter") {
+      const now = Date.now()
+      const metrics = this.normalizeMetrics(data.metrics, now - Number(data.metrics?.durationMs || 0), now, data.sampleRate)
+      this.onMeterReady?.(metrics)
+      return
+    }
 
-    this.chunkMetrics.frames += 1
-    this.chunkMetrics.sumRms += rms
-    this.chunkMetrics.sumZeroCrossingRate += zeroCrossingRate
-    this.chunkMetrics.peak = Math.max(this.chunkMetrics.peak, peak)
+    if (data.type !== "audio_chunk" || !data.samples || !this.onChunkReady) {
+      return
+    }
 
-    if (voiced) {
-      this.chunkMetrics.speechFrames += 1
-    } else {
-      this.chunkMetrics.noiseSamples += 1
-      this.chunkMetrics.noiseRmsSum += rms
-      const instantNoise = rms > 0 ? rms : this.learnedNoiseFloor
-      this.learnedNoiseFloor = this.learnedNoiseFloor * 0.92 + instantNoise * 0.08
+    const sourceSampleRate = Number(data.sampleRate || this.audioContext?.sampleRate || TARGET_WAV_SAMPLE_RATE)
+    const samples = data.samples instanceof Float32Array ? data.samples : new Float32Array(data.samples)
+    const durationMs =
+      Number(data.metrics?.durationMs || 0) ||
+      Math.max(1, Math.round((samples.length / Math.max(sourceSampleRate, 1)) * 1000))
+    const chunkIndex = Number(data.chunkIndex || 0)
+    const startedAtMs = this.recordingStartedAtMs + chunkIndex * this.recordingInterval
+    const endedAtMs = startedAtMs + durationMs
+    const wav = encodeWav(samples, sourceSampleRate)
+
+    const metrics = this.normalizeMetrics(data.metrics, startedAtMs, endedAtMs, sourceSampleRate)
+    metrics.sourceSampleRate = sourceSampleRate
+    metrics.sampleRate = wav.sampleRate
+    metrics.chunkIndex = chunkIndex
+    metrics.mimeType = "audio/wav"
+
+    this.onChunkReady({
+      blob: wav.blob,
+      metrics,
+    })
+    this.resolvePendingFlush()
+  }
+
+  private normalizeMetrics(
+    rawMetrics: WorkletChunkMetrics | undefined,
+    startedAtMs: number,
+    endedAtMs: number,
+    sampleRate?: number,
+  ): AudioChunkMetrics {
+    const metrics = rawMetrics || {}
+    return {
+      startedAt: new Date(startedAtMs).toISOString(),
+      endedAt: new Date(endedAtMs).toISOString(),
+      durationMs: Math.max(Number(metrics.durationMs || endedAtMs - startedAtMs || 1), 1),
+      rms: Number(metrics.rms || 0),
+      peak: Number(metrics.peak || 0),
+      speechRatio: Number(metrics.speechRatio || 0),
+      zeroCrossingRate: Number(metrics.zeroCrossingRate || 0),
+      noiseFloor: Number(metrics.noiseFloor || 0.0015),
+      sourceSampleRate: sampleRate,
     }
   }
 
   async initialize(): Promise<boolean> {
     try {
-      console.log('🎤 Requesting microphone access...')
+      console.log("🎤 Requesting microphone access...")
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
           channelCount: 1,
-          sampleRate: 16000,
+          sampleRate: TARGET_WAV_SAMPLE_RATE,
         },
       })
 
-      this.mediaRecorder = new MediaRecorder(this.stream, {
-        mimeType: 'audio/webm;codecs=opus',
-      })
-
-      this.mediaRecorder.ondataavailable = (event) => {
-        if (!event.data || event.data.size <= 0 || !this.onChunkReady) {
-          return
-        }
-
-        const endedAtMs = Date.now()
-        const startedAtMs = this.chunkStartedAt ?? endedAtMs - this.recordingInterval
-        const frameCount = Math.max(this.chunkMetrics.frames, 1)
-        const noiseFloor =
-          this.chunkMetrics.noiseSamples > 0
-            ? this.chunkMetrics.noiseRmsSum / this.chunkMetrics.noiseSamples
-            : this.learnedNoiseFloor
-
-        const metrics: AudioChunkMetrics = {
-          startedAt: new Date(startedAtMs).toISOString(),
-          endedAt: new Date(endedAtMs).toISOString(),
-          durationMs: Math.max(endedAtMs - startedAtMs, 1),
-          rms: this.chunkMetrics.sumRms / frameCount,
-          peak: this.chunkMetrics.peak,
-          speechRatio: this.chunkMetrics.speechFrames / frameCount,
-          zeroCrossingRate: this.chunkMetrics.sumZeroCrossingRate / frameCount,
-          noiseFloor,
-        }
-
-        this.onChunkReady({
-          blob: event.data,
-          metrics,
-        })
-
-        this.chunkMetrics = createAccumulator()
-        this.chunkStartedAt = endedAtMs
-        this.resolvePendingData()
-      }
-
       this.audioContext = new AudioContext()
-      await this.audioContext.audioWorklet.addModule('/audio-metrics-processor.js')
+      await this.audioContext.audioWorklet.addModule("/audio-metrics-processor.js")
       this.sourceNode = this.audioContext.createMediaStreamSource(this.stream)
-      this.metricsNode = new AudioWorkletNode(this.audioContext, 'audio-metrics-processor')
-      this.metricsNode.port.onmessage = this.consumeMetrics
+      this.chunkNode = new AudioWorkletNode(this.audioContext, "audio-metrics-processor")
+      this.chunkNode.port.onmessage = this.handleWorkletMessage
+      this.chunkNode.port.postMessage({
+        type: "configure",
+        intervalMs: this.recordingInterval,
+        minFlushDurationMs: MIN_FLUSH_DURATION_MS,
+      })
 
       this.sinkGainNode = this.audioContext.createGain()
       this.sinkGainNode.gain.value = 0
 
-      this.sourceNode.connect(this.metricsNode)
-      this.metricsNode.connect(this.sinkGainNode)
+      this.sourceNode.connect(this.chunkNode)
+      this.chunkNode.connect(this.sinkGainNode)
       this.sinkGainNode.connect(this.audioContext.destination)
 
-      console.log('✅ Audio recorder initialized')
+      console.log("✅ PCM/WAV audio recorder initialized")
       return true
     } catch (error) {
-      console.error('❌ Failed to initialize audio recorder:', error)
+      console.error("❌ Failed to initialize audio recorder:", error)
       return false
     }
   }
 
   start(onChunkReady: (chunk: RecordedAudioChunk) => void) {
-    if (!this.mediaRecorder) {
-      console.error('❌ MediaRecorder not initialized')
+    if (!this.chunkNode || !this.audioContext) {
+      console.error("❌ AudioWorklet recorder not initialized")
       return
     }
 
-    if (this.mediaRecorder.state === 'recording') {
+    if (this.recording) {
       return
     }
 
     this.onChunkReady = onChunkReady
-    this.chunkMetrics = createAccumulator()
-    this.chunkStartedAt = Date.now()
-    void this.audioContext?.resume()
-    this.mediaRecorder.start(this.recordingInterval)
-    console.log('🎙️ Recording started')
+    this.recordingStartedAtMs = Date.now()
+    this.recording = true
+    void this.audioContext.resume()
+    this.chunkNode.port.postMessage({
+      type: "start",
+      intervalMs: this.recordingInterval,
+      minFlushDurationMs: MIN_FLUSH_DURATION_MS,
+    })
+    console.log("🎙️ Recording started")
   }
 
   stop() {
-    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-      this.mediaRecorder.stop()
-      console.log('⏹️ Recording stopped')
+    if (!this.recording) {
+      return
     }
+
+    this.recording = false
+    this.chunkNode?.port.postMessage({ type: "stop" })
+    console.log("⏹️ Recording stopped")
   }
 
-  private resolvePendingData() {
-    const resolvers = this.pendingDataResolvers.splice(0)
+  setMeterCallback(callback: ((metrics: AudioChunkMetrics) => void) | null) {
+    this.onMeterReady = callback
+  }
+
+  private resolvePendingFlush() {
+    const resolvers = this.pendingFlushResolvers.splice(0)
     resolvers.forEach((resolve) => resolve())
   }
 
-  private waitForNextDataAvailable(timeoutMs: number) {
+  private waitForFlush(timeoutMs: number) {
     return new Promise<void>((resolve) => {
       let done = false
       const finish = () => {
@@ -193,17 +271,17 @@ export class AudioRecorder {
         resolve()
       }
       const timer = window.setTimeout(finish, timeoutMs)
-      this.pendingDataResolvers.push(finish)
+      this.pendingFlushResolvers.push(finish)
     })
   }
 
   private async releaseResources() {
-    if (this.metricsNode) {
-      this.metricsNode.port.onmessage = null
+    if (this.chunkNode) {
+      this.chunkNode.port.onmessage = null
       try {
-        this.metricsNode.disconnect()
+        this.chunkNode.disconnect()
       } catch {}
-      this.metricsNode = null
+      this.chunkNode = null
     }
 
     if (this.sinkGainNode) {
@@ -232,13 +310,13 @@ export class AudioRecorder {
       this.stream = null
     }
 
-    this.mediaRecorder = null
+    this.recording = false
     this.onChunkReady = null
-    this.pendingDataResolvers = []
-    this.chunkMetrics = createAccumulator()
-    this.chunkStartedAt = null
+    this.onMeterReady = null
+    this.pendingFlushResolvers = []
+    this.recordingStartedAtMs = 0
     this.teardownPromise = null
-    console.log('🧹 Audio recorder cleaned up')
+    console.log("🧹 Audio recorder cleaned up")
   }
 
   async stopAndCleanup() {
@@ -247,32 +325,24 @@ export class AudioRecorder {
       return
     }
 
-    const recorder = this.mediaRecorder
-    if (!recorder || recorder.state === 'inactive') {
+    if (!this.chunkNode) {
       await this.releaseResources()
       return
     }
 
-    try {
-      if (recorder.state === 'recording') {
-        recorder.requestData()
-        await this.waitForNextDataAvailable(1800)
-      }
-    } catch (error) {
-      console.warn('⚠️ Failed to flush final audio chunk before stop:', error)
-    }
-
-    this.teardownPromise = new Promise<void>((resolve) => {
-      const finalize = () => {
-        window.setTimeout(() => {
-          void this.releaseResources().finally(resolve)
-        }, 0)
+    this.teardownPromise = (async () => {
+      try {
+        if (this.recording) {
+          this.chunkNode?.port.postMessage({ type: "flush" })
+          await this.waitForFlush(1000)
+        }
+      } catch (error) {
+        console.warn("⚠️ Failed to flush final PCM chunk before stop:", error)
       }
 
-      recorder.addEventListener('stop', finalize, { once: true })
-      recorder.addEventListener('error', finalize, { once: true })
       this.stop()
-    })
+      await this.releaseResources()
+    })()
 
     await this.teardownPromise
   }
@@ -282,10 +352,15 @@ export class AudioRecorder {
   }
 
   isRecording(): boolean {
-    return this.mediaRecorder?.state === 'recording'
+    return this.recording
   }
 
   setRecordingInterval(intervalMs: number) {
     this.recordingInterval = intervalMs
+    this.chunkNode?.port.postMessage({
+      type: "configure",
+      intervalMs,
+      minFlushDurationMs: MIN_FLUSH_DURATION_MS,
+    })
   }
 }
