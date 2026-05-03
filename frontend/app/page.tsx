@@ -98,6 +98,10 @@ function readString(value: unknown, fallback = "") {
   return typeof value === "string" ? value : fallback;
 }
 
+function readNumber(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
 function summarizeTranscriptForConsole(speaker: string, text: string) {
   const cleanText = text.replace(/\s+/g, " ").trim();
   const shortText = cleanText.length > 64 ? `${cleanText.slice(0, 63).trim()}…` : cleanText;
@@ -114,7 +118,7 @@ function summarizeTranscriptForConsole(speaker: string, text: string) {
 }
 
 function hasLikelySpeech(metrics: RecordedAudioChunk["metrics"]) {
-  return metrics.rms >= 0.0018 || metrics.speechRatio >= 0.015 || metrics.peak >= 0.018;
+  return metrics.rms >= 0.0045 || metrics.speechRatio >= 0.045 || metrics.peak >= 0.04;
 }
 
 function HomeContent() {
@@ -158,6 +162,7 @@ function HomeContent() {
   const liveSpeechClearTimerRef = useRef<number | null>(null);
   const audioImportPollTimerRef = useRef<number | null>(null);
   const lastSttStatusLogAtRef = useRef(0);
+  const lastGatewayChunkLogAtRef = useRef(0);
 
   useEffect(() => {
     meetingTitleRef.current = meetingTitle;
@@ -320,6 +325,69 @@ function HomeContent() {
         ]),
       );
       showLiveSpeechPreview(speaker, text, nextTimestamp);
+    });
+
+    wsClient.on("stt_debug", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      const stage = readString(payload.stage);
+      const now = Date.now();
+
+      if (stage === "audio_chunk_received" || stage === "audio_chunk_queued") {
+        if (now - lastGatewayChunkLogAtRef.current < 5000) return;
+        lastGatewayChunkLogAtRef.current = now;
+        console.info("[STT] gateway가 오디오를 받는 중", {
+          stage,
+          bytes: readNumber(payload.bytes),
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "audio_candidate_selected") {
+        console.info("[STT] gateway 후보 선택 완료", {
+          bucketId: payload.bucket_id,
+          candidateCount: payload.candidate_count,
+          bytes: payload.bytes,
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "audio_candidate_dropped") {
+        console.warn("[STT] gateway가 오디오를 음성 아님으로 버림", {
+          reason: payload.reason,
+          thresholds: payload.thresholds,
+          candidates: payload.candidates,
+        });
+        return;
+      }
+
+      if (stage === "transcription_started") {
+        console.info("[STT] backend Whisper 전사 시작", {
+          bucketId: payload.bucket_id,
+          backendUrl: payload.backend_url,
+        });
+        return;
+      }
+
+      if (stage === "transcription_empty") {
+        console.warn("[STT] backend 전사 결과가 비어 있음", {
+          status: payload.status,
+          statusCode: payload.status_code,
+          error: payload.error,
+          bytes: payload.bytes,
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "transcript_saved") {
+        console.info("[STT] 전사 저장 완료", {
+          preview: payload.text_preview,
+          length: payload.text_length,
+        });
+      }
     });
 
     wsClient.on("analysis_update", (message) => {
@@ -630,7 +698,10 @@ function HomeContent() {
         alert("마이크 접근 권한이 필요합니다.");
         return;
       }
+      recorder.setRecordingInterval(7000);
       audioRecorderRef.current = recorder;
+    } else {
+      audioRecorderRef.current.setRecordingInterval(7000);
     }
 
     beginCalibration();

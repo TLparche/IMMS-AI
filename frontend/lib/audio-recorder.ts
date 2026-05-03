@@ -39,7 +39,7 @@ function createAccumulator(): ChunkMetricsAccumulator {
 export class AudioRecorder {
   private mediaRecorder: MediaRecorder | null = null
   private stream: MediaStream | null = null
-  private recordingInterval = 3000
+  private recordingInterval = 7000
   private onChunkReady: ((chunk: RecordedAudioChunk) => void) | null = null
 
   private audioContext: AudioContext | null = null
