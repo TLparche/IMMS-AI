@@ -489,7 +489,12 @@ def _normalize_canvas_workspace_solution_topics(
     ]
 
 
-def _normalize_refined_utterances(raw_rows: Any, limit: int = 120) -> list[dict[str, str]]:
+def _normalize_refined_utterances(
+    raw_rows: Any,
+    limit: int = 120,
+    allowed_ids: set[str] | None = None,
+    min_relevance_score: float | None = None,
+) -> list[dict[str, str]]:
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
 
@@ -499,6 +504,7 @@ def _normalize_refined_utterances(raw_rows: Any, limit: int = 120) -> list[dict[
             speaker = _safe_text(raw.get("speaker"), "참가자")
             text = _strip_leading_timestamp(_safe_text(raw.get("text") or raw.get("refined_text") or raw.get("refinedText")))
             timestamp = _safe_text(raw.get("timestamp"))
+            raw_score = raw.get("relevanceScore") or raw.get("relevance_score")
         else:
             utterance_id = _safe_text(
                 getattr(raw, "utterance_id", "") or getattr(raw, "utteranceId", "") or getattr(raw, "id", "")
@@ -512,7 +518,22 @@ def _normalize_refined_utterances(raw_rows: Any, limit: int = 120) -> list[dict[
                 )
             )
             timestamp = _safe_text(getattr(raw, "timestamp", ""))
+            raw_score = getattr(raw, "relevanceScore", None) or getattr(raw, "relevance_score", None)
 
+        if allowed_ids is not None and (not utterance_id or utterance_id not in allowed_ids):
+            continue
+        if min_relevance_score is not None:
+            try:
+                relevance_score = float(raw_score)
+            except (TypeError, ValueError):
+                relevance_score = 0.0
+            if relevance_score < min_relevance_score:
+                continue
+
+        text = _to_summary_point(
+            re.sub(r"\s+", " ", text).strip().strip(" .,!?:;/|"),
+            max_len=72,
+        )
         if not text:
             continue
         utterance_id = utterance_id or f"refined-{idx}"
@@ -2100,10 +2121,6 @@ def _normalize_idea_assimilation_update(raw: Any, fallback_ids: list[str]) -> di
         for value in (raw.get("keyEvidence") or raw.get("key_evidence") or [])
         if _safe_text(value)
     ][:6]
-    refined_utterances = _normalize_refined_utterances(
-        raw.get("refinedUtterances") or raw.get("refined_utterances") or raw.get("refined_utterance") or [],
-        limit=120,
-    )
     evidence_ids = [
         _safe_text(value)
         for value in (raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or [])
@@ -2117,6 +2134,13 @@ def _normalize_idea_assimilation_update(raw: Any, fallback_ids: list[str]) -> di
 
     if not evidence_ids and not ignored_ids:
         evidence_ids = fallback_ids[:400]
+
+    refined_utterances = _normalize_refined_utterances(
+        raw.get("refinedUtterances") or raw.get("refined_utterances") or raw.get("refined_utterance") or [],
+        limit=4,
+        allowed_ids=set(evidence_ids),
+        min_relevance_score=0.78,
+    )
 
     return {
         "action": action,
@@ -2177,7 +2201,7 @@ def _build_idea_assimilation_local(payload: CanvasIdeaAssimilationInput) -> list
                     "text": _to_summary_point(item["text"], 180),
                     "timestamp": item["timestamp"],
                 }
-                for item in useful
+                for item in useful[:4]
             ],
             "evidenceUtteranceIds": [item["id"] for item in useful],
             "ignoredUtteranceIds": ignored_ids,
@@ -2192,7 +2216,7 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         f"{row['speaker']}: {row['text']}" for row in context_rows if _safe_text(row.get("text"))
     )
     target_transcript_text = " ".join(
-        f"{row['speaker']}: {row['text']}" for row in target_rows if _safe_text(row.get("text"))
+        f"[{row['id']}] {row['speaker']}: {row['text']}" for row in target_rows if _safe_text(row.get("text"))
     )
     prompt_payload = {
         "meeting_topic": _safe_text(payload.meeting_topic),
@@ -2217,9 +2241,13 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         "- target_transcript_text 전체를 하나의 이어진 전사문으로 보고 기존 아이디어에 편입할지, 새 아이디어를 만들지 결정한다.\n"
         "- 잡담, 단순 맞장구, 반복 확인, 감사 인사는 아이디어 노드에 넣지 말고 ignoredUtteranceIds에만 포함한다.\n"
         "- 아이디어 노드에는 불필요한 대화 흐름이 아니라 전체 전사문에서 드러난 실행/기획 핵심만 정제해서 넣는다.\n"
-        "- summary는 노드 본문에 들어갈 핵심 요약이며, 전체 전사문을 1~2줄로 압축한 문장이어야 한다.\n"
+        "- summary는 노드 본문에 들어갈 content이며, 완성형 설명문이 아니라 핵심만 남긴 압축 문구여야 한다.\n"
+        "- summary는 1~2줄로 작성하되 각 줄은 짧은 명사구/핵심 구문 중심으로 쓴다.\n"
+        "- summary에는 '해야 한다', '필요하다', '정리된다', '보인다', '논의했다' 같은 일반 서술어를 되도록 쓰지 않는다.\n"
         "- keywords는 target_transcript_text 전체를 보고 핵심 용어만 추출한다.\n"
-        "- refinedUtterances는 summary에 영향을 준 주요 발화들을 각각 한 줄씩 요약한 것이다.\n"
+        "- refinedUtterances는 summary에 깊게 관련된 주요 발화만 각각 한 줄씩 '요약'한 것이다.\n"
+        "- refinedUtterances는 원문을 예쁘게 고친 문장이 아니라, 해당 발화가 content를 만든 직접 근거/의도만 남긴 압축문이다.\n"
+        "- refinedUtterances는 content에서 빠지면 summary 의미가 바뀌는 발화만 포함한다.\n"
         "- 기존 아이디어와 의미가 같으면 merge, 명확히 다른 의미면 create를 사용한다.\n"
         "- user_edited가 true인 기존 아이디어는 제목과 요약을 덮어쓰지 않도록 merge 대상으로 삼더라도 근거/키워드 보강 중심으로 응답한다.\n\n"
         "[입력 JSON]\n"
@@ -2231,11 +2259,11 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         '      "action": "merge",\n'
         '      "targetIdeaId": "idea-id",\n'
         '      "title": "짧은 아이디어 제목",\n'
-        '      "summary": "전체 전사문을 1~2줄로 압축한 핵심 요약",\n'
+        '      "summary": "핵심 키워드/방향만 남긴 1~2줄 압축 content",\n'
         '      "keywords": ["키워드1", "키워드2"],\n'
         '      "keyEvidence": ["A: 핵심 근거 발화 요약"],\n'
         '      "refinedUtterances": [\n'
-        '        {"utterance_id": "utterance-id-1", "speaker": "A", "text": "핵심 요약에 영향을 준 주요 발화 한 줄 요약", "timestamp": "ISO time"}\n'
+        '        {"utterance_id": "utterance-id-1", "speaker": "A", "text": "주요 발화의 핵심 근거 한 줄 요약", "timestamp": "ISO time", "relevanceScore": 0.9}\n'
         "      ],\n"
         '      "evidenceUtteranceIds": ["utterance-id-1"],\n'
         '      "ignoredUtteranceIds": ["utterance-id-2"]\n'
@@ -2248,7 +2276,16 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         "- create의 targetIdeaId는 빈 문자열로 둔다.\n"
         "- title은 12자 이내의 한국어 명사구를 우선한다.\n"
         "- summary는 회의 잡담을 제거하고 전체 전사문의 핵심만 1~2줄로 남긴다.\n"
+        "- summary는 문장형 설명보다 '핵심 대상 + 방향/문제/조건' 형태의 압축 구문을 우선한다.\n"
+        "- summary 예시: '사용자별 회의 흐름 유지 / 다중 기기 STT 동기화', '잡담 제외, 의미 단위 아이디어 병합'.\n"
         "- refinedUtterances에는 핵심 요약문에 직접 영향을 준 주요 발화만 넣고, 잡담은 넣지 않는다.\n"
+        "- refinedUtterances에는 단순 배경 설명, 동의/확인, 중복 부연, 간접 관련 발화는 넣지 않는다.\n"
+        "- refinedUtterances는 update 하나당 최대 4개까지만 작성한다. 확실한 직접 근거가 1개면 1개만 작성한다.\n"
+        "- relevanceScore는 content와의 직접 관련도를 0~1로 평가한다. 0.78 미만이면 refinedUtterances에 넣지 않는다.\n"
+        "- refinedUtterances.text는 반드시 18~45자 정도의 짧은 요약문으로 쓴다.\n"
+        "- refinedUtterances.text는 발화 원문을 그대로 복사하거나 긴 문장으로 다듬어 쓰지 않는다.\n"
+        "- refinedUtterances.text는 '말함', '언급함', '논의함' 같은 메타 표현 없이 핵심 근거만 쓴다.\n"
+        "- refinedUtterances 예시: '다중 마이크 전사 중복 문제', '노드 생성 전 LLM 정리 대기', '핵심 요약과 발화 근거 분리'.\n"
         "- refinedUtterances의 utterance_id, speaker, timestamp는 target_utterance_refs 중 가장 가까운 입력값을 사용한다.\n"
         "- evidenceUtteranceIds와 ignoredUtteranceIds는 target_utterance_refs의 id만 사용한다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."

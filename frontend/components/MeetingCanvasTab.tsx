@@ -177,7 +177,7 @@ function normalizeRefinedUtterances(
   const normalized: CanvasRefinedUtterance[] = [];
 
   (rows || []).forEach((row, index) => {
-    const text = stripLeadingTimestamp(row.text || "");
+    const text = trimText(row.text || "", 72);
     if (!text) return;
     const utteranceId = (row.utterance_id || `refined-${index}`).trim();
     const key = utteranceId || `${row.speaker || ""}:${text}`;
@@ -1654,6 +1654,8 @@ export default function MeetingCanvasTab({
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
+  const [ideaAssimilationLoading, setIdeaAssimilationLoading] = useState(false);
+  const [showTranscriptCollection, setShowTranscriptCollection] = useState(false);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
   const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
@@ -1857,6 +1859,8 @@ export default function MeetingCanvasTab({
     setArmedCanvasTool(null);
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
+    setIdeaAssimilationLoading(false);
+    setShowTranscriptCollection(false);
     setPlacementFeedback(null);
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
@@ -2393,7 +2397,8 @@ export default function MeetingCanvasTab({
       }
 
       ideaAssimilationInFlightRef.current = true;
-      setIdeaAssimilationStatus("AI가 최근 발화를 아이디어로 정리 중");
+      setIdeaAssimilationLoading(true);
+      setIdeaAssimilationStatus("AI가 키워드와 content를 생성 중");
 
       try {
         const firstTargetIndex = transcripts.findIndex((row) => row.id === targetRows[0]?.id);
@@ -2564,6 +2569,7 @@ export default function MeetingCanvasTab({
         setIdeaAssimilationStatus(`아이디어 정리 실패: ${message}`);
       } finally {
         ideaAssimilationInFlightRef.current = false;
+        setIdeaAssimilationLoading(false);
       }
     },
     [
@@ -6430,29 +6436,9 @@ export default function MeetingCanvasTab({
                         </button>
                     ))}
                   </div>
-                  <div className="mt-6 rounded-2xl border border-slate-200 bg-white/75 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <h5 className="text-base font-semibold text-slate-900">전사 내용 모음</h5>
-                      <span className="text-xs font-medium text-slate-400">{allRefinedTranscriptSentences.length}개 문장</span>
-                    </div>
-                    {allRefinedTranscriptSentences.length > 0 ? (
-                      <div className="mt-3 space-y-2">
-                        {allRefinedTranscriptSentences.map((item, index) => (
-                          <div key={`all-refined-${item.utterance_id}-${index}`} className="rounded-xl bg-[#fafafa] px-3 py-2">
-                            <p className="text-xs font-semibold text-slate-500">{item.speaker || `발화 ${index + 1}`}</p>
-                            <p className="mt-1 text-sm leading-6 text-slate-700">{stripLeadingTimestamp(item.text)}</p>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-3 text-sm leading-6 text-slate-500">
-                        LLM이 아이디어 노드를 생성하면 핵심 요약에 영향을 준 주요 발화가 여기에 문장 단위로 정리됩니다.
-                      </p>
-                    )}
-                  </div>
                 </section>
 
-                <section>
+                <section className="border-b border-slate-200/80 pb-6">
                   <h4 className="text-lg font-semibold text-slate-900">단계 결과</h4>
                   <div className="mt-4 space-y-3">
                     {problemGroups.length === 0 && solutionTopics.length === 0 ? (
@@ -6511,6 +6497,42 @@ export default function MeetingCanvasTab({
                       </button>
                     ))}
                   </div>
+                </section>
+
+                <section>
+                  <button
+                    type="button"
+                    onClick={() => setShowTranscriptCollection((prev) => !prev)}
+                    className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white/80 px-4 py-3 text-left transition hover:bg-white"
+                  >
+                    <div>
+                      <h4 className="text-lg font-semibold text-slate-900">전사 내용 모음</h4>
+                      <p className="mt-1 text-sm text-slate-500">
+                        핵심 요약에 영향을 준 주요 발화 요약 {allRefinedTranscriptSentences.length}개
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-600">
+                      {showTranscriptCollection ? "접기" : "펼치기"}
+                    </span>
+                  </button>
+                  {showTranscriptCollection ? (
+                    <div className="mt-3 rounded-2xl border border-slate-200 bg-white/75 p-4">
+                      {allRefinedTranscriptSentences.length > 0 ? (
+                        <div className="space-y-2">
+                          {allRefinedTranscriptSentences.map((item, index) => (
+                            <div key={`all-refined-${item.utterance_id}-${index}`} className="rounded-xl bg-[#fafafa] px-3 py-2">
+                              <p className="text-xs font-semibold text-slate-500">{item.speaker || `발화 ${index + 1}`}</p>
+                              <p className="mt-1 text-sm leading-6 text-slate-700">{stripLeadingTimestamp(item.text)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm leading-6 text-slate-500">
+                          LLM이 아이디어 노드를 생성하면 핵심 요약에 영향을 준 주요 발화 요약이 여기에 정리됩니다.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
                 </section>
               </div>
             )}
@@ -6722,6 +6744,25 @@ export default function MeetingCanvasTab({
                     {problemGroups.some((group) => group.status === "final")
                       ? "해결책 토픽을 준비하는 중입니다."
                       : "확정된 문제 정의 그룹이 있어야 해결책을 만들 수 있습니다."}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {stage === "ideation" && ideaAssimilationLoading ? (
+              <div className="pointer-events-none absolute inset-0 z-[6] flex items-center justify-center bg-white/72 backdrop-blur-[2px]">
+                <div className="w-[min(440px,90%)] rounded-[28px] border border-blue-100 bg-white px-8 py-7 text-center shadow-[0_24px_60px_rgba(15,23,42,0.12)]">
+                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-blue-50">
+                    <span className="h-10 w-10 animate-spin rounded-full border-[3px] border-blue-100 border-t-[#1b59f8]" />
+                  </div>
+                  <p className="mt-5 text-sm font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">
+                    AI Ideation
+                  </p>
+                  <h3 className="mt-2 text-2xl font-semibold text-slate-900">
+                    키워드와 content 생성 중
+                  </h3>
+                  <p className="mt-3 text-base leading-7 text-slate-500">
+                    최근 전사문을 하나로 묶어 핵심만 추리고 있습니다.
                   </p>
                 </div>
               </div>
