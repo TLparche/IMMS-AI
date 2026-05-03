@@ -68,8 +68,12 @@ export class WebSocketClient {
       console.error('❌ WebSocket error:', error)
     }
 
-    this.ws.onclose = () => {
-      console.log('🔌 WebSocket disconnected')
+    this.ws.onclose = (event) => {
+      console.log('🔌 WebSocket disconnected', {
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean,
+      })
       this.ws = null
       this.emitConnectionState(false)
       if (this.shouldReconnect) {
@@ -137,10 +141,27 @@ export class WebSocketClient {
         audio_data: base64Audio,
         timestamp: new Date().toISOString(),
         audio_meta: audioMeta
+          ? {
+              ...audioMeta,
+              started_at: audioMeta.startedAt,
+              ended_at: audioMeta.endedAt,
+              duration_ms: audioMeta.durationMs,
+              speech_ratio: audioMeta.speechRatio,
+              zero_crossing_rate: audioMeta.zeroCrossingRate,
+              noise_floor: audioMeta.noiseFloor,
+            }
+          : undefined
       }
 
       this.ws?.send(JSON.stringify(message))
-      console.log('🎤 Sent audio chunk')
+      console.log('🎤 Sent audio chunk', {
+        bytes: audioBlob.size,
+        mimeType: audioBlob.type,
+        metrics: audioMeta,
+      })
+    }
+    reader.onerror = () => {
+      console.error('❌ Failed to read audio chunk for WebSocket send', reader.error)
     }
     reader.readAsDataURL(audioBlob)
   }

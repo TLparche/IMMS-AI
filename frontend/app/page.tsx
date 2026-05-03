@@ -119,7 +119,6 @@ function HomeContent() {
   const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(0);
   const [fusionSelectedUserId, setFusionSelectedUserId] = useState<string | null>(null);
   const [fusionSelectedSpeaker, setFusionSelectedSpeaker] = useState<string>("");
-  const [deviceCalibrated, setDeviceCalibrated] = useState(false);
   const [liveSpeechPreview, setLiveSpeechPreview] = useState<LiveSpeechPreview | null>(null);
   const [audioImportJob, setAudioImportJob] = useState<AudioImportJobStatusResponse | null>(null);
   const [audioImportRevision, setAudioImportRevision] = useState(0);
@@ -136,6 +135,7 @@ function HomeContent() {
   const calibrationCountdownTimerRef = useRef<number | null>(null);
   const calibrationAccumulatorRef = useRef<CalibrationAccumulator>(createCalibrationAccumulator());
   const calibrationActiveRef = useRef(false);
+  const deviceCalibratedRef = useRef(false);
   const liveSpeechClearTimerRef = useRef<number | null>(null);
   const audioImportPollTimerRef = useRef<number | null>(null);
 
@@ -350,22 +350,33 @@ function HomeContent() {
 
     const stats = calibrationAccumulatorRef.current;
     calibrationActiveRef.current = false;
-    if (stats.chunks > 0 && wsClientRef.current?.isConnected()) {
+    if (stats.chunks > 0) {
       const avgRms = stats.sumRms / stats.chunks;
       const avgPeak = stats.sumPeak / stats.chunks;
       const avgSpeechRatio = stats.sumSpeechRatio / stats.chunks;
       const avgNoiseFloor = stats.sumNoiseFloor / stats.chunks;
 
-      wsClientRef.current.sendMessage("mic_calibration", {
-        profile: {
+      if (wsClientRef.current?.isConnected()) {
+        console.info("[STT] mic calibration finished", {
           rms: avgRms,
           peak: avgPeak,
-          speech_ratio: avgSpeechRatio,
-          noise_floor: avgNoiseFloor,
-          sample_count: stats.chunks,
-        },
-      });
-      setDeviceCalibrated(true);
+          speechRatio: avgSpeechRatio,
+          noiseFloor: avgNoiseFloor,
+          sampleCount: stats.chunks,
+        });
+        wsClientRef.current.sendMessage("mic_calibration", {
+          profile: {
+            rms: avgRms,
+            peak: avgPeak,
+            speech_ratio: avgSpeechRatio,
+            noise_floor: avgNoiseFloor,
+            sample_count: stats.chunks,
+          },
+        });
+      }
+      deviceCalibratedRef.current = true;
+    } else {
+      console.warn("[STT] mic calibration finished without audio chunks");
     }
 
     setCalibrationState("done");
@@ -382,9 +393,9 @@ function HomeContent() {
 
     calibrationAccumulatorRef.current = createCalibrationAccumulator();
     calibrationActiveRef.current = true;
+    deviceCalibratedRef.current = false;
     setCalibrationState("running");
     setCalibrationSecondsLeft(4);
-    setDeviceCalibrated(false);
 
     calibrationCountdownTimerRef.current = window.setInterval(() => {
       setCalibrationSecondsLeft((prev) => {
@@ -581,6 +592,7 @@ function HomeContent() {
     if (!user) return;
 
     if (isRecording) {
+      console.info("[STT] stopping recording");
       const recorder = audioRecorderRef.current;
       audioRecorderRef.current = null;
       await recorder?.stopAndCleanup();
@@ -600,16 +612,41 @@ function HomeContent() {
     }
 
     beginCalibration();
+    console.info("[STT] recording started; first 4 seconds are calibration and will not be sent");
     audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
-      if (calibrationActiveRef.current || !deviceCalibrated) {
+      const calibrated = deviceCalibratedRef.current;
+      console.info("[STT] audio chunk ready", {
+        bytes: blob.size,
+        calibrated,
+        calibrationActive: calibrationActiveRef.current,
+        websocketConnected: Boolean(wsClientRef.current?.isConnected()),
+        metrics,
+      });
+      if (calibrationActiveRef.current || !calibrated) {
         calibrationAccumulatorRef.current.chunks += 1;
         calibrationAccumulatorRef.current.sumRms += metrics.rms;
         calibrationAccumulatorRef.current.sumPeak += metrics.peak;
         calibrationAccumulatorRef.current.sumSpeechRatio += metrics.speechRatio;
         calibrationAccumulatorRef.current.sumNoiseFloor += metrics.noiseFloor;
       }
+      if (calibrationActiveRef.current || !calibrated) {
+        console.info("[STT] audio chunk kept for calibration only", {
+          bytes: blob.size,
+          metrics,
+        });
+        return;
+      }
       if (wsClientRef.current?.isConnected()) {
+        console.info("[STT] sending audio chunk to gateway", {
+          bytes: blob.size,
+          metrics,
+        });
         wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);
+      } else {
+        console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
+          bytes: blob.size,
+          metrics,
+        });
       }
     });
     setIsRecording(true);

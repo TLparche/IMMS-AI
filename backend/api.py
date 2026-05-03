@@ -717,9 +717,9 @@ def _load_canvas_personal_notes_from_db(
     normalized_meeting_id = _safe_text(meeting_id)
     normalized_user_id = _safe_text(user_id)
     if client is None or not normalized_meeting_id or not normalized_user_id:
-        return None
+        return None, None
     if _runtime_db_table_is_disabled(RUNTIME_USER_STATE_TABLE):
-        return None
+        return None, None
 
     try:
         with _SUPABASE_REQUEST_LOCK:
@@ -733,10 +733,10 @@ def _load_canvas_personal_notes_from_db(
             )
         rows = response.data or []
         if not rows:
-            return None
+            return None, None
         first_row = rows[0] if isinstance(rows[0], dict) else {}
         if not isinstance(first_row, dict):
-            return None
+            return None, None
         personal_state = first_row.get("personal_state")
         if not isinstance(personal_state, dict):
             personal_state = {}

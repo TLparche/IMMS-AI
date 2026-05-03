@@ -30,6 +30,32 @@ FUSION_MIN_SPEECH_RATIO = 0.05
 fusion_states: Dict[str, Dict[str, Any]] = {}
 
 
+def _float_meta(meta: dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    for key in keys:
+        value = meta.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def normalize_audio_meta(raw_meta: Any) -> dict[str, Any]:
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    return {
+        "started_at": meta.get("started_at") or meta.get("startedAt"),
+        "ended_at": meta.get("ended_at") or meta.get("endedAt"),
+        "duration_ms": _float_meta(meta, "duration_ms", "durationMs"),
+        "rms": _float_meta(meta, "rms"),
+        "peak": _float_meta(meta, "peak"),
+        "speech_ratio": _float_meta(meta, "speech_ratio", "speechRatio"),
+        "zero_crossing_rate": _float_meta(meta, "zero_crossing_rate", "zeroCrossingRate"),
+        "noise_floor": _float_meta(meta, "noise_floor", "noiseFloor", default=0.0015),
+    }
+
+
 def get_fusion_state(meeting_id: str) -> Dict[str, Any]:
     state = fusion_states.get(meeting_id)
     if state is None:
@@ -115,7 +141,7 @@ def pick_dominant_candidate(candidates: list[dict[str, Any]], sticky_user_id: st
     return best_candidate
 
 
-async def transcribe_selected_chunk(candidate: dict[str, Any]):
+async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{AI_BACKEND_URL}/api/transcribe-chunk",
@@ -123,9 +149,30 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]):
         )
         if response.status_code != 200:
             print(f"❌ Transcription failed: {response.status_code}")
-            return ""
+            return {
+                "text": "",
+                "status": "http_error",
+                "status_code": response.status_code,
+                "error": response.text[:300],
+            }
         result = response.json()
-        return (result.get('text') or '').strip()
+        if result.get("error"):
+            print(f"❌ Transcription error: {result.get('error')}")
+        if not (result.get('text') or '').strip():
+            meta = candidate.get("audio_meta") or {}
+            print(
+                "ℹ️ Empty transcription "
+                f"bytes={len(candidate.get('audio_bytes') or b'')} "
+                f"rms={meta.get('rms')} speech_ratio={meta.get('speech_ratio')} "
+                f"duration_ms={meta.get('duration_ms')}"
+            )
+        text = (result.get('text') or '').strip()
+        return {
+            "text": text,
+            "status": "ok" if text else "empty",
+            "status_code": response.status_code,
+            "error": result.get("error") or "",
+        }
 
 
 async def flush_audio_bucket(meeting_id: str, bucket_id: int):
@@ -143,8 +190,38 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
 
     winner = pick_dominant_candidate(candidates, sticky_user_id, sticky_bucket, bucket_id)
     if not winner:
+        await send_stt_debug(
+            meeting_id,
+            None,
+            "audio_candidate_dropped",
+            bucket_id=bucket_id,
+            candidate_count=len(candidates),
+            reason="below_rms_and_speech_ratio_threshold",
+            thresholds={
+                "min_rms": FUSION_MIN_RMS,
+                "min_speech_ratio": FUSION_MIN_SPEECH_RATIO,
+            },
+            candidates=[
+                {
+                    "user_id": item.get("user_id"),
+                    "speaker": item.get("speaker"),
+                    "bytes": len(item.get("audio_bytes") or b""),
+                    "audio_meta": item.get("audio_meta") or {},
+                }
+                for item in candidates[:6]
+            ],
+        )
         return
 
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "audio_candidate_selected",
+        bucket_id=bucket_id,
+        candidate_count=len(candidates),
+        bytes=len(winner.get("audio_bytes") or b""),
+        audio_meta=winner.get("audio_meta") or {},
+    )
     await broadcast_to_meeting(meeting_id, {
         'type': 'audio_selection',
         'meeting_id': meeting_id,
@@ -154,11 +231,38 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         'timestamp': datetime.utcnow().isoformat(),
     })
 
-    transcribed_text = await transcribe_selected_chunk(winner)
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "transcription_started",
+        bucket_id=bucket_id,
+        backend_url=AI_BACKEND_URL,
+    )
+    transcription = await transcribe_selected_chunk(winner)
+    transcribed_text = transcription.get("text") or ""
     if not transcribed_text:
+        await send_stt_debug(
+            meeting_id,
+            winner["user_id"],
+            "transcription_empty",
+            bucket_id=bucket_id,
+            status=transcription.get("status"),
+            status_code=transcription.get("status_code"),
+            error=transcription.get("error") or "",
+            audio_meta=winner.get("audio_meta") or {},
+            bytes=len(winner.get("audio_bytes") or b""),
+        )
         return
 
     await save_transcript(meeting_id, winner["user_id"], winner["speaker"], transcribed_text)
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "transcript_saved",
+        bucket_id=bucket_id,
+        text_preview=transcribed_text[:120],
+        text_length=len(transcribed_text),
+    )
     await broadcast_to_meeting(meeting_id, {
         'type': 'transcript',
         'meeting_id': meeting_id,
@@ -241,6 +345,28 @@ async def broadcast_to_meeting(meeting_id: str, message: dict, exclude_user: str
     # 연결 끊긴 사용자 제거
     for conn_info in disconnected:
         active_connections[meeting_id].remove(conn_info)
+
+
+async def send_stt_debug(meeting_id: str, user_id: str | None, stage: str, **data):
+    message = {
+        "type": "stt_debug",
+        "meeting_id": meeting_id,
+        "user_id": user_id,
+        "stage": stage,
+        "timestamp": datetime.utcnow().isoformat(),
+        **data,
+    }
+    if not user_id:
+        await broadcast_to_meeting(meeting_id, message)
+        return
+
+    for conn_info in list(active_connections.get(meeting_id, [])):
+        if conn_info.get("user_id") != user_id:
+            continue
+        try:
+            await conn_info["ws"].send_json(message)
+        except Exception as e:
+            print(f"❌ Failed to send STT debug to {user_id}: {e}")
 
 
 async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str):
@@ -337,24 +463,46 @@ async def websocket_endpoint(
                 # 오디오 청크 처리
                 audio_data = message.get('audio_data')  # base64 encoded
                 speaker = message.get('speaker', f'User_{user_id[:8]}')
-                audio_meta = message.get('audio_meta') or {}
+                audio_meta = normalize_audio_meta(message.get('audio_meta') or {})
                 
                 try:
                     audio_bytes = base64.b64decode(audio_data)
+                    await send_stt_debug(
+                        meeting_id,
+                        user_id,
+                        "audio_chunk_received",
+                        bytes=len(audio_bytes),
+                        speaker=speaker,
+                        audio_meta=audio_meta,
+                    )
                     candidate = {
                         "meeting_id": meeting_id,
                         "user_id": user_id,
                         "speaker": speaker,
                         "audio_bytes": audio_bytes,
                         "audio_meta": audio_meta,
-                        "started_at_ms": iso_to_epoch_ms(audio_meta.get("startedAt") or message.get("timestamp")),
+                        "started_at_ms": iso_to_epoch_ms(audio_meta.get("started_at") or message.get("timestamp")),
                     }
                     await queue_audio_for_fusion(meeting_id, candidate)
+                    await send_stt_debug(
+                        meeting_id,
+                        user_id,
+                        "audio_chunk_queued",
+                        bucket_id=int(candidate["started_at_ms"] // FUSION_BUCKET_MS),
+                        bytes=len(audio_bytes),
+                        audio_meta=audio_meta,
+                    )
                 except Exception as e:
                     import traceback
                     print(f"❌ Error processing audio chunk: {e}")
                     print(f"❌ Full traceback:")
                     traceback.print_exc()
+                    await send_stt_debug(
+                        meeting_id,
+                        user_id,
+                        "audio_chunk_error",
+                        error=str(e),
+                    )
             
             elif message_type == 'request_analysis':
                 # 분석 요청 처리
@@ -427,6 +575,12 @@ async def websocket_endpoint(
                     'user_id': user_id,
                     'timestamp': datetime.utcnow().isoformat(),
                 })
+                await send_stt_debug(
+                    meeting_id,
+                    user_id,
+                    "mic_calibrated",
+                    profile=state["device_profiles"][user_id],
+                )
                     
     except WebSocketDisconnect as exc:
         print(f"ℹ️ User {user_id} disconnected from meeting {meeting_id} (code={exc.code})")
