@@ -70,16 +70,30 @@ function createCalibrationAccumulator(): CalibrationAccumulator {
 
 function dedupeTranscripts(rows: Transcript[]) {
   const seen = new Set<string>();
-  return rows.filter((row) => {
+  const deduped = rows.filter((row) => {
     const key = `${row.speaker}|${row.text}|${row.timestamp}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  return sortTranscriptsByTime(deduped);
 }
 
 function buildTranscriptSyncSignature(meetingGoal: string, rows: Transcript[]) {
   return [meetingGoal, ...rows.map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`)].join("\u0002");
+}
+
+function getTranscriptTime(row: Transcript) {
+  const parsed = Date.parse(row.timestamp || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortTranscriptsByTime(rows: Transcript[]) {
+  return [...rows].sort((a, b) => {
+    const timeDelta = getTranscriptTime(a) - getTranscriptTime(b);
+    if (timeDelta !== 0) return timeDelta;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 function mapMeetingStateToTranscriptRows(state: MeetingState): Transcript[] {
@@ -179,6 +193,7 @@ function HomeContent() {
 
   const wsClientRef = useRef<WebSocketClient | null>(null);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
+  const isRecordingRef = useRef(isRecording);
   const meetingTitleRef = useRef(meetingTitle);
   const transcriptsRef = useRef(transcripts);
   const autoSyncTimerRef = useRef<number | null>(null);
@@ -203,6 +218,10 @@ function HomeContent() {
   useEffect(() => {
     transcriptsRef.current = transcripts;
   }, [transcripts]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
   const showLiveSpeechPreview = useCallback((speaker: string, text: string, timestamp: string) => {
     const trimmedText = text.trim();
@@ -288,7 +307,7 @@ function HomeContent() {
           workspaceState,
         ] = await Promise.all([
           supabase.from("meetings").select("title").eq("id", meetingId).single(),
-          supabase.from("transcripts").select("id, speaker, text, timestamp, created_at").eq("meeting_id", meetingId).order("created_at", { ascending: true }),
+          supabase.from("transcripts").select("id, speaker, text, timestamp, created_at").eq("meeting_id", meetingId).order("timestamp", { ascending: true }),
           getCanvasWorkspaceState(meetingId).catch(() => null),
         ]);
 
@@ -350,11 +369,25 @@ function HomeContent() {
         new Date().toISOString(),
       );
       const transcriptId = readString(transcriptPayload.id, `${nextTimestamp}-${speaker}-${text}`);
+      const audioMetaPayload = isRecord(payload.audio_meta) ? payload.audio_meta : {};
+      const audioStartedAt = readString(transcriptPayload.audio_started_at || audioMetaPayload.started_at);
+      const audioEndedAt = readString(transcriptPayload.audio_ended_at || audioMetaPayload.ended_at);
+      const chunkIndex = readNumber(transcriptPayload.audio_chunk_index || audioMetaPayload.chunk_index, -1);
+      const recordingNow = isRecordingRef.current || Boolean(audioRecorderRef.current?.isRecording());
       const summary = readString(payload.summary_text);
       if (summary) {
         console.info("[STT] 서버 요약 발언", summary);
       }
-      console.info("[STT] 전사", { id: transcriptId, speaker, text, timestamp: nextTimestamp });
+      console.info("[STT] 서버 전사 수신", {
+        id: transcriptId,
+        speaker,
+        text,
+        timestamp: nextTimestamp,
+        audioStartedAt,
+        audioEndedAt,
+        chunkIndex,
+        recording: recordingNow,
+      });
       setTranscripts((prev) =>
         dedupeTranscripts([
           ...prev,

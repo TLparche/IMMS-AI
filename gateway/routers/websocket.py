@@ -68,6 +68,7 @@ def get_fusion_state(meeting_id: str) -> Dict[str, Any]:
             "lock": asyncio.Lock(),
             "buckets": {},
             "tasks": {},
+            "transcription_lock": asyncio.Lock(),
             "last_winner_user_id": None,
             "last_winner_bucket": None,
             "device_profiles": {},
@@ -300,6 +301,120 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
         }
 
 
+async def transcribe_and_broadcast_winner(
+    meeting_id: str,
+    bucket_id: int,
+    winner: dict[str, Any],
+    state: Dict[str, Any],
+):
+    audio_meta = winner.get("audio_meta") or {}
+    audio_started_at = audio_meta.get("started_at") or datetime.utcnow().isoformat()
+    audio_ended_at = audio_meta.get("ended_at") or audio_started_at
+    chunk_index = audio_meta.get("chunk_index")
+
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "transcription_audio_prepared",
+        bucket_id=bucket_id,
+        bytes=len(winner.get("audio_bytes") or b""),
+        audio_mime=winner.get("audio_mime") or winner.get("audio_meta", {}).get("mime_type") or "audio/wav",
+        audio_meta=audio_meta,
+    )
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "transcription_started",
+        bucket_id=bucket_id,
+        backend_url=AI_BACKEND_URL,
+    )
+    transcription = await transcribe_selected_chunk(winner)
+    transcribed_text = transcription.get("text") or ""
+    if not transcribed_text:
+        await send_stt_debug(
+            meeting_id,
+            winner["user_id"],
+            "transcription_empty",
+            bucket_id=bucket_id,
+            status=transcription.get("status"),
+            status_code=transcription.get("status_code"),
+            error=transcription.get("error") or "",
+            audio_meta=audio_meta,
+            bytes=len(winner.get("audio_bytes") or b""),
+        )
+        return
+
+    saved_transcript = await save_transcript(
+        meeting_id,
+        winner["user_id"],
+        winner["speaker"],
+        transcribed_text,
+        transcript_timestamp=str(audio_started_at),
+    )
+    if not saved_transcript:
+        await send_stt_debug(
+            meeting_id,
+            winner["user_id"],
+            "transcript_save_failed",
+            bucket_id=bucket_id,
+            text_preview=transcribed_text[:120],
+            text_length=len(transcribed_text),
+        )
+        return
+    await send_stt_debug(
+        meeting_id,
+        winner["user_id"],
+        "transcript_saved",
+        bucket_id=bucket_id,
+        text_preview=transcribed_text[:120],
+        text_length=len(transcribed_text),
+        transcript_id=saved_transcript.get("id"),
+    )
+    summary_text = build_transcript_summary(
+        str(saved_transcript.get("speaker") or winner["speaker"]),
+        str(saved_transcript.get("text") or transcribed_text),
+    )
+    await update_stt_summary(
+        meeting_id,
+        summary_text,
+        "transcript_created",
+        winner["user_id"],
+        transcript_id=saved_transcript.get("id"),
+    )
+    transcript_message = {
+        'type': 'transcript_created',
+        'meeting_id': meeting_id,
+        'transcript': {
+            'id': saved_transcript.get("id"),
+            'meeting_id': saved_transcript.get("meeting_id", meeting_id),
+            'user_id': saved_transcript.get("user_id", winner["user_id"]),
+            'speaker': saved_transcript.get("speaker", winner["speaker"]),
+            'text': saved_transcript.get("text", transcribed_text),
+            'timestamp': saved_transcript.get("timestamp") or audio_started_at,
+            'created_at': saved_transcript.get("created_at") or saved_transcript.get("timestamp"),
+            'audio_started_at': audio_started_at,
+            'audio_ended_at': audio_ended_at,
+            'audio_chunk_index': chunk_index,
+        },
+        'summary_text': summary_text,
+        'audio_meta': audio_meta,
+        'fusion': {
+            'bucket_id': bucket_id,
+            'selected_user_id': winner["user_id"],
+            'audio_started_at': audio_started_at,
+            'audio_ended_at': audio_ended_at,
+            'chunk_index': chunk_index,
+        },
+        'timestamp': datetime.utcnow().isoformat(),
+    }
+    await broadcast_to_meeting(meeting_id, transcript_message)
+
+    async with state["lock"]:
+        state["last_winner_user_id"] = winner["user_id"]
+        state["last_winner_bucket"] = bucket_id
+        state.setdefault("last_transcript_text_by_user", {})[winner["user_id"]] = transcribed_text[-500:]
+
+
 async def flush_audio_bucket(meeting_id: str, bucket_id: int):
     await asyncio.sleep(FUSION_WAIT_MS / 1000)
     state = get_fusion_state(meeting_id)
@@ -356,95 +471,9 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         'timestamp': datetime.utcnow().isoformat(),
     })
 
-    await send_stt_debug(
-        meeting_id,
-        winner["user_id"],
-        "transcription_audio_prepared",
-        bucket_id=bucket_id,
-        bytes=len(winner.get("audio_bytes") or b""),
-        audio_mime=winner.get("audio_mime") or winner.get("audio_meta", {}).get("mime_type") or "audio/wav",
-        audio_meta=winner.get("audio_meta") or {},
-    )
-    await send_stt_debug(
-        meeting_id,
-        winner["user_id"],
-        "transcription_started",
-        bucket_id=bucket_id,
-        backend_url=AI_BACKEND_URL,
-    )
-    transcription = await transcribe_selected_chunk(winner)
-    transcribed_text = transcription.get("text") or ""
-    if not transcribed_text:
-        await send_stt_debug(
-            meeting_id,
-            winner["user_id"],
-            "transcription_empty",
-            bucket_id=bucket_id,
-            status=transcription.get("status"),
-            status_code=transcription.get("status_code"),
-            error=transcription.get("error") or "",
-            audio_meta=winner.get("audio_meta") or {},
-            bytes=len(winner.get("audio_bytes") or b""),
-        )
-        return
-
-    saved_transcript = await save_transcript(meeting_id, winner["user_id"], winner["speaker"], transcribed_text)
-    if not saved_transcript:
-        await send_stt_debug(
-            meeting_id,
-            winner["user_id"],
-            "transcript_save_failed",
-            bucket_id=bucket_id,
-            text_preview=transcribed_text[:120],
-            text_length=len(transcribed_text),
-        )
-        return
-    await send_stt_debug(
-        meeting_id,
-        winner["user_id"],
-        "transcript_saved",
-        bucket_id=bucket_id,
-        text_preview=transcribed_text[:120],
-        text_length=len(transcribed_text),
-        transcript_id=saved_transcript.get("id"),
-    )
-    summary_text = build_transcript_summary(
-        str(saved_transcript.get("speaker") or winner["speaker"]),
-        str(saved_transcript.get("text") or transcribed_text),
-    )
-    await update_stt_summary(
-        meeting_id,
-        summary_text,
-        "transcript_created",
-        winner["user_id"],
-        transcript_id=saved_transcript.get("id"),
-    )
-    transcript_message = {
-        'type': 'transcript_created',
-        'meeting_id': meeting_id,
-        'transcript': {
-            'id': saved_transcript.get("id"),
-            'meeting_id': saved_transcript.get("meeting_id", meeting_id),
-            'user_id': saved_transcript.get("user_id", winner["user_id"]),
-            'speaker': saved_transcript.get("speaker", winner["speaker"]),
-            'text': saved_transcript.get("text", transcribed_text),
-            'timestamp': saved_transcript.get("timestamp") or datetime.utcnow().isoformat(),
-            'created_at': saved_transcript.get("created_at") or saved_transcript.get("timestamp"),
-        },
-        'summary_text': summary_text,
-        'audio_meta': winner.get("audio_meta") or {},
-        'fusion': {
-            'bucket_id': bucket_id,
-            'selected_user_id': winner["user_id"],
-        },
-        'timestamp': datetime.utcnow().isoformat(),
-    }
-    await broadcast_to_meeting(meeting_id, transcript_message)
-
-    async with state["lock"]:
-        state["last_winner_user_id"] = winner["user_id"]
-        state["last_winner_bucket"] = bucket_id
-        state.setdefault("last_transcript_text_by_user", {})[winner["user_id"]] = transcribed_text[-500:]
+    transcription_lock = state.setdefault("transcription_lock", asyncio.Lock())
+    async with transcription_lock:
+        await transcribe_and_broadcast_winner(meeting_id, bucket_id, winner, state)
 
 
 async def queue_audio_for_fusion(meeting_id: str, candidate: dict[str, Any]):
@@ -538,7 +567,13 @@ async def send_stt_debug(meeting_id: str, user_id: str | None, stage: str, **dat
             print(f"❌ Failed to send STT debug to {user_id}: {e}")
 
 
-async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str) -> dict[str, Any] | None:
+async def save_transcript(
+    meeting_id: str,
+    user_id: str,
+    speaker: str,
+    text: str,
+    transcript_timestamp: str | None = None,
+) -> dict[str, Any] | None:
     """전사 결과를 Supabase에 저장"""
     normalized_text = (text or "").strip()
     if not normalized_text:
@@ -546,7 +581,7 @@ async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str
 
     try:
         supabase = get_supabase()
-        transcript_timestamp = datetime.utcnow().isoformat()
+        transcript_timestamp = transcript_timestamp or datetime.utcnow().isoformat()
         insert_payload = {
             'meeting_id': meeting_id,
             'user_id': user_id,
