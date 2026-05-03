@@ -135,7 +135,7 @@ function HomeContent() {
   const [wsConnected, setWsConnected] = useState(false);
   const [loadingMeeting, setLoadingMeeting] = useState(true);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
-  const [autoSyncing, setAutoSyncing] = useState(false);
+  const [autoSyncing] = useState(false);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
   const [incomingCanvasStateRequestId, setIncomingCanvasStateRequestId] = useState("");
   const [calibrationState, setCalibrationState] = useState<CalibrationState>("idle");
@@ -304,20 +304,27 @@ function HomeContent() {
       setWsConnected(connected);
     });
 
-    wsClient.on("transcript", (message) => {
+    wsClient.on("transcript_created", (message) => {
       const payload = getMessagePayload(message);
       if (!isRecord(payload)) return;
-      const speaker = readString(payload.speaker, "알 수 없음");
-      const text = readString(payload.text);
-      const nextTimestamp = readString(payload.timestamp, new Date().toISOString());
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      const transcriptPayload = isRecord(payload.transcript) ? payload.transcript : payload;
+      const speaker = readString(transcriptPayload.speaker, "알 수 없음");
+      const text = readString(transcriptPayload.text);
+      if (!text.trim()) return;
+      const nextTimestamp = readString(
+        transcriptPayload.timestamp || transcriptPayload.created_at,
+        new Date().toISOString(),
+      );
+      const transcriptId = readString(transcriptPayload.id, `${nextTimestamp}-${speaker}-${text}`);
       const summary = summarizeTranscriptForConsole(speaker, text);
       console.info("[STT] 요약 발언", summary);
-      console.info("[STT] 전사", { speaker, text, timestamp: nextTimestamp });
+      console.info("[STT] 전사", { id: transcriptId, speaker, text, timestamp: nextTimestamp });
       setTranscripts((prev) =>
         dedupeTranscripts([
           ...prev,
           {
-            id: `${Date.now()}-${Math.random()}`,
+            id: transcriptId,
             speaker,
             text,
             timestamp: nextTimestamp,
@@ -386,6 +393,15 @@ function HomeContent() {
         console.info("[STT] 전사 저장 완료", {
           preview: payload.text_preview,
           length: payload.text_length,
+        });
+        return;
+      }
+
+      if (stage === "transcript_save_failed") {
+        console.warn("[STT] 전사 DB 저장 실패", {
+          preview: payload.text_preview,
+          length: payload.text_length,
+          bucketId: payload.bucket_id,
         });
       }
     });
@@ -525,11 +541,6 @@ function HomeContent() {
     return state;
   };
 
-  const transcriptSyncSignature = useMemo(
-    () => buildTranscriptSyncSignature(meetingTitle, transcripts),
-    [meetingTitle, transcripts],
-  );
-
   const pollAudioImportJob = useCallback(
     async (jobId: string) => {
       try {
@@ -612,65 +623,11 @@ function HomeContent() {
     [audioImportJob, meetingId, pollAudioImportJob, stopAudioImportPolling, user],
   );
 
-  const runAutoSync = async (signature: string) => {
-    if (!meetingId || lastSyncedSignatureRef.current === signature) {
-      return;
-    }
-
-    if (autoSyncInFlightRef.current) {
-      queuedSyncSignatureRef.current = signature;
-      return;
-    }
-
-    autoSyncInFlightRef.current = true;
-    setAutoSyncing(true);
-    setCanvasSyncStatus(
-      transcriptsRef.current.length > 0
-        ? "새 전사를 회의 세션에 저장하는 중입니다."
-        : "회의 상태를 세션에 저장하는 중입니다.",
-    );
-
-    try {
-      const state = await syncBackendFromMeeting(false);
-      lastSyncedSignatureRef.current = signature;
-      const agendaCount = state?.analysis?.agenda_outcomes?.length || 0;
-      if (agendaCount > 0) {
-        setCanvasSyncStatus(`실시간 전사가 저장되었습니다. 기존 안건 ${agendaCount}개를 유지합니다.`);
-      } else if (transcriptsRef.current.length > 0) {
-        setCanvasSyncStatus("실시간 전사를 세션에 저장했습니다.");
-      } else {
-        setCanvasSyncStatus("canvas가 현재 회의 상태와 동기화되었습니다.");
-      }
-    } catch (error) {
-      console.error("Failed to auto-sync canvas state:", error);
-      setCanvasSyncStatus("실시간 전사를 세션에 저장하지 못했습니다. 잠시 후 다시 시도합니다.");
-    } finally {
-      autoSyncInFlightRef.current = false;
-      setAutoSyncing(false);
-
-      if (queuedSyncSignatureRef.current && queuedSyncSignatureRef.current !== lastSyncedSignatureRef.current) {
-        const nextSignature = queuedSyncSignatureRef.current;
-        queuedSyncSignatureRef.current = "";
-        if (autoSyncTimerRef.current !== null) {
-          window.clearTimeout(autoSyncTimerRef.current);
-        }
-        autoSyncTimerRef.current = window.setTimeout(() => {
-          void runAutoSync(nextSignature);
-        }, 0);
-      }
-    }
-  };
-
   useEffect(() => {
-    if (!user || !meetingId || loadingMeeting) return;
-
     if (autoSyncTimerRef.current !== null) {
       window.clearTimeout(autoSyncTimerRef.current);
+      autoSyncTimerRef.current = null;
     }
-
-    autoSyncTimerRef.current = window.setTimeout(() => {
-      void runAutoSync(transcriptSyncSignature);
-    }, 1200);
 
     return () => {
       if (autoSyncTimerRef.current !== null) {
@@ -678,7 +635,7 @@ function HomeContent() {
         autoSyncTimerRef.current = null;
       }
     };
-  }, [user, meetingId, loadingMeeting, transcriptSyncSignature]);
+  }, [meetingId]);
 
   const toggleRecording = async () => {
     if (!user) return;

@@ -254,7 +254,17 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         )
         return
 
-    await save_transcript(meeting_id, winner["user_id"], winner["speaker"], transcribed_text)
+    saved_transcript = await save_transcript(meeting_id, winner["user_id"], winner["speaker"], transcribed_text)
+    if not saved_transcript:
+        await send_stt_debug(
+            meeting_id,
+            winner["user_id"],
+            "transcript_save_failed",
+            bucket_id=bucket_id,
+            text_preview=transcribed_text[:120],
+            text_length=len(transcribed_text),
+        )
+        return
     await send_stt_debug(
         meeting_id,
         winner["user_id"],
@@ -262,20 +272,28 @@ async def flush_audio_bucket(meeting_id: str, bucket_id: int):
         bucket_id=bucket_id,
         text_preview=transcribed_text[:120],
         text_length=len(transcribed_text),
+        transcript_id=saved_transcript.get("id"),
     )
-    await broadcast_to_meeting(meeting_id, {
-        'type': 'transcript',
+    transcript_message = {
+        'type': 'transcript_created',
         'meeting_id': meeting_id,
-        'user_id': winner["user_id"],
-        'speaker': winner["speaker"],
-        'text': transcribed_text,
-        'timestamp': datetime.utcnow().isoformat(),
+        'transcript': {
+            'id': saved_transcript.get("id"),
+            'meeting_id': saved_transcript.get("meeting_id", meeting_id),
+            'user_id': saved_transcript.get("user_id", winner["user_id"]),
+            'speaker': saved_transcript.get("speaker", winner["speaker"]),
+            'text': saved_transcript.get("text", transcribed_text),
+            'timestamp': saved_transcript.get("timestamp") or datetime.utcnow().isoformat(),
+            'created_at': saved_transcript.get("created_at") or saved_transcript.get("timestamp"),
+        },
         'audio_meta': winner.get("audio_meta") or {},
         'fusion': {
             'bucket_id': bucket_id,
             'selected_user_id': winner["user_id"],
         },
-    })
+        'timestamp': datetime.utcnow().isoformat(),
+    }
+    await broadcast_to_meeting(meeting_id, transcript_message)
 
     async with state["lock"]:
         state["last_winner_user_id"] = winner["user_id"]
@@ -369,24 +387,31 @@ async def send_stt_debug(meeting_id: str, user_id: str | None, stage: str, **dat
             print(f"❌ Failed to send STT debug to {user_id}: {e}")
 
 
-async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str):
+async def save_transcript(meeting_id: str, user_id: str, speaker: str, text: str) -> dict[str, Any] | None:
     """전사 결과를 Supabase에 저장"""
     normalized_text = (text or "").strip()
     if not normalized_text:
-        return
+        return None
 
     try:
         supabase = get_supabase()
-        supabase.table('transcripts').insert({
+        transcript_timestamp = datetime.utcnow().isoformat()
+        insert_payload = {
             'meeting_id': meeting_id,
             'user_id': user_id,
             'speaker': speaker,
             'text': normalized_text,
-            'timestamp': datetime.utcnow().isoformat()
-        }).execute()
+            'timestamp': transcript_timestamp,
+        }
+        response = supabase.table('transcripts').insert(insert_payload).execute()
         print(f"💾 Saved transcript: {speaker}: {normalized_text[:50]}...")
+        rows = response.data or []
+        if rows and isinstance(rows[0], dict):
+            return rows[0]
+        return insert_payload
     except Exception as e:
         print(f"❌ Failed to save transcript: {e}")
+    return None
 
 
 @router.websocket("/ws/{meeting_id}")

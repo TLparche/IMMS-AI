@@ -50,7 +50,12 @@ export class WebSocketClient {
       try {
         const message = JSON.parse(event.data) as WebSocketMessage
         const messageType = typeof message.type === 'string' ? message.type : ''
-        if (messageType !== 'stt_debug' && messageType !== 'audio_selection' && messageType !== 'transcript') {
+        if (
+          messageType !== 'stt_debug' &&
+          messageType !== 'audio_selection' &&
+          messageType !== 'transcript' &&
+          messageType !== 'transcript_created'
+        ) {
           console.log('📨 WebSocket message:', message)
         }
         if (messageType && this.messageHandlers.has(messageType)) {
