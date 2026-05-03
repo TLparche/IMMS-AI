@@ -32,7 +32,7 @@ from security_utils import extract_client_ip, is_ip_allowed, parse_ip_whitelist
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 load_dotenv(ROOT / "gateway" / ".env", override=False)
-WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "large")
+WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "turbo")
 PYANNOTE_DIARIZATION_MODEL = os.environ.get("PYANNOTE_DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 SUMMARY_INTERVAL = 4
 SUMMARY_POINT_TARGET_LEN = None
