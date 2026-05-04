@@ -121,6 +121,58 @@ type WorkspaceFieldSignatures = {
   imported_state: string;
 };
 
+type CanvasIdeaAssimilationJobSnapshot = {
+  ok?: boolean;
+  job_id?: string;
+  meeting_id?: string;
+  status?: string;
+  detail?: string;
+  used_llm?: boolean;
+  warning?: string;
+  pending_item_id?: string;
+  target_count?: number;
+};
+
+function logCanvasIdeaAssimilationJob(
+  label: string,
+  job: CanvasIdeaAssimilationJobSnapshot | undefined | null,
+  extra: Record<string, unknown> = {},
+) {
+  const status = job?.status || "";
+  const warning = job?.warning || "";
+  const detail = job?.detail || "";
+  const hasError =
+    status === "error" ||
+    status === "missing" ||
+    Boolean(warning) ||
+    (status === "completed" && job?.used_llm === false);
+  const errorDetail =
+    status === "missing"
+      ? detail || "작업 정보를 찾을 수 없습니다."
+      : warning || (hasError ? detail : "");
+  const payload = {
+    label,
+    hasError,
+    errorDetail,
+    status,
+    usedLlm: Boolean(job?.used_llm),
+    warning,
+    detail,
+    jobId: job?.job_id || "",
+    pendingItemId: job?.pending_item_id || "",
+    targetCount: job?.target_count || 0,
+    ok: Boolean(job?.ok),
+    ...extra,
+  };
+
+  if (hasError) {
+    console.error("[canvas idea assimilation]", payload);
+    return;
+  }
+
+  console.info("[canvas idea assimilation]", payload);
+}
+
 function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
   return {
     stage: "",
@@ -2468,6 +2520,19 @@ export default function MeetingCanvasTab({
         const firstTargetIndex = transcripts.findIndex((row) => row.id === targetRows[0]?.id);
         const contextRows =
           firstTargetIndex > 0 ? normalizeTranscriptRows(transcripts.slice(Math.max(0, firstTargetIndex - 6), firstTargetIndex)) : [];
+        const requestSnapshot = {
+          meetingId,
+          reason,
+          selectedAgendaId: selectedAgendaId || agendaModels[0]?.id || "",
+          targetRows: targetRows.length,
+          targetTextLength,
+          contextRows: contextRows.length,
+        };
+        console.info("[canvas idea assimilation] request", {
+          ...requestSnapshot,
+          hasError: false,
+          errorDetail: "",
+        });
         const started = await startCanvasIdeaAssimilationWorkspace({
           meeting_id: meetingId,
           meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
@@ -2485,6 +2550,7 @@ export default function MeetingCanvasTab({
             timestamp: row.timestamp || "",
           })),
         });
+        logCanvasIdeaAssimilationJob("start response", started, requestSnapshot);
 
         applyServerIdeaWorkspace(started.workspace);
         if (started.status !== "processing" || !started.job_id) {
@@ -2500,16 +2566,23 @@ export default function MeetingCanvasTab({
         for (let attempt = 0; attempt < 90; attempt += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 900));
           finalResult = await getCanvasIdeaAssimilationWorkspaceJob(meetingId, started.job_id);
+          if (finalResult.status === "error" || finalResult.status === "missing" || finalResult.warning) {
+            logCanvasIdeaAssimilationJob("poll error response", finalResult, {
+              ...requestSnapshot,
+              attempt: attempt + 1,
+            });
+          }
           if (finalResult.status !== "processing") {
             applyServerIdeaWorkspace(finalResult.workspace);
             break;
           }
         }
+        logCanvasIdeaAssimilationJob("final response", finalResult, requestSnapshot);
 
         if (finalResult.status === "completed") {
           targetRows.forEach((row) => processedIds.add(row.id));
           ideaBufferStartedAtRef.current = null;
-          setIdeaAssimilationStatus(finalResult.used_llm ? "AI 아이디어 정리 반영됨" : "로컬 기준으로 아이디어 정리됨");
+          setIdeaAssimilationStatus(finalResult.used_llm ? "AI 아이디어 정리 반영됨" : "LLM 응답 없음");
         } else if (finalResult.status === "error") {
           setIdeaAssimilationStatus(finalResult.detail || "아이디어 정리 실패");
         } else {
@@ -2517,6 +2590,19 @@ export default function MeetingCanvasTab({
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        console.error("[canvas idea assimilation]", {
+          label: "request failed",
+          hasError: true,
+          errorDetail: message,
+          status: "exception",
+          usedLlm: false,
+          warning: "",
+          detail: message,
+          jobId: "",
+          targetCount: targetRows.length,
+          meetingId,
+          reason,
+        });
         setIdeaAssimilationStatus(`아이디어 정리 실패: ${message}`);
       } finally {
         ideaAssimilationInFlightRef.current = false;
