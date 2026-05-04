@@ -73,6 +73,8 @@ type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
 const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
+const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
+const IDEA_ASSIMILATION_SILENCE_FLUSH_MS = 8_000;
 
 type PersonalNote = {
   id: string;
@@ -2784,6 +2786,18 @@ export default function MeetingCanvasTab({
         setIdeaAssimilationStatus(`아이디어 정리 실패: ${message}`);
       } finally {
         ideaAssimilationInFlightRef.current = false;
+        const hasRemainingRows = normalizeTranscriptRows(transcripts).some(
+          (row) => row.id && row.text.trim() && !processedIdeaUtteranceIdsRef.current.has(row.id),
+        );
+        if (stage === "ideation" && hasRemainingRows) {
+          if (ideaFlushTimerRef.current) {
+            window.clearTimeout(ideaFlushTimerRef.current);
+          }
+          ideaFlushTimerRef.current = window.setTimeout(
+            () => void flushIdeaAssimilationBuffer("timer"),
+            1_000,
+          );
+        }
       }
     },
     [
@@ -2835,13 +2849,16 @@ export default function MeetingCanvasTab({
     const elapsed = now - ideaBufferStartedAtRef.current;
     ideaFlushTimerRef.current = window.setTimeout(
       () => void flushIdeaAssimilationBuffer("timer"),
-      Math.max(0, 90_000 - elapsed),
+      Math.max(0, IDEA_ASSIMILATION_AUTO_FLUSH_MS - elapsed),
     );
 
     if (ideaSilenceTimerRef.current) {
       window.clearTimeout(ideaSilenceTimerRef.current);
     }
-    ideaSilenceTimerRef.current = window.setTimeout(() => void flushIdeaAssimilationBuffer("silence"), 12_000);
+    ideaSilenceTimerRef.current = window.setTimeout(
+      () => void flushIdeaAssimilationBuffer("silence"),
+      IDEA_ASSIMILATION_SILENCE_FLUSH_MS,
+    );
 
     return () => {
       if (ideaFlushTimerRef.current) {
@@ -3906,7 +3923,6 @@ export default function MeetingCanvasTab({
             className: "rounded-[24px] border shadow-[0_16px_36px_rgba(148,163,184,0.16)]",
             style: {
               width: CANVAS_ITEM_NODE_WIDTH,
-              minHeight: estimateCanvasItemNodeHeight(item),
               borderRadius: 24,
               padding: 0,
             },

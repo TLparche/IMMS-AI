@@ -42,6 +42,7 @@ LLM_IO_PREVIEW_MAX = 6000
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
 CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
+CANVAS_TOPIC_CLUSTER_MAX_PASSES_PER_JOB = 3
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
 IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
@@ -7133,38 +7134,45 @@ def _apply_canvas_topic_clustering_result(
 
 def _maybe_cluster_canvas_topic_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
     target = _canvas_topic_cluster_target(workspace)
-    agenda_ids = _dedup_preserve(
-        [
-            _safe_text(item.get("agenda_id"))
-            for item in (workspace.get("canvas_items") or [])
-            if isinstance(item, dict) and _safe_text(item.get("agenda_id"))
-        ],
-        limit=100,
-    )
     changed = 0
-    for agenda_id in agenda_ids:
-        top_level_items = _canvas_direct_child_items(workspace, agenda_id)
-        if len(top_level_items) <= target:
-            continue
-        candidate_items = [
-            item
-            for item in top_level_items
-            if _is_canvas_clusterable_item(item)
-            and not bool(item.get("parent_topic_locked"))
-        ]
-        topic_items = _canvas_topic_nodes_for_agenda(workspace, agenda_id)
-        if len(candidate_items) < 2:
-            continue
-        result = _compute_canvas_topic_clustering_result(
-            workspace,
-            agenda_id,
-            top_level_items,
-            candidate_items,
-            topic_items,
+    for _ in range(CANVAS_TOPIC_CLUSTER_MAX_PASSES_PER_JOB):
+        pass_changed = 0
+        agenda_ids = _dedup_preserve(
+            [
+                _safe_text(item.get("agenda_id"))
+                for item in (workspace.get("canvas_items") or [])
+                if isinstance(item, dict) and _safe_text(item.get("agenda_id"))
+            ],
+            limit=100,
         )
-        if not result:
-            continue
-        changed += _apply_canvas_topic_clustering_result(workspace, agenda_id, result)
+        for agenda_id in agenda_ids:
+            top_level_items = _canvas_direct_child_items(workspace, agenda_id)
+            if len(top_level_items) <= target:
+                continue
+            candidate_items = [
+                item
+                for item in top_level_items
+                if _is_canvas_clusterable_item(item)
+                and not bool(item.get("parent_topic_locked"))
+            ]
+            topic_items = _canvas_topic_nodes_for_agenda(workspace, agenda_id)
+            if len(candidate_items) < 1:
+                continue
+            if len(candidate_items) < 2 and not topic_items:
+                continue
+            result = _compute_canvas_topic_clustering_result(
+                workspace,
+                agenda_id,
+                top_level_items,
+                candidate_items,
+                topic_items,
+            )
+            if not result:
+                continue
+            pass_changed += _apply_canvas_topic_clustering_result(workspace, agenda_id, result)
+        changed += pass_changed
+        if pass_changed <= 0:
+            break
     return {"changed": changed, "target": target}
 
 
