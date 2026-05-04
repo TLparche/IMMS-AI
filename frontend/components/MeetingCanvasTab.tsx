@@ -950,10 +950,41 @@ function canvasItemTone(kind: ComposerTool) {
   };
 }
 
-function estimateCanvasItemNodeHeight(title: string, body: string) {
-  const titleLines = Math.max(1, Math.ceil(Math.max(title.length, 1) / 18));
-  const bodyLines = Math.max(2, Math.ceil(Math.max(body.length, 1) / 24));
-  return 150 + (titleLines - 1) * 16 + (bodyLines - 1) * 18;
+const CANVAS_ITEM_NODE_WIDTH = 260;
+const CANVAS_TOPIC_CHILD_GAP_X = 28;
+const CANVAS_TOPIC_CHILD_GAP_Y = 18;
+const CANVAS_TOP_LEVEL_GAP_Y = 24;
+const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 48;
+const CANVAS_AGENDA_BLOCK_GAP_X = 640;
+const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
+
+function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
+  const titleLines = estimateWrappedLines(item.ai_pending ? "AI 정리 중" : item.title || "새 노드", 17);
+  const bodyLines = item.ai_pending
+    ? 3
+    : Math.max(2, estimateWrappedLines(item.body || "내용을 입력해 주세요.", 24));
+  const keywordCount = item.ai_pending ? 3 : Math.min(3, (item.keywords || []).filter(Boolean).length);
+  const keywordRows = keywordCount > 0 ? Math.ceil(keywordCount / 3) : 0;
+  const hasTopicToggle = isTopicCanvasItem(item) && getTopicChildCount(item) > 0;
+  const headerHeight = hasTopicToggle && item.agenda_id ? 58 : 30;
+  const keywordsHeight = keywordRows > 0 ? 12 + keywordRows * 26 + Math.max(0, keywordRows - 1) * 8 : 0;
+  const pointHeight = item.point_id ? 24 : 0;
+
+  return (
+    8 +
+    32 +
+    headerHeight +
+    16 +
+    titleLines * 28 +
+    16 +
+    24 +
+    14 +
+    4 +
+    bodyLines * 24 +
+    keywordsHeight +
+    pointHeight +
+    12
+  );
 }
 
 const CANVAS_ITEM_KEYWORD_STOPWORDS = new Set([
@@ -3655,16 +3686,8 @@ export default function MeetingCanvasTab({
         agenda.keywords.length,
       ),
     );
-    const positions = buildGridPositions(agendaHeights, 370, 56, 120, 80);
-    const agendaPositionById = new Map(
-      agendaModels.map((agenda, agendaIndex) => {
-        const nodeId = `agenda-${agenda.id}`;
-        return [
-          agenda.id,
-          nodePositions.ideation?.[nodeId] || positions[agendaIndex],
-        ] as const;
-      }),
-    );
+    const canvasItemById = new Map(canvasItems.map((item) => [item.id, item]));
+    const canvasItemHeights = new Map(canvasItems.map((item) => [item.id, estimateCanvasItemNodeHeight(item)]));
     const topicById = new Map(canvasItems.filter(isTopicCanvasItem).map((item) => [item.id, item]));
     const childIdsByTopic = new Map<string, string[]>();
     canvasItems.forEach((item) => {
@@ -3684,35 +3707,98 @@ export default function MeetingCanvasTab({
       const parentTopic = topicById.get(item.parent_topic_id);
       return Boolean(parentTopic && !parentTopic.topic_collapsed);
     });
+
+    const getAgendaTopLevelItems = (agendaId: string) =>
+      canvasItems.filter((item) => item.agenda_id === agendaId && !item.parent_topic_id);
+
+    const getTopicChildItems = (topicId: string) =>
+      (childIdsByTopic.get(topicId) || [])
+        .map((childId) => canvasItemById.get(childId))
+        .filter((item): item is CanvasItemViewModel => Boolean(item));
+
+    const estimateChildStackHeight = (topic: CanvasItemViewModel) => {
+      if (topic.topic_collapsed) return 0;
+
+      const childItems = getTopicChildItems(topic.id);
+      if (childItems.length === 0) return 0;
+
+      return childItems.reduce((sum, child, childIndex) => {
+        const gap = childIndex === 0 ? 0 : CANVAS_TOPIC_CHILD_GAP_Y;
+        return sum + gap + (canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child));
+      }, 0);
+    };
+
+    const agendaBlockHeights = agendaModels.map((agenda, agendaIndex) => {
+      const topLevelItems = getAgendaTopLevelItems(agenda.id);
+      if (topLevelItems.length === 0) return agendaHeights[agendaIndex];
+
+      const itemStackHeight = topLevelItems.reduce((sum, item, itemIndex) => {
+        const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
+        const childStackHeight = isTopicCanvasItem(item) ? estimateChildStackHeight(item) : 0;
+        const rowHeight = Math.max(itemHeight, childStackHeight);
+        const gap = itemIndex === 0 ? 0 : CANVAS_TOP_LEVEL_GAP_Y;
+        return sum + gap + rowHeight;
+      }, 0);
+
+      return agendaHeights[agendaIndex] + CANVAS_AGENDA_TO_ITEMS_GAP_Y + itemStackHeight;
+    });
+    const positions = buildGridPositions(
+      agendaBlockHeights,
+      CANVAS_AGENDA_BLOCK_GAP_X,
+      CANVAS_AGENDA_BLOCK_GAP_Y,
+      120,
+      80,
+    );
+    const agendaPositionById = new Map(
+      agendaModels.map((agenda, agendaIndex) => {
+        const nodeId = `agenda-${agenda.id}`;
+        return [
+          agenda.id,
+          nodePositions.ideation?.[nodeId] || positions[agendaIndex],
+        ] as const;
+      }),
+    );
     const computedCanvasPositions = new Map<string, { x: number; y: number }>();
     agendaModels.forEach((agenda, agendaIndex) => {
       const agendaPosition = agendaPositionById.get(agenda.id) || positions[agendaIndex];
-      const topLevelItems = canvasItems.filter(
-        (item) => item.agenda_id === agenda.id && !item.parent_topic_id,
-      );
-      topLevelItems.forEach((item, topIndex) => {
+      const topLevelItems = getAgendaTopLevelItems(agenda.id);
+      let nextTopY = agendaPosition.y + agendaHeights[agendaIndex] + CANVAS_AGENDA_TO_ITEMS_GAP_Y;
+
+      topLevelItems.forEach((item) => {
         const nodeId = `canvas-item-${item.id}`;
         const savedPosition =
           nodePositions.ideation?.[nodeId] ||
           pendingNodePlacementsRef.current[nodeId] ||
           (typeof item.x === "number" && typeof item.y === "number" ? { x: item.x, y: item.y } : undefined);
+        const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
         const topPosition =
           item.manual_position && savedPosition
             ? savedPosition
             : {
                 x: agendaPosition.x + 20,
-                y: agendaPosition.y + agendaHeights[agendaIndex] + 86 + topIndex * 224,
+                y: nextTopY,
               };
         computedCanvasPositions.set(item.id, topPosition);
 
-        if (!isTopicCanvasItem(item)) return;
-        const childIds = childIdsByTopic.get(item.id) || [];
-        childIds.forEach((childId, childIndex) => {
-          computedCanvasPositions.set(childId, {
-            x: topPosition.x + 320,
-            y: topPosition.y + childIndex * 178,
+        let childStackHeight = 0;
+        if (isTopicCanvasItem(item) && !item.topic_collapsed) {
+          const childItems = getTopicChildItems(item.id);
+          let nextChildY = topPosition.y;
+
+          childItems.forEach((child, childIndex) => {
+            if (childIndex > 0) nextChildY += CANVAS_TOPIC_CHILD_GAP_Y;
+            computedCanvasPositions.set(child.id, {
+              x: topPosition.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X,
+              y: nextChildY,
+            });
+            nextChildY += canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child);
           });
-        });
+
+          childStackHeight = nextChildY - topPosition.y;
+        }
+
+        const rowHeight = Math.max(itemHeight, childStackHeight);
+        nextTopY = Math.max(nextTopY, topPosition.y + rowHeight + CANVAS_TOP_LEVEL_GAP_Y);
       });
     });
 
@@ -3792,8 +3878,8 @@ export default function MeetingCanvasTab({
             targetPosition: Position.Top,
             className: "rounded-[24px] border shadow-[0_16px_36px_rgba(148,163,184,0.16)]",
             style: {
-              width: 260,
-              minHeight: estimateCanvasItemNodeHeight(item.title, item.body),
+              width: CANVAS_ITEM_NODE_WIDTH,
+              minHeight: estimateCanvasItemNodeHeight(item),
               borderRadius: 24,
               padding: 0,
             },
