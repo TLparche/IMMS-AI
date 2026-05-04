@@ -238,6 +238,7 @@ export async function startCanvasIdeaAssimilationWorkspace(payload: {
   warning?: string;
   pending_item_id?: string;
   target_count?: number;
+  target_signature?: string;
   workspace?: CanvasWorkspaceStateResponse;
 }> {
   return requestJson("/api/canvas/idea-assimilation-workspace/start", {
@@ -260,6 +261,7 @@ export async function getCanvasIdeaAssimilationWorkspaceJob(
   warning?: string;
   pending_item_id?: string;
   target_count?: number;
+  target_signature?: string;
   workspace?: CanvasWorkspaceStateResponse;
 }> {
   const params = new URLSearchParams({ meeting_id: meetingId });

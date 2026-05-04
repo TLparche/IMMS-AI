@@ -255,6 +255,9 @@ export interface CanvasWorkspaceItem {
   refined_utterances?: CanvasRefinedUtterance[];
   evidence_utterance_ids?: string[];
   ignored_utterance_ids?: string[];
+  merged_children?: CanvasWorkspaceItem[];
+  compacted_from_ids?: string[];
+  compaction_level?: number;
   ai_generated?: boolean;
   user_edited?: boolean;
   ai_pending?: boolean;
@@ -365,6 +368,8 @@ export interface CanvasWorkspaceStateResponse {
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
   node_positions?: CanvasNodePositionsByStage;
+  idea_create_stack?: number;
+  idea_processed_utterance_ids?: string[];
   imported_state?: MeetingState | null;
   saved_at?: string;
 }

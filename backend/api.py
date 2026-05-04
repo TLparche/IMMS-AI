@@ -39,6 +39,9 @@ SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
 LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
+CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
+CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
+CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
 IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
@@ -212,6 +215,14 @@ def _safe_text(raw: Any, fallback: str = "") -> str:
     return s if s else fallback
 
 
+def _safe_nonnegative_int(raw: Any, fallback: int = 0) -> int:
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, value)
+
+
 def _strip_leading_timestamp(raw: Any) -> str:
     return LEADING_TIMESTAMP_RE.sub("", _safe_text(raw)).strip()
 
@@ -380,6 +391,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
             for item in (workspace.get("idea_processed_utterance_ids") or [])
@@ -409,6 +421,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
         "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(shared_state.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
             for item in (shared_state.get("idea_processed_utterance_ids") or [])
@@ -565,6 +578,50 @@ def _normalize_refined_utterances(
     return normalized
 
 
+def _normalize_canvas_merged_children(raw_children: Any, limit: int = 80, depth: int = 0) -> list[dict[str, Any]]:
+    if depth >= 4:
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in raw_children or []:
+        if not isinstance(raw, dict):
+            continue
+        child_id = _safe_text(raw.get("id"))
+        title = _safe_text(raw.get("title"))
+        body = _safe_text(raw.get("body") or raw.get("summary"))
+        if not child_id and not (title or body):
+            continue
+        child = {
+            "id": child_id,
+            "agenda_id": _safe_text(raw.get("agenda_id")),
+            "point_id": _safe_text(raw.get("point_id")),
+            "kind": _safe_text(raw.get("kind"), "note"),
+            "title": title,
+            "body": body,
+            "keywords": [_safe_text(keyword) for keyword in (raw.get("keywords") or []) if _safe_text(keyword)][:8],
+            "key_evidence": [_safe_text(value) for value in (raw.get("key_evidence") or []) if _safe_text(value)][:8],
+            "refined_utterances": _normalize_refined_utterances(raw.get("refined_utterances") or [], limit=40),
+            "evidence_utterance_ids": [
+                _safe_text(value) for value in (raw.get("evidence_utterance_ids") or []) if _safe_text(value)
+            ][:400],
+            "ignored_utterance_ids": [
+                _safe_text(value) for value in (raw.get("ignored_utterance_ids") or []) if _safe_text(value)
+            ][:400],
+            "merged_children": _normalize_canvas_merged_children(raw.get("merged_children") or [], limit=40, depth=depth + 1),
+            "compacted_from_ids": [
+                _safe_text(value) for value in (raw.get("compacted_from_ids") or []) if _safe_text(value)
+            ][:400],
+            "compaction_level": _safe_nonnegative_int(raw.get("compaction_level")),
+            "ai_generated": bool(raw.get("ai_generated")),
+            "user_edited": bool(raw.get("user_edited")),
+        }
+        normalized.append(child)
+        if len(normalized) >= limit:
+            break
+
+    return normalized
+
+
 def _normalize_canvas_workspace_items(
     items: list[CanvasWorkspaceCanvasItemInput] | None,
 ) -> list[dict[str, Any]]:
@@ -587,6 +644,9 @@ def _normalize_canvas_workspace_items(
             "refined_utterances": _normalize_refined_utterances(item.refined_utterances),
             "evidence_utterance_ids": [_safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)][:400],
             "ignored_utterance_ids": [_safe_text(value) for value in (item.ignored_utterance_ids or []) if _safe_text(value)][:400],
+            "merged_children": _normalize_canvas_merged_children(item.merged_children),
+            "compacted_from_ids": [_safe_text(value) for value in (item.compacted_from_ids or []) if _safe_text(value)][:400],
+            "compaction_level": _safe_nonnegative_int(item.compaction_level),
             "ai_generated": bool(item.ai_generated),
             "user_edited": bool(item.user_edited),
             "ai_pending": bool(getattr(item, "ai_pending", False)),
@@ -705,6 +765,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(source.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
             for item in (source.get("idea_processed_utterance_ids") or [])
@@ -731,6 +792,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
             for item in (workspace.get("idea_processed_utterance_ids") or [])
@@ -938,6 +1000,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     workspace.setdefault("problem_groups", [])
     workspace.setdefault("solution_topics", [])
     workspace.setdefault("node_positions", {})
+    workspace.setdefault("idea_create_stack", 0)
     workspace.setdefault("idea_processed_utterance_ids", [])
     workspace.setdefault("imported_state", None)
     workspace.setdefault("saved_at", "")
@@ -1667,6 +1730,9 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
     evidence_utterance_ids: list[str] = Field(default_factory=list)
     ignored_utterance_ids: list[str] = Field(default_factory=list)
+    merged_children: list[dict[str, Any]] = Field(default_factory=list)
+    compacted_from_ids: list[str] = Field(default_factory=list)
+    compaction_level: int = 0
     ai_generated: bool = False
     user_edited: bool = False
     ai_pending: bool = False
@@ -2427,7 +2493,7 @@ def _compute_idea_assimilation_result(payload: CanvasIdeaAssimilationInput) -> d
                 prompt=_build_idea_assimilation_prompt(payload),
                 stage="canvas_idea_assimilation",
                 temperature=0.2,
-                max_tokens=1200,
+                max_tokens=2200,
             )
             parsed_updates = parsed.get("updates") if isinstance(parsed, dict) else None
             normalized_updates: list[dict[str, Any]] = []
@@ -6339,6 +6405,9 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
         response["workspace"] = _canvas_workspace_response(workspace)
     elif isinstance(job.get("workspace"), dict):
         response["workspace"] = _canvas_workspace_response(job["workspace"])
+    target_signature = _safe_text(job.get("target_signature"))
+    if target_signature:
+        response["target_signature"] = target_signature
     return response
 
 
@@ -6419,6 +6488,317 @@ def _idea_update_merge_allowed(item: dict[str, Any], update: dict[str, Any]) -> 
     return False
 
 
+def _canvas_idea_item_text(item: dict[str, Any]) -> str:
+    child_text = " ".join(
+        _canvas_idea_item_text(child)
+        for child in (item.get("merged_children") or [])[:12]
+        if isinstance(child, dict)
+    )
+    refined_text = " ".join(
+        _safe_text(row.get("text"))
+        for row in (item.get("refined_utterances") or [])[:12]
+        if isinstance(row, dict)
+    )
+    return " ".join(
+        [
+            _safe_text(item.get("title")),
+            _safe_text(item.get("body")),
+            " ".join(_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)),
+            " ".join(_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)),
+            refined_text,
+            child_text,
+        ]
+    )
+
+
+def _canvas_idea_leaf_ids(item: dict[str, Any]) -> list[str]:
+    explicit = [_safe_text(value) for value in (item.get("compacted_from_ids") or []) if _safe_text(value)]
+    if explicit:
+        return explicit
+    child_ids: list[str] = []
+    for child in item.get("merged_children") or []:
+        if isinstance(child, dict):
+            child_ids.extend(_canvas_idea_leaf_ids(child))
+    return _dedup_preserve(child_ids or [_safe_text(item.get("id"))], limit=400)
+
+
+def _canvas_idea_source_count(item: dict[str, Any]) -> int:
+    return max(1, len(_canvas_idea_leaf_ids(item)))
+
+
+def _canvas_idea_child_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _safe_text(item.get("id")),
+        "agenda_id": _safe_text(item.get("agenda_id")),
+        "point_id": _safe_text(item.get("point_id")),
+        "kind": _safe_text(item.get("kind"), "note"),
+        "title": _safe_text(item.get("title")),
+        "body": _safe_text(item.get("body")),
+        "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+        "key_evidence": [_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)][:8],
+        "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=80),
+        "evidence_utterance_ids": [
+            _safe_text(value) for value in (item.get("evidence_utterance_ids") or []) if _safe_text(value)
+        ][:400],
+        "ignored_utterance_ids": [
+            _safe_text(value) for value in (item.get("ignored_utterance_ids") or []) if _safe_text(value)
+        ][:400],
+        "merged_children": _normalize_canvas_merged_children(item.get("merged_children") or []),
+        "compacted_from_ids": _canvas_idea_leaf_ids(item),
+        "compaction_level": _safe_nonnegative_int(item.get("compaction_level")),
+        "ai_generated": bool(item.get("ai_generated")),
+        "user_edited": bool(item.get("user_edited")),
+    }
+
+
+def _canvas_idea_visible_items(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+        and _safe_text(item.get("id"))
+        and bool(item.get("ai_generated"))
+        and not bool(item.get("ai_pending"))
+        and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
+    ]
+
+
+def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
+    stored = _safe_nonnegative_int(workspace.get("idea_create_stack"))
+    if stored > 0:
+        return stored
+    return sum(_canvas_idea_source_count(item) for item in _canvas_idea_visible_items(workspace))
+
+
+def _canvas_idea_visible_target(workspace: dict[str, Any]) -> int:
+    return 3 + (_canvas_idea_create_stack_value(workspace) // 2)
+
+
+def _canvas_idea_compaction_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_text = _canvas_idea_item_text(left)
+    right_text = _canvas_idea_item_text(right)
+    score = _text_similarity(left_text, right_text)
+    left_keywords = set(_normalize_idea_keywords(left.get("keywords") or [], left_text, 8))
+    right_keywords = set(_normalize_idea_keywords(right.get("keywords") or [], right_text, 8))
+    if left_keywords and right_keywords:
+        score = max(score, len(left_keywords & right_keywords) / max(1, len(left_keywords | right_keywords)))
+    if _safe_text(left.get("agenda_id")) and _safe_text(left.get("agenda_id")) == _safe_text(right.get("agenda_id")):
+        score += 0.05
+    return score
+
+
+def _pick_canvas_idea_compaction_pair(items: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    candidates = [item for item in items if not bool(item.get("user_edited"))]
+    if len(candidates) < 2:
+        return None
+
+    best_pair: tuple[dict[str, Any], dict[str, Any]] | None = None
+    best_score = -1.0
+    for left_index, left in enumerate(candidates):
+        for right in candidates[left_index + 1 :]:
+            score = _canvas_idea_compaction_similarity(left, right)
+            if score > best_score:
+                best_score = score
+                best_pair = (left, right)
+    return best_pair
+
+
+def _build_idea_compaction_prompt(left: dict[str, Any], right: dict[str, Any]) -> str:
+    ideas = []
+    for item in (left, right):
+        ideas.append(
+            {
+                "id": _safe_text(item.get("id")),
+                "title": _safe_text(item.get("title")),
+                "content": _safe_text(item.get("body")),
+                "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+                "key_evidence": [_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)][:8],
+                "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=8),
+                "source_node_count": _canvas_idea_source_count(item),
+            }
+        )
+
+    return (
+        "아래 두 개의 아이디어 노드는 의미가 유사해서 canvas에서 하나의 상위 아이디어 노드로 압축하려고 한다.\n"
+        "원본 노드는 시스템이 하위 근거로 보존하므로, 너는 상위 노드에 표시할 title/content/keywords/keyEvidence만 재작성한다.\n"
+        "규칙:\n"
+        "- 두 노드의 공통 의미를 중심으로 압축한다.\n"
+        "- content는 1~2줄, 문장형 설명보다 핵심 대상 + 방향/문제/조건의 압축 구문을 우선한다.\n"
+        "- keywords는 3~6개, 일반어/메타어를 제외하고 의미 중심 명사구로 쓴다.\n"
+        "- keyEvidence는 상위 노드를 이해하는 데 필요한 핵심 근거만 최대 4개로 쓴다.\n"
+        "- 없는 내용을 만들지 말고, 두 노드에 있는 내용만 사용한다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{\"title\":\"...\",\"summary\":\"...\",\"keywords\":[\"...\"],\"keyEvidence\":[\"...\"]}\n\n"
+        f"nodes={json.dumps(ideas, ensure_ascii=False)}"
+    )
+
+
+def _compute_idea_compaction_update(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    fallback_ids = _dedup_preserve(
+        [
+            _safe_text(value)
+            for item in (left, right)
+            for value in (item.get("evidence_utterance_ids") or [])
+            if _safe_text(value)
+        ],
+        limit=400,
+    )
+    client, llm_ready, _ = _ensure_llm_ready(RT)
+    if not llm_ready:
+        return None
+
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_idea_compaction_prompt(left, right),
+            stage="canvas_idea_compaction",
+            temperature=0.18,
+            max_tokens=900,
+        )
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_idea_compaction", payload=str(exc), meta={})
+        return None
+
+    raw = parsed.get("update") if isinstance(parsed, dict) and isinstance(parsed.get("update"), dict) else parsed
+    if not isinstance(raw, dict):
+        return None
+    update = _normalize_idea_assimilation_update(
+        {
+            **raw,
+            "action": "create",
+            "evidenceUtteranceIds": raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or fallback_ids,
+        },
+        fallback_ids,
+    )
+    return update
+
+
+def _apply_canvas_idea_compaction_pair(
+    workspace: dict[str, Any],
+    left: dict[str, Any],
+    right: dict[str, Any],
+    update: dict[str, Any],
+) -> None:
+    left_id = _safe_text(left.get("id"))
+    right_id = _safe_text(right.get("id"))
+    if not left_id or not right_id or left_id == right_id:
+        return
+
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    item_indices = {_safe_text(item.get("id")): index for index, item in enumerate(canvas_items) if _safe_text(item.get("id"))}
+    if item_indices.get(right_id, 10**9) < item_indices.get(left_id, 10**9):
+        left, right = right, left
+        left_id, right_id = right_id, left_id
+
+    combined_refined = _normalize_refined_utterances(
+        list(update.get("refinedUtterances") or [])
+        + list(left.get("refined_utterances") or [])
+        + list(right.get("refined_utterances") or []),
+        limit=120,
+    )
+    combined_evidence_ids = _dedup_preserve(
+        [_safe_text(value) for value in (left.get("evidence_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (right.get("evidence_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (update.get("evidenceUtteranceIds") or []) if _safe_text(value)],
+        limit=400,
+    )
+    combined_ignored_ids = _dedup_preserve(
+        [_safe_text(value) for value in (left.get("ignored_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (right.get("ignored_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (update.get("ignoredUtteranceIds") or []) if _safe_text(value)],
+        limit=400,
+    )
+    combined_children = _normalize_canvas_merged_children(
+        [_canvas_idea_child_snapshot(left), _canvas_idea_child_snapshot(right)],
+        limit=80,
+    )
+    compacted_from_ids = _dedup_preserve(_canvas_idea_leaf_ids(left) + _canvas_idea_leaf_ids(right), limit=400)
+    parent = {
+        **left,
+        "title": _safe_text(update.get("title")) or _safe_text(left.get("title")),
+        "body": _safe_text(update.get("summary")) or _safe_text(left.get("body")),
+        "keywords": _normalize_idea_keywords(update.get("keywords") or [], f"{update.get('title') or ''} {update.get('summary') or ''}", 8)
+        or _dedup_preserve(
+            [_safe_text(value) for value in (left.get("keywords") or []) if _safe_text(value)]
+            + [_safe_text(value) for value in (right.get("keywords") or []) if _safe_text(value)],
+            limit=8,
+        ),
+        "key_evidence": _dedup_preserve(
+            [_safe_text(value) for value in (update.get("keyEvidence") or []) if _safe_text(value)]
+            + [_safe_text(value) for value in (left.get("key_evidence") or []) if _safe_text(value)]
+            + [_safe_text(value) for value in (right.get("key_evidence") or []) if _safe_text(value)],
+            limit=8,
+        ),
+        "refined_utterances": combined_refined,
+        "evidence_utterance_ids": combined_evidence_ids,
+        "ignored_utterance_ids": combined_ignored_ids,
+        "merged_children": combined_children,
+        "compacted_from_ids": compacted_from_ids,
+        "compaction_level": max(
+            _safe_nonnegative_int(left.get("compaction_level")),
+            _safe_nonnegative_int(right.get("compaction_level")),
+        )
+        + 1,
+        "ai_generated": True,
+        "user_edited": False,
+        "ai_pending": False,
+    }
+
+    positions = copy.deepcopy(workspace.get("node_positions") or {})
+    ideation_positions = dict(positions.get("ideation") or {})
+    left_key = f"canvas-item-{left_id}"
+    right_key = f"canvas-item-{right_id}"
+    left_position = ideation_positions.get(left_key) if isinstance(ideation_positions.get(left_key), dict) else {}
+    right_position = ideation_positions.get(right_key) if isinstance(ideation_positions.get(right_key), dict) else {}
+    left_x = float(left_position.get("x") if left_position.get("x") is not None else left.get("x") or 0)
+    left_y = float(left_position.get("y") if left_position.get("y") is not None else left.get("y") or 0)
+    right_x = float(right_position.get("x") if right_position.get("x") is not None else right.get("x") or left_x)
+    right_y = float(right_position.get("y") if right_position.get("y") is not None else right.get("y") or left_y)
+    parent_x = (left_x + right_x) / 2
+    parent_y = (left_y + right_y) / 2
+    parent["x"] = parent_x
+    parent["y"] = parent_y
+    ideation_positions[left_key] = {"x": parent_x, "y": parent_y}
+    ideation_positions.pop(right_key, None)
+    positions["ideation"] = ideation_positions
+
+    workspace["canvas_items"] = [
+        parent if _safe_text(item.get("id")) == left_id else item
+        for item in canvas_items
+        if _safe_text(item.get("id")) != right_id
+    ]
+    workspace["node_positions"] = positions
+
+
+def _maybe_compact_canvas_idea_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
+    visible_items = _canvas_idea_visible_items(workspace)
+    target = _canvas_idea_visible_target(workspace)
+    if len(visible_items) < CANVAS_IDEA_COMPACTION_MIN_VISIBLE or len(visible_items) <= target:
+        return {"merged": 0, "target": target, "visible": len(visible_items)}
+
+    merged = 0
+    while merged < CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB:
+        visible_items = _canvas_idea_visible_items(workspace)
+        if len(visible_items) <= target:
+            break
+        pair = _pick_canvas_idea_compaction_pair(visible_items)
+        if not pair:
+            break
+        update = _compute_idea_compaction_update(pair[0], pair[1])
+        if not update:
+            break
+        _apply_canvas_idea_compaction_pair(workspace, pair[0], pair[1], update)
+        merged += 1
+
+    return {"merged": merged, "target": target, "visible": len(_canvas_idea_visible_items(workspace))}
+
+
 def _finalize_canvas_idea_workspace_job(
     meeting_id: str,
     job_id: str,
@@ -6440,6 +6820,9 @@ def _finalize_canvas_idea_workspace_job(
         pending_item = next((item for item in canvas_items if _safe_text(item.get("id")) == pending_item_id), None)
         base_items = [item for item in canvas_items if _safe_text(item.get("id")) != pending_item_id]
         target_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
+        starting_create_stack = _canvas_idea_create_stack_value(latest_workspace)
+        created_node_count = 0
+        compaction_result: dict[str, Any] = {"merged": 0, "target": _canvas_idea_visible_target(latest_workspace)}
 
         if not bool(result.get("used_llm")):
             positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
@@ -6458,6 +6841,7 @@ def _finalize_canvas_idea_workspace_job(
                 workspace=copy.deepcopy(latest_workspace),
                 used_llm=False,
                 warning=warning,
+                failed_at_epoch=time.time(),
             )
             return
 
@@ -6526,6 +6910,9 @@ def _finalize_canvas_idea_workspace_job(
                             "refined_utterances": [],
                             "evidence_utterance_ids": [],
                             "ignored_utterance_ids": [],
+                            "merged_children": [],
+                            "compacted_from_ids": [],
+                            "compaction_level": 0,
                             "ai_generated": True,
                             "user_edited": False,
                             "ai_pending": False,
@@ -6541,6 +6928,7 @@ def _finalize_canvas_idea_workspace_job(
                     latest_workspace["node_positions"] = positions
                 next_items.insert(0, created_item)
 
+            created_node_count = len(create_updates)
             if not create_updates and isinstance(pending_item, dict):
                 positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
                 ideation_positions = dict(positions.get("ideation") or {})
@@ -6553,13 +6941,24 @@ def _finalize_canvas_idea_workspace_job(
                 list(latest_workspace.get("idea_processed_utterance_ids") or []) + target_ids,
                 limit=1000,
             )
+            if created_node_count > 0:
+                latest_workspace["idea_create_stack"] = starting_create_stack + created_node_count
+
+        if created_node_count > 0:
+            compaction_result = _maybe_compact_canvas_idea_nodes(latest_workspace)
 
         _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        merged_count = _safe_nonnegative_int(compaction_result.get("merged"))
+        detail = (
+            f"AI 아이디어 정리 완료 · {merged_count}개 노드 압축"
+            if merged_count > 0
+            else "AI 아이디어 정리 완료"
+        )
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
             status="completed",
-            detail="AI 아이디어 정리 완료",
+            detail=detail,
             workspace=copy.deepcopy(latest_workspace),
             used_llm=bool(result.get("used_llm")),
             warning=_safe_text(result.get("warning")),
@@ -6584,6 +6983,7 @@ def _finalize_canvas_idea_workspace_job(
             detail=f"AI 아이디어 정리 실패: {exc}",
             workspace=copy.deepcopy(latest_workspace),
             warning=_safe_text(exc),
+            failed_at_epoch=time.time(),
         )
 
 
@@ -6613,22 +7013,92 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         _now_ts(),
     )
     processed_ids = _canvas_idea_processed_ids(workspace)
+    now_epoch = time.time()
+    cooling_failed_ids: set[str] = set()
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        for job in meeting_jobs.values():
+            if not isinstance(job, dict) or _safe_text(job.get("status")) != "error":
+                continue
+            failed_at = float(job.get("failed_at_epoch") or 0)
+            if now_epoch - failed_at >= CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS:
+                continue
+            cooling_failed_ids.update(
+                _safe_text(item)
+                for item in _safe_text(job.get("target_signature")).split("|")
+                if _safe_text(item)
+            )
     target_rows = [
         item
         for item in (payload.target_utterances or [])
-        if _safe_text(item.id) and _safe_text(item.text) and _safe_text(item.id) not in processed_ids
+        if _safe_text(item.id)
+        and _safe_text(item.text)
+        and _safe_text(item.id) not in processed_ids
+        and _safe_text(item.id) not in cooling_failed_ids
     ]
     target_text_length = sum(len(_strip_leading_timestamp(_safe_text(item.text))) for item in target_rows)
     if not target_rows or target_text_length < 40:
+        cooling_count = len(cooling_failed_ids)
+        wait_seconds = 0
+        if cooling_count > 0:
+            with RT.lock:
+                active_failed_at = [
+                    float(job.get("failed_at_epoch") or 0)
+                    for job in RT.canvas_idea_jobs_by_meeting.get(normalized_meeting_id, {}).values()
+                    if isinstance(job, dict)
+                    and _safe_text(job.get("status")) == "error"
+                    and now_epoch - float(job.get("failed_at_epoch") or 0) < CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS
+                ]
+            if active_failed_at:
+                wait_seconds = max(
+                    1,
+                    int(CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS - (now_epoch - max(active_failed_at))),
+                )
         job = {
             "job_id": "",
             "meeting_id": normalized_meeting_id,
             "status": "idle",
-            "detail": f"아이디어 정리 대기 중 · {len(target_rows)}개 발화",
+            "detail": (
+                f"이전 LLM 실패 발화 재요청 대기 중 · {wait_seconds}초"
+                if wait_seconds > 0 and not target_rows
+                else f"아이디어 정리 대기 중 · {len(target_rows)}개 발화"
+            ),
             "target_count": len(target_rows),
             "updated_at": _now_ts(),
         }
         return _canvas_idea_job_response(job, workspace)
+
+    target_signature = "|".join([_safe_text(item.id) for item in target_rows if _safe_text(item.id)])
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        failed_same_target_jobs = [
+            copy.deepcopy(job)
+            for job in meeting_jobs.values()
+            if isinstance(job, dict)
+            and _safe_text(job.get("status")) == "error"
+            and _safe_text(job.get("target_signature")) == target_signature
+        ]
+    if failed_same_target_jobs:
+        latest_failed_job = max(
+            failed_same_target_jobs,
+            key=lambda job: float(job.get("failed_at_epoch") or 0),
+        )
+        retry_after = CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS - (
+            now_epoch - float(latest_failed_job.get("failed_at_epoch") or 0)
+        )
+        if retry_after > 0:
+            retry_seconds = max(1, int(retry_after))
+            job = {
+                "job_id": _safe_text(latest_failed_job.get("job_id")),
+                "meeting_id": normalized_meeting_id,
+                "status": "error",
+                "detail": f"이전 LLM 실패로 같은 발화 재요청 대기 중 · {retry_seconds}초",
+                "warning": _safe_text(latest_failed_job.get("warning") or latest_failed_job.get("detail")),
+                "target_count": len(target_rows),
+                "target_signature": target_signature,
+                "updated_at": _now_ts(),
+            }
+            return _canvas_idea_job_response(job, workspace)
 
     job_id = uuid4().hex
     pending_item_id = f"ai-idea-pending-{job_id[:10]}"
@@ -6652,6 +7122,9 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         "refined_utterances": [],
         "evidence_utterance_ids": [_safe_text(item.id) for item in target_rows if _safe_text(item.id)][:400],
         "ignored_utterance_ids": [],
+        "merged_children": [],
+        "compacted_from_ids": [],
+        "compaction_level": 0,
         "ai_generated": True,
         "user_edited": False,
         "ai_pending": True,
@@ -6685,6 +7158,7 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         detail="AI가 키워드와 content를 생성 중",
         pending_item_id=pending_item_id,
         target_count=len(target_rows),
+        target_signature=target_signature,
         created_at=_now_ts(),
         workspace=copy.deepcopy(workspace),
     )

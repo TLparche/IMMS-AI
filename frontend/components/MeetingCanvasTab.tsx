@@ -72,6 +72,7 @@ type ProblemGroupStatus = "draft" | "review" | "final";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
+const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
 
 type PersonalNote = {
   id: string;
@@ -131,6 +132,7 @@ type CanvasIdeaAssimilationJobSnapshot = {
   warning?: string;
   pending_item_id?: string;
   target_count?: number;
+  target_signature?: string;
 };
 
 function logCanvasIdeaAssimilationJob(
@@ -161,6 +163,7 @@ function logCanvasIdeaAssimilationJob(
     jobId: job?.job_id || "",
     pendingItemId: job?.pending_item_id || "",
     targetCount: job?.target_count || 0,
+    targetSignature: job?.target_signature || "",
     ok: Boolean(job?.ok),
     ...extra,
   };
@@ -277,7 +280,7 @@ function splitRefinedUtteranceSentences(
   return sentenceRows.slice(0, limit);
 }
 
-function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
+function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasWorkspaceItem[] {
   return items.map((item) => ({
     id: item.id,
     agenda_id: item.agenda_id,
@@ -290,6 +293,9 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]) {
     refined_utterances: normalizeRefinedUtterances(item.refined_utterances),
     evidence_utterance_ids: (item.evidence_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
     ignored_utterance_ids: (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean),
+    merged_children: buildWorkspaceCanvasItemsPayload(item.merged_children || []),
+    compacted_from_ids: (item.compacted_from_ids || []).map((value) => value.trim()).filter(Boolean),
+    compaction_level: typeof item.compaction_level === "number" ? item.compaction_level : 0,
     ai_generated: Boolean(item.ai_generated),
     user_edited: Boolean(item.user_edited),
     ai_pending: Boolean(item.ai_pending),
@@ -1023,6 +1029,17 @@ function extractCanvasItemKeywords(title: string, body: string, limit = 5) {
     .map((entry) => entry.value);
 }
 
+function getCanvasItemMergedSourceCount(item: CanvasItemViewModel): number {
+  const explicitCount = (item.compacted_from_ids || []).filter(Boolean).length;
+  if (explicitCount > 0) return explicitCount;
+
+  const childCount = (item.merged_children || []).reduce(
+    (sum, child) => sum + getCanvasItemMergedSourceCount(child),
+    0,
+  );
+  return childCount || 1;
+}
+
 function makeCanvasItemNodeLabel(
   item: CanvasItemViewModel,
   selected: boolean,
@@ -1031,6 +1048,7 @@ function makeCanvasItemNodeLabel(
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
   const keywords = (item.keywords || []).filter(Boolean).slice(0, 3);
   const pending = Boolean(item.ai_pending);
+  const mergedSourceCount = getCanvasItemMergedSourceCount(item);
 
   return (
     <div className="min-w-0 p-1">
@@ -1042,6 +1060,11 @@ function makeCanvasItemNodeLabel(
           {linkedAgendaTitle ? (
             <span className="rounded-full bg-white/85 px-3 py-1 text-[11px] text-slate-500">
               {linkedAgendaTitle}
+            </span>
+          ) : null}
+          {mergedSourceCount > 1 ? (
+            <span className="rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white">
+              묶음 {mergedSourceCount}개
             </span>
           ) : null}
         </div>
@@ -1404,6 +1427,7 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
     const refinedUtterances = normalizeRefinedUtterances(item.refined_utterances);
     const evidenceUtteranceIds = (item.evidence_utterance_ids || []).map((value) => value.trim()).filter(Boolean);
     const ignoredUtteranceIds = (item.ignored_utterance_ids || []).map((value) => value.trim()).filter(Boolean);
+    const mergedChildren = hydrateCanvasItems(item.merged_children || []);
     return {
       ...item,
       keywords: keywords.slice(0, 8),
@@ -1411,6 +1435,9 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       refined_utterances: refinedUtterances,
       evidence_utterance_ids: evidenceUtteranceIds.slice(0, 400),
       ignored_utterance_ids: ignoredUtteranceIds.slice(0, 400),
+      merged_children: mergedChildren,
+      compacted_from_ids: (item.compacted_from_ids || []).map((value) => value.trim()).filter(Boolean).slice(0, 400),
+      compaction_level: typeof item.compaction_level === "number" ? item.compaction_level : 0,
       ai_generated: Boolean(item.ai_generated),
       user_edited: Boolean(item.user_edited),
       ai_pending: Boolean(item.ai_pending),
@@ -1770,6 +1797,7 @@ export default function MeetingCanvasTab({
   const placementFeedbackTimerRef = useRef<number | null>(null);
   const initialLayoutLogDoneRef = useRef(false);
   const processedIdeaUtteranceIdsRef = useRef<Set<string>>(new Set());
+  const failedIdeaAssimilationRef = useRef<{ signature: string; failedAt: number; detail: string } | null>(null);
   const ideaBufferStartedAtRef = useRef<number | null>(null);
   const ideaFlushTimerRef = useRef<number | null>(null);
   const ideaSilenceTimerRef = useRef<number | null>(null);
@@ -1902,6 +1930,7 @@ export default function MeetingCanvasTab({
     analysisSignatureAtImportRef.current = "";
     initialLayoutLogDoneRef.current = false;
     processedIdeaUtteranceIdsRef.current = new Set();
+    failedIdeaAssimilationRef.current = null;
     ideaBufferStartedAtRef.current = null;
     ideaAssimilationInFlightRef.current = false;
     latestSharedWorkspaceRef.current = {
@@ -2451,6 +2480,9 @@ export default function MeetingCanvasTab({
 
       const nextCanvasItems = hydrateCanvasItems(workspace.canvas_items || []);
       const nextNodePositions = workspace.node_positions || {};
+      (workspace.idea_processed_utterance_ids || []).forEach((id) => {
+        if (id) processedIdeaUtteranceIdsRef.current.add(id);
+      });
 
       setCanvasItems(nextCanvasItems);
       setNodePositions(nextNodePositions);
@@ -2501,16 +2533,55 @@ export default function MeetingCanvasTab({
         return;
       }
 
+      const previousFailure = failedIdeaAssimilationRef.current;
+      const failedRetryAfter = previousFailure
+        ? IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS - (Date.now() - previousFailure.failedAt)
+        : 0;
+      const coolingFailedIds =
+        previousFailure && failedRetryAfter > 0
+          ? new Set(previousFailure.signature.split("|").filter(Boolean))
+          : new Set<string>();
+      if (previousFailure && failedRetryAfter <= 0) {
+        failedIdeaAssimilationRef.current = null;
+      }
+
       const processedIds = processedIdeaUtteranceIdsRef.current;
-      const targetRows = normalizeTranscriptRows(transcripts)
-        .filter((row) => row.id && row.text.trim() && !processedIds.has(row.id));
+      const normalizedTranscriptRows = normalizeTranscriptRows(transcripts);
+      const skippedCoolingRows = normalizedTranscriptRows.filter(
+        (row) => row.id && row.text.trim() && !processedIds.has(row.id) && coolingFailedIds.has(row.id),
+      ).length;
+      const targetRows = normalizedTranscriptRows
+        .filter((row) => row.id && row.text.trim() && !processedIds.has(row.id) && !coolingFailedIds.has(row.id));
 
       const targetTextLength = targetRows.reduce((sum, row) => sum + stripLeadingTimestamp(row.text).length, 0);
       if (targetRows.length === 0 || (reason !== "stage-change" && reason !== "manual" && targetTextLength < 40)) {
         if (targetRows.length > 0) {
           setIdeaAssimilationStatus(`아이디어 정리 대기 중 · ${targetRows.length}개 발화`);
+        } else if (skippedCoolingRows > 0 && failedRetryAfter > 0) {
+          setIdeaAssimilationStatus(`이전 LLM 실패 발화 재요청 대기 중 · ${Math.ceil(failedRetryAfter / 1000)}초`);
         }
         return;
+      }
+
+      const targetSignature = targetRows.map((row) => row.id).join("|");
+      if (previousFailure?.signature === targetSignature) {
+        const retryAfter = IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS - (Date.now() - previousFailure.failedAt);
+        if (retryAfter > 0) {
+          const waitSeconds = Math.ceil(retryAfter / 1000);
+          console.info("[canvas idea assimilation]", {
+            label: "skip repeated failed request",
+            hasError: false,
+            errorDetail: "",
+            status: "cooldown",
+            detail: previousFailure.detail,
+            targetCount: targetRows.length,
+            waitSeconds,
+            meetingId,
+            reason,
+          });
+          setIdeaAssimilationStatus(`같은 발화 재요청 대기 중 · ${waitSeconds}초`);
+          return;
+        }
       }
 
       ideaAssimilationInFlightRef.current = true;
@@ -2554,6 +2625,13 @@ export default function MeetingCanvasTab({
 
         applyServerIdeaWorkspace(started.workspace);
         if (started.status !== "processing" || !started.job_id) {
+          if (started.status === "error") {
+            failedIdeaAssimilationRef.current = {
+              signature: targetSignature,
+              failedAt: Date.now(),
+              detail: started.detail || started.warning || "아이디어 정리 실패",
+            };
+          }
           if (started.status === "idle") {
             setIdeaAssimilationStatus(started.detail || "아이디어 정리 대기 중");
           } else {
@@ -2580,10 +2658,16 @@ export default function MeetingCanvasTab({
         logCanvasIdeaAssimilationJob("final response", finalResult, requestSnapshot);
 
         if (finalResult.status === "completed") {
+          failedIdeaAssimilationRef.current = null;
           targetRows.forEach((row) => processedIds.add(row.id));
           ideaBufferStartedAtRef.current = null;
           setIdeaAssimilationStatus(finalResult.used_llm ? "AI 아이디어 정리 반영됨" : "LLM 응답 없음");
         } else if (finalResult.status === "error") {
+          failedIdeaAssimilationRef.current = {
+            signature: targetSignature,
+            failedAt: Date.now(),
+            detail: finalResult.detail || finalResult.warning || "아이디어 정리 실패",
+          };
           setIdeaAssimilationStatus(finalResult.detail || "아이디어 정리 실패");
         } else {
           setIdeaAssimilationStatus("아이디어 정리 응답 대기 중");
@@ -2603,6 +2687,11 @@ export default function MeetingCanvasTab({
           meetingId,
           reason,
         });
+        failedIdeaAssimilationRef.current = {
+          signature: targetSignature,
+          failedAt: Date.now(),
+          detail: message,
+        };
         setIdeaAssimilationStatus(`아이디어 정리 실패: ${message}`);
       } finally {
         ideaAssimilationInFlightRef.current = false;
@@ -3880,6 +3969,7 @@ export default function MeetingCanvasTab({
       const linkedAgenda =
         agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id) || null;
       const refinedItems = normalizeRefinedUtterances(selectedCanvasItem.refined_utterances);
+      const mergedSourceCount = getCanvasItemMergedSourceCount(selectedCanvasItem);
 
       return {
         title: selectedCanvasItem.title,
@@ -3887,6 +3977,7 @@ export default function MeetingCanvasTab({
         badges: [
           toolLabel((selectedCanvasItem.kind as ComposerTool) || "note"),
           linkedAgenda?.title || "",
+          mergedSourceCount > 1 ? `하위 아이디어 ${mergedSourceCount}개` : "",
         ].filter(Boolean),
         insightLens: "",
         keywords: (selectedCanvasItem.keywords || []).slice(0, 5),
@@ -3910,6 +4001,13 @@ export default function MeetingCanvasTab({
         refinedItems: refinedItems.map((item, index) => ({
           label: item.speaker || `발화 ${index + 1}`,
           value: item.text,
+        })),
+        mergedItems: (selectedCanvasItem.merged_children || []).map((child, index) => ({
+          id: child.id || `${selectedCanvasItem.id}-merged-${index}`,
+          label: child.title || `하위 아이디어 ${index + 1}`,
+          value: child.body || "내용이 없습니다.",
+          keywords: child.keywords || [],
+          sourceCount: getCanvasItemMergedSourceCount(child),
         })),
       };
     }
@@ -6354,6 +6452,44 @@ export default function MeetingCanvasTab({
                       </section>
                     )
                     )}
+                    {stage === "ideation" && selectedCanvasItem && leftPanelDetail.mergedItems?.length ? (
+                      <section className="pt-6">
+                        <div className="flex items-center justify-between gap-3">
+                          <h4 className="text-lg font-semibold text-slate-900">포함된 하위 아이디어</h4>
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+                            {leftPanelDetail.mergedItems.length}개 묶음
+                          </span>
+                        </div>
+                        <div className="mt-4 space-y-3">
+                          {leftPanelDetail.mergedItems.map((item) => (
+                            <div key={`${leftPanelDetail.title}-merged-${item.id}`} className="rounded-xl border border-slate-200 bg-[#fafafa] px-4 py-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-sm font-semibold text-slate-700">{item.label}</p>
+                                  <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">
+                                    {stripLeadingTimestamp(item.value)}
+                                  </p>
+                                </div>
+                                {item.sourceCount > 1 ? (
+                                  <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+                                    {item.sourceCount}개
+                                  </span>
+                                ) : null}
+                              </div>
+                              {item.keywords.length > 0 ? (
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  {item.keywords.slice(0, 4).map((keyword) => (
+                                    <span key={`${item.id}-${keyword}`} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+                                      #{keyword}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
                     {stage === "ideation" && selectedCanvasItem && leftPanelDetail.refinedItems?.length ? (
                       <section className="pt-6">
                         <h4 className="text-lg font-semibold text-slate-900">정리된 발화</h4>
