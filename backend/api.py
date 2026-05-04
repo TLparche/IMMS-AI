@@ -6917,19 +6917,24 @@ def _build_canvas_topic_clustering_prompt(
         "agenda_id": _safe_text(agenda_id),
         "visibleTarget": target,
         "topLevelCount": len(top_level_items),
+        "directChildCount": len(top_level_items),
         "topLevelNodes": [node_payload(item) for item in top_level_items],
         "existingTopics": topics_payload,
         "unclusteredCandidates": [node_payload(item) for item in candidate_items],
     }
     return (
-        "회의 canvas의 그룹 분류 아래 1차 노드 수가 visibleTarget을 넘었다.\n"
+        "회의 canvas의 그룹 분류 바로 아래 1차 노드 수가 visibleTarget을 넘었다.\n"
         "너는 전체 군집 판단을 맡아, 원본 노드를 삭제하지 않고 topic node에 배정해야 한다.\n"
         "규칙:\n"
-        "- topic node는 그룹 분류 아래 1차 노드 1개로 계산된다.\n"
+        "- 카운트 기준은 topic node 개수가 아니라 그룹 분류 바로 아래에 있는 1차 노드 전체 개수다.\n"
+        "- topic이 없을 때는 일반 아이디어/메모/코멘트 노드가 그룹 분류 아래에 그대로 붙고, 각각 1개로 계산된다.\n"
+        "- topic node도 그룹 분류 바로 아래 1차 노드 1개로 계산된다.\n"
         "- topic 안의 child 노드는 접히면 보이지 않지만, canvas_items에서 삭제하지 않는다.\n"
+        "- topic 안으로 들어간 child 노드는 더 이상 그룹 분류 바로 아래 1차 노드로 계산하지 않는다.\n"
         "- parent_topic_locked=true인 노드는 절대 이동시키지 않는다.\n"
         "- kind=topic인 노드는 다른 topic의 child로 배정하지 않는다.\n"
-        "- 기존 topic이 의미상 맞으면 그 topic에 child를 추가한다.\n"
+        "- 새로 들어온 일반 노드는 먼저 그룹 분류 바로 아래 마지막 1차 노드로 유지된다.\n"
+        "- 직속 노드 수가 많아져 군집 정리가 필요한 경우에만 기존 topic이 의미상 맞는 일반 노드를 그 topic에 child로 추가한다.\n"
         "- 맞는 topic이 없으면 newTopics로 새 topic을 만든다.\n"
         "- topic title/body/keywords는 그 topic의 child들을 대표해야 한다.\n"
         "- 사용자 수정 topic(user_edited=true)은 child 배정은 가능하지만 title/body/keywords 업데이트는 서버가 무시한다.\n"
@@ -7144,11 +7149,12 @@ def _maybe_cluster_canvas_topic_nodes(workspace: dict[str, Any]) -> dict[str, An
         candidate_items = [
             item
             for item in top_level_items
-            if _is_canvas_clusterable_item(item) and not bool(item.get("parent_topic_locked"))
+            if _is_canvas_clusterable_item(item)
+            and not bool(item.get("parent_topic_locked"))
         ]
+        topic_items = _canvas_topic_nodes_for_agenda(workspace, agenda_id)
         if len(candidate_items) < 2:
             continue
-        topic_items = _canvas_topic_nodes_for_agenda(workspace, agenda_id)
         result = _compute_canvas_topic_clustering_result(
             workspace,
             agenda_id,
@@ -7296,7 +7302,7 @@ def _finalize_canvas_idea_workspace_job(
                     ideation_positions[f"canvas-item-{created_id}"] = {"x": x, "y": y}
                     positions["ideation"] = ideation_positions
                     latest_workspace["node_positions"] = positions
-                next_items.insert(0, created_item)
+                next_items.append(created_item)
 
             created_node_count = len(create_updates)
             if not create_updates and isinstance(pending_item, dict):
@@ -7508,7 +7514,7 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         "x": x,
         "y": y,
     }
-    workspace["canvas_items"] = [pending_item, *canvas_items]
+    workspace["canvas_items"] = [*canvas_items, pending_item]
     positions = copy.deepcopy(workspace.get("node_positions") or {})
     ideation_positions = dict(positions.get("ideation") or {})
     ideation_positions[f"canvas-item-{pending_item_id}"] = {"x": x, "y": y}

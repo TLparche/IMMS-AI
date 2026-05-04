@@ -952,22 +952,44 @@ function canvasItemTone(kind: ComposerTool) {
 
 const CANVAS_ITEM_NODE_WIDTH = 260;
 const CANVAS_TOPIC_CHILD_GAP_X = 28;
-const CANVAS_TOPIC_CHILD_GAP_Y = 18;
-const CANVAS_TOP_LEVEL_GAP_Y = 24;
-const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 48;
+const CANVAS_TOPIC_CHILD_GAP_Y = 12;
+const CANVAS_TOP_LEVEL_GAP_Y = 16;
+const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 640;
 const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
+
+function estimateKeywordRows(keywords: string[], maxWidth = CANVAS_ITEM_NODE_WIDTH - 40) {
+  let rows = 0;
+  let currentRowWidth = 0;
+
+  keywords.forEach((keyword) => {
+    const labelWidth = Math.min(170, Math.max(54, keyword.length * 8 + 30));
+    const nextWidth = currentRowWidth === 0 ? labelWidth : currentRowWidth + 8 + labelWidth;
+    if (nextWidth > maxWidth) {
+      rows += 1;
+      currentRowWidth = labelWidth;
+      return;
+    }
+
+    if (currentRowWidth === 0) rows += 1;
+    currentRowWidth = nextWidth;
+  });
+
+  return rows;
+}
 
 function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
   const titleLines = estimateWrappedLines(item.ai_pending ? "AI 정리 중" : item.title || "새 노드", 17);
   const bodyLines = item.ai_pending
     ? 3
     : Math.max(2, estimateWrappedLines(item.body || "내용을 입력해 주세요.", 24));
-  const keywordCount = item.ai_pending ? 3 : Math.min(3, (item.keywords || []).filter(Boolean).length);
-  const keywordRows = keywordCount > 0 ? Math.ceil(keywordCount / 3) : 0;
+  const keywords = item.ai_pending
+    ? ["pending-1", "pending-2", "pending-3"]
+    : (item.keywords || []).filter(Boolean).slice(0, 3);
+  const keywordRows = estimateKeywordRows(keywords);
   const hasTopicToggle = isTopicCanvasItem(item) && getTopicChildCount(item) > 0;
-  const headerHeight = hasTopicToggle && item.agenda_id ? 58 : 30;
-  const keywordsHeight = keywordRows > 0 ? 12 + keywordRows * 26 + Math.max(0, keywordRows - 1) * 8 : 0;
+  const headerHeight = hasTopicToggle && item.agenda_id ? 64 : 34;
+  const keywordsHeight = keywordRows > 0 ? 12 + keywordRows * 28 + Math.max(0, keywordRows - 1) * 8 : 0;
   const pointHeight = item.point_id ? 24 : 0;
 
   return (
@@ -983,7 +1005,7 @@ function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
     bodyLines * 24 +
     keywordsHeight +
     pointHeight +
-    12
+    28
   );
 }
 
@@ -1102,12 +1124,12 @@ function makeCanvasItemNodeLabel(
   return (
     <div className="min-w-0 p-1">
       <div className={`rounded-[24px] border px-4 py-4 shadow-sm transition ${tone.shell} ${selected ? "ring-2 ring-slate-900/20" : ""}`}>
-        <div className="flex items-start justify-between gap-3">
-          <span className={`rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${tone.badge}`}>
+        <div className="flex items-start justify-between gap-2">
+          <span className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${tone.badge}`}>
             {toolLabel((item.kind as ComposerTool) || "note")}
           </span>
           {linkedAgendaTitle ? (
-            <span className="rounded-full bg-white/85 px-3 py-1 text-[11px] text-slate-500">
+            <span className="min-w-0 max-w-[88px] truncate whitespace-nowrap rounded-full bg-white/85 px-3 py-1 text-[11px] text-slate-500">
               {linkedAgendaTitle}
             </span>
           ) : null}
@@ -1118,12 +1140,12 @@ function makeCanvasItemNodeLabel(
                 event.stopPropagation();
                 onToggleTopicCollapsed?.(item.id);
               }}
-              className="rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-700"
+              className="shrink-0 whitespace-nowrap rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-700"
             >
               {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
             </button>
           ) : mergedSourceCount > 1 ? (
-            <span className="rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white">
+            <span className="shrink-0 whitespace-nowrap rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white">
               묶음 {mergedSourceCount}개
             </span>
           ) : null}
@@ -1152,7 +1174,7 @@ function makeCanvasItemNodeLabel(
         ) : keywords.length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-2">
             {keywords.map((keyword) => (
-              <span key={`${item.id}-${keyword}`} className="rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+              <span key={`${item.id}-${keyword}`} className="max-w-[170px] truncate whitespace-nowrap rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium text-slate-600">
                 #{keyword}
               </span>
             ))}
@@ -1664,7 +1686,7 @@ type CanvasEdgeData = {
 type CanvasNodeDescriptor = {
   id: string;
   position: { x: number; y: number };
-  positionSource: "persisted" | "fallback";
+  positionSource: "persisted" | "computed" | "fallback";
   sourcePosition: Position;
   targetPosition: Position;
   className: string;
@@ -3860,9 +3882,14 @@ export default function MeetingCanvasTab({
             item.manual_position && savedPosition
               ? savedPosition
               : computedPosition || savedPosition;
-          const positionSource: CanvasNodeDescriptor["positionSource"] = savedPosition
-            ? "persisted"
-            : "fallback";
+          const positionSource: CanvasNodeDescriptor["positionSource"] =
+            item.manual_position && savedPosition
+              ? "persisted"
+              : computedPosition
+                ? "computed"
+                : savedPosition
+                  ? "persisted"
+                  : "fallback";
           const linkedAgendaTitle =
             agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
           const fallbackPosition = {
