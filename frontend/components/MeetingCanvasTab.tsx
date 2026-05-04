@@ -296,6 +296,13 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasW
     merged_children: buildWorkspaceCanvasItemsPayload(item.merged_children || []),
     compacted_from_ids: (item.compacted_from_ids || []).map((value) => value.trim()).filter(Boolean),
     compaction_level: typeof item.compaction_level === "number" ? item.compaction_level : 0,
+    parent_topic_id: item.parent_topic_id || "",
+    parent_topic_source: item.parent_topic_source || "",
+    parent_topic_locked: Boolean(item.parent_topic_locked),
+    child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean),
+    topic_collapsed: Boolean(item.topic_collapsed),
+    created_by: item.created_by || "",
+    manual_position: Boolean(item.manual_position),
     ai_generated: Boolean(item.ai_generated),
     user_edited: Boolean(item.user_edited),
     ai_pending: Boolean(item.ai_pending),
@@ -1040,15 +1047,26 @@ function getCanvasItemMergedSourceCount(item: CanvasItemViewModel): number {
   return childCount || 1;
 }
 
+function isTopicCanvasItem(item: CanvasItemViewModel) {
+  return item.kind === "topic";
+}
+
+function getTopicChildCount(item: CanvasItemViewModel) {
+  return (item.child_item_ids || []).filter(Boolean).length;
+}
+
 function makeCanvasItemNodeLabel(
   item: CanvasItemViewModel,
   selected: boolean,
   linkedAgendaTitle: string,
+  onToggleTopicCollapsed?: (itemId: string) => void,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
   const keywords = (item.keywords || []).filter(Boolean).slice(0, 3);
   const pending = Boolean(item.ai_pending);
   const mergedSourceCount = getCanvasItemMergedSourceCount(item);
+  const topicChildCount = getTopicChildCount(item);
+  const showTopicToggle = isTopicCanvasItem(item) && topicChildCount > 0;
 
   return (
     <div className="min-w-0 p-1">
@@ -1062,7 +1080,18 @@ function makeCanvasItemNodeLabel(
               {linkedAgendaTitle}
             </span>
           ) : null}
-          {mergedSourceCount > 1 ? (
+          {showTopicToggle ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleTopicCollapsed?.(item.id);
+              }}
+              className="rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-700"
+            >
+              {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
+            </button>
+          ) : mergedSourceCount > 1 ? (
             <span className="rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white">
               묶음 {mergedSourceCount}개
             </span>
@@ -1438,6 +1467,13 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       merged_children: mergedChildren,
       compacted_from_ids: (item.compacted_from_ids || []).map((value) => value.trim()).filter(Boolean).slice(0, 400),
       compaction_level: typeof item.compaction_level === "number" ? item.compaction_level : 0,
+      parent_topic_id: item.parent_topic_id || "",
+      parent_topic_source: item.parent_topic_source || "",
+      parent_topic_locked: Boolean(item.parent_topic_locked),
+      child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean).slice(0, 400),
+      topic_collapsed: Boolean(item.topic_collapsed),
+      created_by: item.created_by || "",
+      manual_position: Boolean(item.manual_position),
       ai_generated: Boolean(item.ai_generated),
       user_edited: Boolean(item.user_edited),
       ai_pending: Boolean(item.ai_pending),
@@ -3409,6 +3445,70 @@ export default function MeetingCanvasTab({
     forceBroadcastSharedCanvas();
   }, [forceBroadcastSharedCanvas, incomingCanvasStateRequestId, sharedSyncEnabled]);
 
+  const handleToggleTopicCollapsed = useCallback(
+    (itemId: string) => {
+      if (!itemId) return;
+      const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+        item.id === itemId && isTopicCanvasItem(item)
+          ? {
+              ...item,
+              topic_collapsed: !item.topic_collapsed,
+            }
+          : item,
+      );
+
+      setCanvasItems(nextCanvasItemsSnapshot);
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        stage,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+
+      if (sharedSyncEnabled) {
+        if (meetingId) {
+          writeSharedWorkspaceSessionCache(
+            meetingId,
+            buildFullWorkspacePatchPayload({
+              meetingId,
+              stage,
+              agendaOverrides,
+              canvasItems: nextCanvasItemsSnapshot,
+              customGroups,
+              problemGroups,
+              solutionTopics,
+              nodePositions,
+              importedState: persistedSharedImportedState,
+            }),
+          );
+        }
+        forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+        if (meetingId) {
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+            imported_state: persistedSharedImportedState,
+          }).catch((error) => {
+            console.error("Failed to save topic collapsed state:", error);
+          });
+        }
+      }
+    },
+    [
+      agendaOverrides,
+      canvasItems,
+      customGroups,
+      forceBroadcastSharedCanvas,
+      meetingId,
+      nodePositions,
+      persistedSharedImportedState,
+      problemGroups,
+      sharedSyncEnabled,
+      solutionTopics,
+      stage,
+    ],
+  );
+
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
       const heights = problemGroups.map((group) => estimateProblemGroupNodeHeight(group));
@@ -3556,12 +3656,77 @@ export default function MeetingCanvasTab({
       ),
     );
     const positions = buildGridPositions(agendaHeights, 370, 56, 120, 80);
+    const agendaPositionById = new Map(
+      agendaModels.map((agenda, agendaIndex) => {
+        const nodeId = `agenda-${agenda.id}`;
+        return [
+          agenda.id,
+          nodePositions.ideation?.[nodeId] || positions[agendaIndex],
+        ] as const;
+      }),
+    );
+    const topicById = new Map(canvasItems.filter(isTopicCanvasItem).map((item) => [item.id, item]));
+    const childIdsByTopic = new Map<string, string[]>();
+    canvasItems.forEach((item) => {
+      if (item.parent_topic_id) {
+        const current = childIdsByTopic.get(item.parent_topic_id) || [];
+        if (!current.includes(item.id)) current.push(item.id);
+        childIdsByTopic.set(item.parent_topic_id, current);
+      }
+    });
+    topicById.forEach((topic) => {
+      const explicitIds = (topic.child_item_ids || []).filter(Boolean);
+      const derivedIds = childIdsByTopic.get(topic.id) || [];
+      childIdsByTopic.set(topic.id, [...new Set([...explicitIds, ...derivedIds])]);
+    });
+    const visibleCanvasItems = canvasItems.filter((item) => {
+      if (!item.parent_topic_id) return true;
+      const parentTopic = topicById.get(item.parent_topic_id);
+      return Boolean(parentTopic && !parentTopic.topic_collapsed);
+    });
+    const computedCanvasPositions = new Map<string, { x: number; y: number }>();
+    agendaModels.forEach((agenda, agendaIndex) => {
+      const agendaPosition = agendaPositionById.get(agenda.id) || positions[agendaIndex];
+      const topLevelItems = canvasItems.filter(
+        (item) => item.agenda_id === agenda.id && !item.parent_topic_id,
+      );
+      topLevelItems.forEach((item, topIndex) => {
+        const nodeId = `canvas-item-${item.id}`;
+        const savedPosition =
+          nodePositions.ideation?.[nodeId] ||
+          pendingNodePlacementsRef.current[nodeId] ||
+          (typeof item.x === "number" && typeof item.y === "number" ? { x: item.x, y: item.y } : undefined);
+        const topPosition =
+          item.manual_position && savedPosition
+            ? savedPosition
+            : {
+                x: agendaPosition.x + 20,
+                y: agendaPosition.y + agendaHeights[agendaIndex] + 86 + topIndex * 224,
+              };
+        computedCanvasPositions.set(item.id, topPosition);
+
+        if (!isTopicCanvasItem(item)) return;
+        const childIds = childIdsByTopic.get(item.id) || [];
+        childIds.forEach((childId, childIndex) => {
+          computedCanvasPositions.set(childId, {
+            x: topPosition.x + 320,
+            y: topPosition.y + childIndex * 178,
+          });
+        });
+      });
+    });
 
     return {
       layoutSignature: buildNodeContentSignature([
         stage,
         ...agendaModels.map((agenda) => agenda.id),
-        ...canvasItems.map((item) => item.id),
+        ...canvasItems.flatMap((item) => [
+          item.id,
+          item.kind,
+          item.parent_topic_id || "",
+          item.topic_collapsed ? "collapsed" : "expanded",
+          ...(item.child_item_ids || []),
+        ]),
       ]),
       nodeDescriptors: [
         ...agendaModels.map((agenda, agendaIndex) => {
@@ -3596,14 +3761,19 @@ export default function MeetingCanvasTab({
             },
           };
         }),
-        ...canvasItems.map((item, index) => {
+        ...visibleCanvasItems.map((item, index) => {
           const nodeId = `canvas-item-${item.id}`;
+          const computedPosition = computedCanvasPositions.get(item.id);
           const savedPosition =
             nodePositions.ideation?.[nodeId] ||
             pendingNodePlacementsRef.current[nodeId] ||
             (typeof item.x === "number" && typeof item.y === "number"
               ? { x: item.x, y: item.y }
               : undefined);
+          const preferredPosition =
+            item.manual_position && savedPosition
+              ? savedPosition
+              : computedPosition || savedPosition;
           const positionSource: CanvasNodeDescriptor["positionSource"] = savedPosition
             ? "persisted"
             : "fallback";
@@ -3616,7 +3786,7 @@ export default function MeetingCanvasTab({
 
           return {
             id: nodeId,
-            position: savedPosition || fallbackPosition,
+            position: preferredPosition || fallbackPosition,
             positionSource,
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
@@ -3636,15 +3806,23 @@ export default function MeetingCanvasTab({
                 ...(item.keywords || []),
                 item.agenda_id,
                 item.point_id,
+                item.parent_topic_id || "",
+                item.topic_collapsed ? "collapsed" : "expanded",
+                ...(item.child_item_ids || []),
                 selectedCanvasItemId === item.id,
               ]),
-              label: makeCanvasItemNodeLabel(item, selectedCanvasItemId === item.id, linkedAgendaTitle),
+              label: makeCanvasItemNodeLabel(
+                item,
+                selectedCanvasItemId === item.id,
+                linkedAgendaTitle,
+                handleToggleTopicCollapsed,
+              ),
             },
           };
         }),
       ],
     };
-  }, [stage, agendaModels, canvasItems, dropProblemGroupId, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedProblemGroupId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+  }, [stage, agendaModels, canvasItems, dropProblemGroupId, handleToggleTopicCollapsed, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedProblemGroupId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
     if (!workspaceLoadedRef.current || workspaceHydratingRef.current) {
@@ -3757,56 +3935,11 @@ export default function MeetingCanvasTab({
     [canvasItems],
   );
   const autoLinkEdges = useMemo<Edge[]>(() => {
-    if (stage !== "ideation") return [];
-
-    const validNodeIds = new Set(nodes.map((node) => node.id));
-
-    return canvasItems.flatMap((item): Edge[] => {
-      const target = `canvas-item-${item.id}`;
-      if (!validNodeIds.has(target)) return [];
-
-      const pointSource =
-        item.point_id && item.point_id !== target && validNodeIds.has(item.point_id)
-          ? item.point_id
-          : "";
-      const agendaSource =
-        item.agenda_id && validNodeIds.has(`agenda-${item.agenda_id}`)
-          ? `agenda-${item.agenda_id}`
-          : "";
-      const source = pointSource || agendaSource;
-      if (!source || source === target) return [];
-
-      const linkField: CanvasEdgeData["linkField"] = pointSource ? "point_id" : "agenda_id";
-
-      return [
-        {
-          id: `auto-link-${source}-${target}`,
-          source,
-          target,
-          type: "smoothstep",
-          markerEnd: {
-            type: MarkerType.ArrowClosed,
-            color: "#475569",
-          },
-          interactionWidth: 28,
-          zIndex: 10,
-          style: { stroke: "#475569", strokeOpacity: 0.95, strokeWidth: 2 },
-          data: {
-            kind: "canvasItemLink",
-            canvasItemId: item.id,
-            linkField,
-          } satisfies CanvasEdgeData,
-        },
-      ];
-    });
-  }, [canvasItems, nodes, stage]);
+    return [];
+  }, []);
   const displayEdges = useMemo<Edge[]>(() => {
-    const autoPairs = new Set(autoLinkEdges.map((edge) => `${edge.source}->${edge.target}`));
-    return [
-      ...autoLinkEdges,
-      ...edges.filter((edge) => !autoPairs.has(`${edge.source}->${edge.target}`)),
-    ];
-  }, [autoLinkEdges, edges]);
+    return [];
+  }, []);
   const selectedEdge = useMemo(
     () => displayEdges.find((edge) => edge.id === selectedEdgeId) || null,
     [displayEdges, selectedEdgeId],
@@ -3969,7 +4102,15 @@ export default function MeetingCanvasTab({
       const linkedAgenda =
         agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id) || null;
       const refinedItems = normalizeRefinedUtterances(selectedCanvasItem.refined_utterances);
-      const mergedSourceCount = getCanvasItemMergedSourceCount(selectedCanvasItem);
+      const topicChildIds = new Set([
+        ...(selectedCanvasItem.child_item_ids || []),
+        ...canvasItems
+          .filter((item) => item.parent_topic_id === selectedCanvasItem.id)
+          .map((item) => item.id),
+      ]);
+      const topicChildren = isTopicCanvasItem(selectedCanvasItem)
+        ? canvasItems.filter((item) => topicChildIds.has(item.id))
+        : [];
 
       return {
         title: selectedCanvasItem.title,
@@ -3977,7 +4118,7 @@ export default function MeetingCanvasTab({
         badges: [
           toolLabel((selectedCanvasItem.kind as ComposerTool) || "note"),
           linkedAgenda?.title || "",
-          mergedSourceCount > 1 ? `하위 아이디어 ${mergedSourceCount}개` : "",
+          topicChildren.length > 0 ? `하위 아이디어 ${topicChildren.length}개` : "",
         ].filter(Boolean),
         insightLens: "",
         keywords: (selectedCanvasItem.keywords || []).slice(0, 5),
@@ -4002,12 +4143,12 @@ export default function MeetingCanvasTab({
           label: item.speaker || `발화 ${index + 1}`,
           value: item.text,
         })),
-        mergedItems: (selectedCanvasItem.merged_children || []).map((child, index) => ({
-          id: child.id || `${selectedCanvasItem.id}-merged-${index}`,
+        mergedItems: topicChildren.map((child, index) => ({
+          id: child.id || `${selectedCanvasItem.id}-child-${index}`,
           label: child.title || `하위 아이디어 ${index + 1}`,
           value: child.body || "내용이 없습니다.",
           keywords: child.keywords || [],
-          sourceCount: getCanvasItemMergedSourceCount(child),
+          sourceCount: 1,
         })),
       };
     }
@@ -4055,7 +4196,7 @@ export default function MeetingCanvasTab({
       ],
       organizeTitle: "핵심 포인트",
     };
-  }, [agendaModels, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedSolutionTopic, stage]);
+  }, [agendaModels, canvasItems, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedSolutionTopic, stage]);
 
   const handleGenerateProblemDefinition = async () => {
     setProblemDefinitionStagePending(true);
@@ -4456,6 +4597,13 @@ export default function MeetingCanvasTab({
         refined_utterances: [],
         evidence_utterance_ids: [],
         ignored_utterance_ids: [],
+        parent_topic_id: "",
+        parent_topic_source: "",
+        parent_topic_locked: false,
+        child_item_ids: [],
+        topic_collapsed: tool === "topic" ? false : undefined,
+        created_by: "user",
+        manual_position: true,
         ai_generated: false,
         user_edited: true,
         x: flowPosition.x,
@@ -4642,16 +4790,58 @@ export default function MeetingCanvasTab({
     let nextCanvasItemsSnapshot: CanvasItemViewModel[] | null = null;
     if (stage === "ideation" && node.id.startsWith("canvas-item-")) {
       const canvasItemId = node.id.slice("canvas-item-".length);
+      const draggedItem = canvasItems.find((item) => item.id === canvasItemId) || null;
+      const snapTopic = !draggedItem || isTopicCanvasItem(draggedItem)
+        ? null
+        : canvasItems
+            .filter((item) => isTopicCanvasItem(item) && item.id !== canvasItemId)
+            .map((topic) => {
+              const topicNode = nodes.find((candidate) => candidate.id === `canvas-item-${topic.id}`);
+              if (!topicNode) return null;
+              const dx = node.position.x - topicNode.position.x;
+              const dy = node.position.y - topicNode.position.y;
+              const distance = Math.hypot(dx, dy);
+              const inTopicLane = dx > 120 && dx < 520 && Math.abs(dy) < 220;
+              return {
+                topic,
+                distance,
+                inTopicLane,
+              };
+            })
+            .filter(Boolean)
+            .sort((left, right) => {
+              if (left!.inTopicLane !== right!.inTopicLane) return left!.inTopicLane ? -1 : 1;
+              return left!.distance - right!.distance;
+            })[0]?.topic || null;
+
       nextCanvasItemsSnapshot = canvasItems.map((item) =>
         item.id === canvasItemId
           ? {
               ...item,
-              x: node.position.x,
-              y: node.position.y,
+              parent_topic_id: snapTopic ? snapTopic.id : item.parent_topic_id || "",
+              parent_topic_source: snapTopic ? "user" : item.parent_topic_source || "",
+              parent_topic_locked: snapTopic ? true : Boolean(item.parent_topic_locked),
+              manual_position: snapTopic ? false : true,
+              x: snapTopic ? item.x : node.position.x,
+              y: snapTopic ? item.y : node.position.y,
             }
+          : snapTopic && item.id === snapTopic.id
+            ? {
+                ...item,
+                child_item_ids: [...new Set([...(item.child_item_ids || []), canvasItemId])],
+                topic_collapsed: false,
+              }
+          : snapTopic && isTopicCanvasItem(item)
+            ? {
+                ...item,
+                child_item_ids: (item.child_item_ids || []).filter((id) => id !== canvasItemId),
+              }
           : item,
       );
       setCanvasItems(nextCanvasItemsSnapshot);
+      if (snapTopic) {
+        setActivityMessage(`"${draggedItem?.title || "노드"}"를 "${snapTopic.title}" 주제로 이동했습니다.`);
+      }
     }
 
     latestSharedWorkspaceRef.current = {
@@ -6812,6 +7002,7 @@ export default function MeetingCanvasTab({
                 onNodeDragStop={onNodeDragStop}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
+                nodesConnectable={false}
                 elevateEdgesOnSelect
                 connectionLineStyle={{ stroke: "#0f172a", strokeOpacity: 0.9, strokeWidth: 2 }}
                 minZoom={0.45}

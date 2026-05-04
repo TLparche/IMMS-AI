@@ -258,6 +258,13 @@ export interface CanvasWorkspaceItem {
   merged_children?: CanvasWorkspaceItem[];
   compacted_from_ids?: string[];
   compaction_level?: number;
+  parent_topic_id?: string;
+  parent_topic_source?: "ai" | "user" | "";
+  parent_topic_locked?: boolean;
+  child_item_ids?: string[];
+  topic_collapsed?: boolean;
+  created_by?: "ai" | "user" | "";
+  manual_position?: boolean;
   ai_generated?: boolean;
   user_edited?: boolean;
   ai_pending?: boolean;

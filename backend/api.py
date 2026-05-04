@@ -647,6 +647,15 @@ def _normalize_canvas_workspace_items(
             "merged_children": _normalize_canvas_merged_children(item.merged_children),
             "compacted_from_ids": [_safe_text(value) for value in (item.compacted_from_ids or []) if _safe_text(value)][:400],
             "compaction_level": _safe_nonnegative_int(item.compaction_level),
+            "parent_topic_id": _safe_text(item.parent_topic_id),
+            "parent_topic_source": _safe_text(item.parent_topic_source)
+            if _safe_text(item.parent_topic_source) in {"ai", "user"}
+            else "",
+            "parent_topic_locked": bool(item.parent_topic_locked),
+            "child_item_ids": [_safe_text(value) for value in (item.child_item_ids or []) if _safe_text(value)][:400],
+            "topic_collapsed": bool(item.topic_collapsed),
+            "created_by": _safe_text(item.created_by) if _safe_text(item.created_by) in {"ai", "user"} else "",
+            "manual_position": bool(item.manual_position),
             "ai_generated": bool(item.ai_generated),
             "user_edited": bool(item.user_edited),
             "ai_pending": bool(getattr(item, "ai_pending", False)),
@@ -1733,6 +1742,13 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     merged_children: list[dict[str, Any]] = Field(default_factory=list)
     compacted_from_ids: list[str] = Field(default_factory=list)
     compaction_level: int = 0
+    parent_topic_id: str = ""
+    parent_topic_source: str = ""
+    parent_topic_locked: bool = False
+    child_item_ids: list[str] = Field(default_factory=list)
+    topic_collapsed: bool = False
+    created_by: str = ""
+    manual_position: bool = False
     ai_generated: bool = False
     user_edited: bool = False
     ai_pending: bool = False
@@ -6324,6 +6340,8 @@ def _canvas_idea_existing_ideas_from_workspace(
             continue
         if _safe_text(item.get("id")) == pending_item_id:
             continue
+        if _safe_text(item.get("kind"), "note") == "topic":
+            continue
         if _safe_text(item.get("kind"), "note") == "comment":
             continue
         if bool(item.get("ai_pending")):
@@ -6563,6 +6581,66 @@ def _canvas_idea_visible_items(workspace: dict[str, Any]) -> list[dict[str, Any]
     ]
 
 
+def _is_canvas_topic_item(item: dict[str, Any]) -> bool:
+    return _safe_text(item.get("kind"), "note") == "topic"
+
+
+def _is_canvas_clusterable_item(item: dict[str, Any]) -> bool:
+    return (
+        isinstance(item, dict)
+        and _safe_text(item.get("id"))
+        and not _is_canvas_topic_item(item)
+        and not bool(item.get("ai_pending"))
+        and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
+    )
+
+
+def _canvas_direct_child_items(workspace: dict[str, Any], agenda_id: str) -> list[dict[str, Any]]:
+    normalized_agenda_id = _safe_text(agenda_id)
+    return [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+        and _safe_text(item.get("agenda_id")) == normalized_agenda_id
+        and not _safe_text(item.get("parent_topic_id"))
+        and (_is_canvas_topic_item(item) or _is_canvas_clusterable_item(item))
+    ]
+
+
+def _canvas_topic_nodes_for_agenda(workspace: dict[str, Any], agenda_id: str) -> list[dict[str, Any]]:
+    normalized_agenda_id = _safe_text(agenda_id)
+    return [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+        and _safe_text(item.get("agenda_id")) == normalized_agenda_id
+        and _is_canvas_topic_item(item)
+    ]
+
+
+def _canvas_topic_child_ids(workspace: dict[str, Any], topic_id: str) -> list[str]:
+    normalized_topic_id = _safe_text(topic_id)
+    topic = next(
+        (
+            item
+            for item in (workspace.get("canvas_items") or [])
+            if isinstance(item, dict) and _safe_text(item.get("id")) == normalized_topic_id
+        ),
+        None,
+    )
+    explicit = [
+        _safe_text(value)
+        for value in ((topic or {}).get("child_item_ids") or [])
+        if _safe_text(value)
+    ]
+    derived = [
+        _safe_text(item.get("id"))
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict) and _safe_text(item.get("parent_topic_id")) == normalized_topic_id
+    ]
+    return _dedup_preserve(explicit + derived, limit=400)
+
+
 def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
     stored = _safe_nonnegative_int(workspace.get("idea_create_stack"))
     if stored > 0:
@@ -6571,6 +6649,10 @@ def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
 
 
 def _canvas_idea_visible_target(workspace: dict[str, Any]) -> int:
+    return 3 + (_canvas_idea_create_stack_value(workspace) // 2)
+
+
+def _canvas_topic_cluster_target(workspace: dict[str, Any]) -> int:
     return 3 + (_canvas_idea_create_stack_value(workspace) // 2)
 
 
@@ -6799,6 +6881,287 @@ def _maybe_compact_canvas_idea_nodes(workspace: dict[str, Any]) -> dict[str, Any
     return {"merged": merged, "target": target, "visible": len(_canvas_idea_visible_items(workspace))}
 
 
+def _build_canvas_topic_clustering_prompt(
+    workspace: dict[str, Any],
+    agenda_id: str,
+    top_level_items: list[dict[str, Any]],
+    candidate_items: list[dict[str, Any]],
+    topic_items: list[dict[str, Any]],
+) -> str:
+    target = _canvas_topic_cluster_target(workspace)
+
+    def node_payload(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": _safe_text(item.get("id")),
+            "kind": _safe_text(item.get("kind"), "note"),
+            "title": _safe_text(item.get("title")),
+            "content": _safe_text(item.get("body")),
+            "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+            "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=6),
+            "parent_topic_locked": bool(item.get("parent_topic_locked")),
+            "created_by": _safe_text(item.get("created_by")),
+            "user_edited": bool(item.get("user_edited")),
+        }
+
+    topics_payload = []
+    for topic in topic_items:
+        topics_payload.append(
+            {
+                **node_payload(topic),
+                "child_item_ids": _canvas_topic_child_ids(workspace, _safe_text(topic.get("id"))),
+                "topic_collapsed": bool(topic.get("topic_collapsed")),
+            }
+        )
+
+    payload = {
+        "agenda_id": _safe_text(agenda_id),
+        "visibleTarget": target,
+        "topLevelCount": len(top_level_items),
+        "topLevelNodes": [node_payload(item) for item in top_level_items],
+        "existingTopics": topics_payload,
+        "unclusteredCandidates": [node_payload(item) for item in candidate_items],
+    }
+    return (
+        "회의 canvas의 그룹 분류 아래 1차 노드 수가 visibleTarget을 넘었다.\n"
+        "너는 전체 군집 판단을 맡아, 원본 노드를 삭제하지 않고 topic node에 배정해야 한다.\n"
+        "규칙:\n"
+        "- topic node는 그룹 분류 아래 1차 노드 1개로 계산된다.\n"
+        "- topic 안의 child 노드는 접히면 보이지 않지만, canvas_items에서 삭제하지 않는다.\n"
+        "- parent_topic_locked=true인 노드는 절대 이동시키지 않는다.\n"
+        "- kind=topic인 노드는 다른 topic의 child로 배정하지 않는다.\n"
+        "- 기존 topic이 의미상 맞으면 그 topic에 child를 추가한다.\n"
+        "- 맞는 topic이 없으면 newTopics로 새 topic을 만든다.\n"
+        "- topic title/body/keywords는 그 topic의 child들을 대표해야 한다.\n"
+        "- 사용자 수정 topic(user_edited=true)은 child 배정은 가능하지만 title/body/keywords 업데이트는 서버가 무시한다.\n"
+        "- visibleTarget 이하가 되도록 충분히 묶되, 서로 다른 의미를 억지로 묶지 않는다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{"
+        "\"assignments\":[{\"nodeId\":\"...\",\"parentTopicId\":\"existing-topic-id-or-tempId\"}],"
+        "\"topics\":[{\"id\":\"existing-topic-id\",\"title\":\"...\",\"body\":\"...\",\"keywords\":[\"...\"],\"childItemIds\":[\"...\"]}],"
+        "\"newTopics\":[{\"tempId\":\"temp-topic-1\",\"title\":\"...\",\"body\":\"...\",\"keywords\":[\"...\"],\"childItemIds\":[\"...\"]}]"
+        "}\n\n"
+        f"input={json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _normalize_topic_cluster_text(raw: Any, fallback: str = "") -> str:
+    text = _strip_idea_reference_text(raw, collapse_whitespace=False)
+    if not text:
+        return fallback
+    return _to_summary_point(text, 72)
+
+
+def _compute_canvas_topic_clustering_result(
+    workspace: dict[str, Any],
+    agenda_id: str,
+    top_level_items: list[dict[str, Any]],
+    candidate_items: list[dict[str, Any]],
+    topic_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    client, llm_ready, _ = _ensure_llm_ready(RT)
+    if not llm_ready or not candidate_items:
+        return None
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_canvas_topic_clustering_prompt(
+                workspace,
+                agenda_id,
+                top_level_items,
+                candidate_items,
+                topic_items,
+            ),
+            stage="canvas_topic_clustering",
+            temperature=0.16,
+            max_tokens=2200,
+        )
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_topic_clustering", payload=str(exc), meta={})
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _apply_canvas_topic_clustering_result(
+    workspace: dict[str, Any],
+    agenda_id: str,
+    result: dict[str, Any],
+) -> int:
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    items_by_id = {_safe_text(item.get("id")): item for item in canvas_items if _safe_text(item.get("id"))}
+    topic_ids = {
+        item_id
+        for item_id, item in items_by_id.items()
+        if _is_canvas_topic_item(item) and _safe_text(item.get("agenda_id")) == _safe_text(agenda_id)
+    }
+    movable_ids = {
+        item_id
+        for item_id, item in items_by_id.items()
+        if _safe_text(item.get("agenda_id")) == _safe_text(agenda_id)
+        and _is_canvas_clusterable_item(item)
+        and not bool(item.get("parent_topic_locked"))
+    }
+
+    temp_to_topic_id: dict[str, str] = {}
+    created_topic_children: dict[str, list[str]] = {}
+    created_topics: list[dict[str, Any]] = []
+    now_ms = int(time.time() * 1000)
+    for index, raw in enumerate(result.get("newTopics") or result.get("new_topics") or []):
+        if not isinstance(raw, dict):
+            continue
+        child_ids = [
+            _safe_text(value)
+            for value in (raw.get("childItemIds") or raw.get("child_item_ids") or [])
+            if _safe_text(value) in movable_ids
+        ]
+        if not child_ids:
+            continue
+        temp_id = _safe_text(raw.get("tempId") or raw.get("temp_id") or f"new-topic-{index}")
+        topic_id = f"ai-topic-{now_ms}-{index}-{uuid4().hex[:6]}"
+        temp_to_topic_id[temp_id] = topic_id
+        topic = {
+            "id": topic_id,
+            "agenda_id": _safe_text(agenda_id),
+            "point_id": "",
+            "kind": "topic",
+            "title": _normalize_topic_cluster_text(raw.get("title"), "AI 주제"),
+            "body": _normalize_topic_cluster_text(raw.get("body") or raw.get("summary"), "관련 아이디어 묶음"),
+            "keywords": _normalize_idea_keywords(raw.get("keywords") or [], f"{raw.get('title') or ''} {raw.get('body') or ''}", 6),
+            "key_evidence": [],
+            "refined_utterances": [],
+            "evidence_utterance_ids": [],
+            "ignored_utterance_ids": [],
+            "child_item_ids": child_ids[:400],
+            "topic_collapsed": True,
+            "created_by": "ai",
+            "ai_generated": True,
+            "user_edited": False,
+            "manual_position": False,
+        }
+        created_topics.append(topic)
+        created_topic_children[topic_id] = child_ids[:400]
+        topic_ids.add(topic_id)
+        items_by_id[topic_id] = topic
+
+    topic_updates: dict[str, dict[str, Any]] = {}
+    for raw in result.get("topics") or []:
+        if not isinstance(raw, dict):
+            continue
+        topic_id = _safe_text(raw.get("id") or raw.get("topicId") or raw.get("topic_id"))
+        if topic_id not in topic_ids:
+            continue
+        topic_updates[topic_id] = raw
+
+    assignments: dict[str, str] = {}
+    for topic_id, child_ids in created_topic_children.items():
+        for child_id in child_ids:
+            if child_id in movable_ids:
+                assignments[child_id] = topic_id
+
+    for raw in result.get("assignments") or []:
+        if not isinstance(raw, dict):
+            continue
+        node_id = _safe_text(raw.get("nodeId") or raw.get("node_id"))
+        parent_id = _safe_text(raw.get("parentTopicId") or raw.get("parent_topic_id"))
+        parent_id = temp_to_topic_id.get(parent_id, parent_id)
+        if node_id in movable_ids and parent_id in topic_ids and node_id != parent_id:
+            assignments[node_id] = parent_id
+
+    for topic_id, raw in topic_updates.items():
+        child_ids = [
+            _safe_text(value)
+            for value in (raw.get("childItemIds") or raw.get("child_item_ids") or [])
+            if _safe_text(value) in movable_ids
+        ]
+        for child_id in child_ids:
+            assignments.setdefault(child_id, topic_id)
+
+    if not assignments and not created_topics:
+        return 0
+
+    assigned_by_topic: dict[str, list[str]] = {}
+    for child_id, topic_id in assignments.items():
+        assigned_by_topic.setdefault(topic_id, []).append(child_id)
+
+    next_items: list[dict[str, Any]] = []
+    for item in created_topics + canvas_items:
+        item_id = _safe_text(item.get("id"))
+        if not item_id:
+            continue
+        next_item = copy.deepcopy(items_by_id.get(item_id, item))
+        if item_id in assignments:
+            next_item["parent_topic_id"] = assignments[item_id]
+            next_item["parent_topic_source"] = "ai"
+            next_item["parent_topic_locked"] = False
+            next_item["manual_position"] = False
+        if item_id in topic_ids:
+            current_children = _canvas_topic_child_ids({"canvas_items": created_topics + canvas_items}, item_id)
+            next_children = _dedup_preserve(current_children + assigned_by_topic.get(item_id, []), limit=400)
+            next_item["child_item_ids"] = next_children
+            next_item.setdefault("topic_collapsed", True)
+            if not bool(next_item.get("user_edited")):
+                raw_update = topic_updates.get(item_id)
+                if raw_update:
+                    title = _normalize_topic_cluster_text(raw_update.get("title"))
+                    body = _normalize_topic_cluster_text(raw_update.get("body") or raw_update.get("summary"))
+                    keywords = _normalize_idea_keywords(
+                        raw_update.get("keywords") or [],
+                        f"{title} {body}",
+                        6,
+                    )
+                    if title:
+                        next_item["title"] = title
+                    if body:
+                        next_item["body"] = body
+                    if keywords:
+                        next_item["keywords"] = keywords
+        next_items.append(next_item)
+
+    workspace["canvas_items"] = next_items
+    return len(assignments) + len(created_topics)
+
+
+def _maybe_cluster_canvas_topic_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
+    target = _canvas_topic_cluster_target(workspace)
+    agenda_ids = _dedup_preserve(
+        [
+            _safe_text(item.get("agenda_id"))
+            for item in (workspace.get("canvas_items") or [])
+            if isinstance(item, dict) and _safe_text(item.get("agenda_id"))
+        ],
+        limit=100,
+    )
+    changed = 0
+    for agenda_id in agenda_ids:
+        top_level_items = _canvas_direct_child_items(workspace, agenda_id)
+        if len(top_level_items) <= target:
+            continue
+        candidate_items = [
+            item
+            for item in top_level_items
+            if _is_canvas_clusterable_item(item) and not bool(item.get("parent_topic_locked"))
+        ]
+        if len(candidate_items) < 2:
+            continue
+        topic_items = _canvas_topic_nodes_for_agenda(workspace, agenda_id)
+        result = _compute_canvas_topic_clustering_result(
+            workspace,
+            agenda_id,
+            top_level_items,
+            candidate_items,
+            topic_items,
+        )
+        if not result:
+            continue
+        changed += _apply_canvas_topic_clustering_result(workspace, agenda_id, result)
+    return {"changed": changed, "target": target}
+
+
 def _finalize_canvas_idea_workspace_job(
     meeting_id: str,
     job_id: str,
@@ -6822,7 +7185,7 @@ def _finalize_canvas_idea_workspace_job(
         target_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
         starting_create_stack = _canvas_idea_create_stack_value(latest_workspace)
         created_node_count = 0
-        compaction_result: dict[str, Any] = {"merged": 0, "target": _canvas_idea_visible_target(latest_workspace)}
+        clustering_result: dict[str, Any] = {"changed": 0, "target": _canvas_topic_cluster_target(latest_workspace)}
 
         if not bool(result.get("used_llm")):
             positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
@@ -6913,6 +7276,13 @@ def _finalize_canvas_idea_workspace_job(
                             "merged_children": [],
                             "compacted_from_ids": [],
                             "compaction_level": 0,
+                            "parent_topic_id": "",
+                            "parent_topic_source": "",
+                            "parent_topic_locked": False,
+                            "child_item_ids": [],
+                            "topic_collapsed": False,
+                            "created_by": "ai",
+                            "manual_position": False,
                             "ai_generated": True,
                             "user_edited": False,
                             "ai_pending": False,
@@ -6945,13 +7315,13 @@ def _finalize_canvas_idea_workspace_job(
                 latest_workspace["idea_create_stack"] = starting_create_stack + created_node_count
 
         if created_node_count > 0:
-            compaction_result = _maybe_compact_canvas_idea_nodes(latest_workspace)
+            clustering_result = _maybe_cluster_canvas_topic_nodes(latest_workspace)
 
         _save_canvas_workspace_runtime(meeting_id, latest_workspace)
-        merged_count = _safe_nonnegative_int(compaction_result.get("merged"))
+        clustered_count = _safe_nonnegative_int(clustering_result.get("changed"))
         detail = (
-            f"AI 아이디어 정리 완료 · {merged_count}개 노드 압축"
-            if merged_count > 0
+            f"AI 아이디어 정리 완료 · {clustered_count}개 topic 분류 반영"
+            if clustered_count > 0
             else "AI 아이디어 정리 완료"
         )
         _mark_canvas_idea_job(
@@ -7125,6 +7495,13 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         "merged_children": [],
         "compacted_from_ids": [],
         "compaction_level": 0,
+        "parent_topic_id": "",
+        "parent_topic_source": "",
+        "parent_topic_locked": False,
+        "child_item_ids": [],
+        "topic_collapsed": False,
+        "created_by": "ai",
+        "manual_position": False,
         "ai_generated": True,
         "user_edited": False,
         "ai_pending": True,
