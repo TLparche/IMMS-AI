@@ -954,7 +954,6 @@ function canvasItemTone(kind: ComposerTool) {
 
 const CANVAS_ITEM_NODE_WIDTH = 260;
 const CANVAS_TOPIC_CHILD_GAP_X = 28;
-const CANVAS_TOPIC_CHILD_GAP_Y = 12;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 640;
@@ -3755,16 +3754,15 @@ export default function MeetingCanvasTab({
         .map((childId) => canvasItemById.get(childId))
         .filter((item): item is CanvasItemViewModel => Boolean(item));
 
-    const estimateChildStackHeight = (topic: CanvasItemViewModel) => {
+    const estimateChildChainHeight = (topic: CanvasItemViewModel) => {
       if (topic.topic_collapsed) return 0;
 
       const childItems = getTopicChildItems(topic.id);
       if (childItems.length === 0) return 0;
 
-      return childItems.reduce((sum, child, childIndex) => {
-        const gap = childIndex === 0 ? 0 : CANVAS_TOPIC_CHILD_GAP_Y;
-        return sum + gap + (canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child));
-      }, 0);
+      return Math.max(
+        ...childItems.map((child) => canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child)),
+      );
     };
 
     const agendaBlockHeights = agendaModels.map((agenda, agendaIndex) => {
@@ -3773,8 +3771,8 @@ export default function MeetingCanvasTab({
 
       const itemStackHeight = topLevelItems.reduce((sum, item, itemIndex) => {
         const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
-        const childStackHeight = isTopicCanvasItem(item) ? estimateChildStackHeight(item) : 0;
-        const rowHeight = Math.max(itemHeight, childStackHeight);
+        const childChainHeight = isTopicCanvasItem(item) ? estimateChildChainHeight(item) : 0;
+        const rowHeight = Math.max(itemHeight, childChainHeight);
         const gap = itemIndex === 0 ? 0 : CANVAS_TOP_LEVEL_GAP_Y;
         return sum + gap + rowHeight;
       }, 0);
@@ -3819,24 +3817,25 @@ export default function MeetingCanvasTab({
               };
         computedCanvasPositions.set(item.id, topPosition);
 
-        let childStackHeight = 0;
+        let childChainHeight = 0;
         if (isTopicCanvasItem(item) && !item.topic_collapsed) {
           const childItems = getTopicChildItems(item.id);
-          let nextChildY = topPosition.y;
+          let nextChildX = topPosition.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X;
 
-          childItems.forEach((child, childIndex) => {
-            if (childIndex > 0) nextChildY += CANVAS_TOPIC_CHILD_GAP_Y;
+          childItems.forEach((child) => {
             computedCanvasPositions.set(child.id, {
-              x: topPosition.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X,
-              y: nextChildY,
+              x: nextChildX,
+              y: topPosition.y,
             });
-            nextChildY += canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child);
+            childChainHeight = Math.max(
+              childChainHeight,
+              canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child),
+            );
+            nextChildX += CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X;
           });
-
-          childStackHeight = nextChildY - topPosition.y;
         }
 
-        const rowHeight = Math.max(itemHeight, childStackHeight);
+        const rowHeight = Math.max(itemHeight, childChainHeight);
         nextTopY = Math.max(nextTopY, topPosition.y + rowHeight + CANVAS_TOP_LEVEL_GAP_Y);
       });
     });
