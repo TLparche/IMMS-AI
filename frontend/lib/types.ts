@@ -215,6 +215,8 @@ export interface CanvasProblemDefinitionGroup {
   source_summary_items: string[];
   conclusion: string;
   conclusion_user_edited?: boolean;
+  source_signature?: string;
+  source_agenda_signatures?: Record<string, string>;
 }
 
 export interface CanvasProblemDefinitionResponse {
@@ -345,6 +347,8 @@ export interface CanvasWorkspaceProblemGroup {
   conclusion: string;
   conclusion_user_edited?: boolean;
   status?: "draft" | "review" | "final" | string;
+  source_signature?: string;
+  source_agenda_signatures?: Record<string, string>;
 }
 
 export interface CanvasNodePosition {

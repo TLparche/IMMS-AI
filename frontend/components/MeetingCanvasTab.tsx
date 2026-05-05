@@ -206,6 +206,8 @@ function buildWorkspaceProblemGroupsPayload(groups: ProblemGroupViewModel[]) {
     conclusion: group.conclusion,
     conclusion_user_edited: group.conclusion_user_edited,
     status: group.status,
+    source_signature: group.source_signature,
+    source_agenda_signatures: group.source_agenda_signatures,
   }));
 }
 
@@ -813,12 +815,185 @@ function hydrateProblemGroups(
       insight_user_edited: group.insight_user_edited ?? previous?.insight_user_edited ?? false,
       conclusion_user_edited:
         group.conclusion_user_edited ?? previous?.conclusion_user_edited ?? false,
+      source_signature: group.source_signature || previous?.source_signature || "",
+      source_agenda_signatures: group.source_agenda_signatures || previous?.source_agenda_signatures || {},
       status:
         group.status === "review" || group.status === "final" || group.status === "draft"
           ? group.status
           : previous?.status || "draft",
     };
   });
+}
+
+function makeStableSignature(value: unknown) {
+  const text = JSON.stringify(value);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${text.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function resolveCanvasItemAgendaId(
+  item: CanvasItemViewModel,
+  itemById: Map<string, CanvasItemViewModel>,
+) {
+  if (item.agenda_id) return item.agenda_id;
+
+  const visited = new Set<string>();
+  let current = item;
+  while (current.parent_topic_id && !visited.has(current.parent_topic_id)) {
+    visited.add(current.parent_topic_id);
+    const parent = itemById.get(current.parent_topic_id);
+    if (!parent) break;
+    if (parent.agenda_id) return parent.agenda_id;
+    current = parent;
+  }
+
+  return "";
+}
+
+function buildProblemDefinitionAgendaInputs(agendaModels: AgendaViewModel[]) {
+  return agendaModels.map((agenda) => ({
+    agenda_id: agenda.id,
+    title: agenda.title,
+    keywords: agenda.keywords,
+    summary_bullets: agenda.summaryBullets,
+  }));
+}
+
+function buildProblemDefinitionIdeaInputs(
+  canvasItems: CanvasItemViewModel[],
+  personalNotes: PersonalNote[],
+) {
+  const itemById = new Map(canvasItems.map((item) => [item.id, item]));
+  const canvasIdeas = canvasItems
+    .map((item) => ({
+      id: item.id,
+      agenda_id: resolveCanvasItemAgendaId(item, itemById),
+      kind: item.kind || "note",
+      title: item.title || "",
+      body: item.body || "",
+      ai_pending: Boolean(item.ai_pending),
+    }))
+    .filter((item) => (
+      item.agenda_id &&
+      !item.ai_pending &&
+      Boolean(item.title.trim() || item.body.trim())
+    ))
+    .map(({ ai_pending: _aiPending, ...item }) => item);
+
+  const personalIdeas = personalNotes
+    .map((note) => ({
+      id: note.id,
+      agenda_id: note.agendaId,
+      kind: note.kind,
+      title: note.title,
+      body: note.body,
+    }))
+    .filter((item) => item.agenda_id && Boolean(item.title.trim() || item.body.trim()));
+
+  return [...canvasIdeas, ...personalIdeas];
+}
+
+function buildProblemDefinitionAgendaSignatures(
+  agendaModels: AgendaViewModel[],
+  canvasItems: CanvasItemViewModel[],
+  personalNotes: PersonalNote[],
+) {
+  const itemById = new Map(canvasItems.map((item) => [item.id, item]));
+  const signatures: Record<string, string> = {};
+
+  agendaModels.forEach((agenda) => {
+    const linkedCanvasItems = canvasItems
+      .map((item) => ({
+        id: item.id,
+        agenda_id: resolveCanvasItemAgendaId(item, itemById),
+        kind: item.kind || "note",
+        title: item.title || "",
+        body: item.body || "",
+        keywords: item.keywords || [],
+        parent_topic_id: item.parent_topic_id || "",
+        child_item_ids: item.child_item_ids || [],
+        compacted_from_ids: item.compacted_from_ids || [],
+        evidence_utterance_ids: item.evidence_utterance_ids || [],
+        ignored_utterance_ids: item.ignored_utterance_ids || [],
+        ai_pending: Boolean(item.ai_pending),
+      }))
+      .filter((item) => item.agenda_id === agenda.id && !item.ai_pending)
+      .sort((left, right) => left.id.localeCompare(right.id));
+
+    const linkedPersonalNotes = personalNotes
+      .filter((note) => note.agendaId === agenda.id)
+      .map((note) => ({
+        id: note.id,
+        kind: note.kind,
+        title: note.title,
+        body: note.body,
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+
+    signatures[agenda.id] = makeStableSignature({
+      agenda: {
+        id: agenda.id,
+        title: agenda.title,
+        keywords: agenda.keywords || [],
+        summary_bullets: agenda.summaryBullets || [],
+      },
+      canvas_items: linkedCanvasItems,
+      personal_notes: linkedPersonalNotes,
+    });
+  });
+
+  return signatures;
+}
+
+function stampProblemGroupSource(
+  group: ProblemGroupViewModel,
+  agendaSignatures: Record<string, string>,
+): ProblemGroupViewModel {
+  const sourceAgendaSignatures = Object.fromEntries(
+    (group.agenda_ids || [])
+      .map((agendaId) => [agendaId, agendaSignatures[agendaId] || ""] as const)
+      .filter(([, signature]) => Boolean(signature)),
+  );
+
+  return {
+    ...group,
+    source_agenda_signatures: sourceAgendaSignatures,
+    source_signature: makeStableSignature(sourceAgendaSignatures),
+  };
+}
+
+function makeUniqueProblemGroupId(baseId: string, usedIds: Set<string>) {
+  const normalizedBase = baseId.trim() || "problem-group";
+  if (!usedIds.has(normalizedBase)) {
+    usedIds.add(normalizedBase);
+    return normalizedBase;
+  }
+
+  let suffix = 2;
+  while (usedIds.has(`${normalizedBase}-${suffix}`)) {
+    suffix += 1;
+  }
+  const nextId = `${normalizedBase}-${suffix}`;
+  usedIds.add(nextId);
+  return nextId;
+}
+
+function shouldRefreshProblemGroup(
+  group: ProblemGroupViewModel,
+  agendaSignatures: Record<string, string>,
+  agendaIdSet: Set<string>,
+) {
+  const currentAgendaIds = (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId));
+  if (currentAgendaIds.length === 0) return false;
+
+  const savedSignatures = group.source_agenda_signatures || {};
+  if (!group.source_signature || Object.keys(savedSignatures).length === 0) return true;
+
+  return currentAgendaIds.some((agendaId) => savedSignatures[agendaId] !== agendaSignatures[agendaId]);
 }
 
 function safeDownload(filename: string, content: string, mime: string) {
@@ -966,81 +1141,35 @@ function makeAgendaNodeLabel(title: string, summary: string, status: string, key
 function canvasItemTone(kind: ComposerTool) {
   if (kind === "comment") {
     return {
-      shell: "border-sky-200 bg-sky-50/90",
+      shell: "bg-[linear-gradient(128deg,#eef7ff_0%,#ffffff_100%)]",
       badge: "bg-sky-100 text-sky-700",
       accent: "text-sky-700",
     };
   }
   if (kind === "topic") {
     return {
-      shell: "border-fuchsia-200 bg-fuchsia-50/90",
+      shell: "bg-[linear-gradient(128deg,#eefbf7_0%,#ffffff_100%)]",
       badge: "bg-fuchsia-100 text-fuchsia-700",
       accent: "text-fuchsia-700",
     };
   }
   return {
-    shell: "border-amber-200 bg-amber-50/90",
+    shell: "bg-[linear-gradient(128deg,#fefbee_0%,#ffffff_100%)]",
     badge: "bg-amber-100 text-amber-700",
     accent: "text-amber-700",
   };
 }
 
-const CANVAS_ITEM_NODE_WIDTH = 260;
+const CANVAS_ITEM_NODE_WIDTH = 248;
+const CANVAS_ITEM_NODE_HEIGHT = 197;
 const CANVAS_TOPIC_CHILD_GAP_X = 28;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 640;
 const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
 
-function estimateKeywordRows(keywords: string[], maxWidth = CANVAS_ITEM_NODE_WIDTH - 40) {
-  let rows = 0;
-  let currentRowWidth = 0;
-
-  keywords.forEach((keyword) => {
-    const labelWidth = Math.min(170, Math.max(54, keyword.length * 8 + 30));
-    const nextWidth = currentRowWidth === 0 ? labelWidth : currentRowWidth + 8 + labelWidth;
-    if (nextWidth > maxWidth) {
-      rows += 1;
-      currentRowWidth = labelWidth;
-      return;
-    }
-
-    if (currentRowWidth === 0) rows += 1;
-    currentRowWidth = nextWidth;
-  });
-
-  return rows;
-}
-
-function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
-  const titleLines = estimateWrappedLines(item.ai_pending ? "AI 정리 중" : item.title || "새 노드", 17);
-  const bodyLines = item.ai_pending
-    ? 3
-    : Math.max(2, estimateWrappedLines(item.body || "내용을 입력해 주세요.", 24));
-  const keywords = item.ai_pending
-    ? ["pending-1", "pending-2", "pending-3"]
-    : (item.keywords || []).filter(Boolean).slice(0, 3);
-  const keywordRows = estimateKeywordRows(keywords);
-  const hasTopicToggle = isTopicCanvasItem(item) && getTopicChildCount(item) > 0;
-  const headerHeight = hasTopicToggle && item.agenda_id ? 64 : 34;
-  const keywordsHeight = keywordRows > 0 ? 12 + keywordRows * 28 + Math.max(0, keywordRows - 1) * 8 : 0;
-  const pointHeight = item.point_id ? 24 : 0;
-
-  return (
-    8 +
-    32 +
-    headerHeight +
-    16 +
-    titleLines * 28 +
-    16 +
-    24 +
-    14 +
-    4 +
-    bodyLines * 24 +
-    keywordsHeight +
-    pointHeight +
-    28
-  );
+function estimateCanvasItemNodeHeight(_item: CanvasItemViewModel) {
+  return CANVAS_ITEM_NODE_HEIGHT;
 }
 
 const CANVAS_ITEM_KEYWORD_STOPWORDS = new Set([
@@ -1153,11 +1282,28 @@ function getTopicChildCount(item: CanvasItemViewModel) {
   return (item.child_item_ids || []).filter(Boolean).length;
 }
 
+function getCanvasItemChangeSignature(item: CanvasItemViewModel) {
+  return makeStableSignature({
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    body: item.body,
+    keywords: item.keywords || [],
+    parent_topic_id: item.parent_topic_id || "",
+    child_item_ids: item.child_item_ids || [],
+    compacted_from_ids: item.compacted_from_ids || [],
+    evidence_utterance_ids: item.evidence_utterance_ids || [],
+    ignored_utterance_ids: item.ignored_utterance_ids || [],
+    ai_pending: Boolean(item.ai_pending),
+  });
+}
+
 function makeCanvasItemNodeLabel(
   item: CanvasItemViewModel,
   selected: boolean,
   linkedAgendaTitle: string,
   onToggleTopicCollapsed?: (itemId: string) => void,
+  highlighted = false,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
   const keywords = (item.keywords || []).filter(Boolean).slice(0, 3);
@@ -1165,68 +1311,72 @@ function makeCanvasItemNodeLabel(
   const mergedSourceCount = getCanvasItemMergedSourceCount(item);
   const topicChildCount = getTopicChildCount(item);
   const showTopicToggle = isTopicCanvasItem(item) && topicChildCount > 0;
+  const title = pending ? "AI 정리 중" : item.title || "내용 상세보기";
+  const body = pending ? "" : item.body || "요약 내용";
+  const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
+  const borderClass = selected ? "border-black" : "border-black/10";
+  const displayKeywords = pending ? [] : keywords.length > 0 ? keywords : ["키워드", "키워드", "키워드"];
 
   return (
-    <div className="min-w-0 p-1">
-      <div className={`rounded-[24px] border px-4 py-4 shadow-sm transition ${tone.shell} ${selected ? "ring-2 ring-slate-900/20" : ""}`}>
-        <div className="flex items-start justify-between gap-2">
-          <span className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${tone.badge}`}>
-            {toolLabel((item.kind as ComposerTool) || "note")}
+    <div className="min-w-0">
+      <div
+        className={`relative flex h-[197px] w-[248px] flex-col items-center justify-center rounded-[16px] border px-[30px] text-center font-['Inter','Noto_Sans_KR',sans-serif] transition-colors ${backgroundClass} ${borderClass}`}
+      >
+        {showTopicToggle ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleTopicCollapsed?.(item.id);
+            }}
+            className="absolute right-3 top-3 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)] hover:bg-white"
+          >
+            {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
+          </button>
+        ) : mergedSourceCount > 1 ? (
+          <span className="absolute right-3 top-3 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)]">
+            묶음 {mergedSourceCount}
           </span>
-          {linkedAgendaTitle ? (
-            <span className="min-w-0 max-w-[88px] truncate whitespace-nowrap rounded-full bg-white/85 px-3 py-1 text-[11px] text-slate-500">
-              {linkedAgendaTitle}
-            </span>
-          ) : null}
-          {showTopicToggle ? (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleTopicCollapsed?.(item.id);
-              }}
-              className="shrink-0 whitespace-nowrap rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white hover:bg-slate-700"
-            >
-              {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
-            </button>
-          ) : mergedSourceCount > 1 ? (
-            <span className="shrink-0 whitespace-nowrap rounded-full bg-slate-900 px-3 py-1 text-[11px] font-semibold text-white">
-              묶음 {mergedSourceCount}개
-            </span>
-          ) : null}
-        </div>
-        <strong className="mt-4 block text-[17px] leading-7 text-slate-900">{pending ? "AI 정리 중" : item.title}</strong>
-        <div className="mt-4 rounded-[18px] border border-white/90 bg-white/90 px-4 py-3">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Content</p>
+        ) : null}
+        {linkedAgendaTitle ? (
+          <span className="absolute left-3 top-3 max-w-[92px] truncate rounded-full bg-white/70 px-2.5 py-1 text-[11px] text-[#6b6b6b]">
+            {linkedAgendaTitle}
+          </span>
+        ) : null}
+        <strong className="max-w-full text-[18px] font-semibold leading-[24.811px] text-black line-clamp-2">
+          {title}
+        </strong>
+        <div className="mt-[20px] w-full">
           {pending ? (
-            <div className="mt-3 space-y-2">
-              <div className="h-3.5 w-full animate-pulse rounded-full bg-slate-200" />
-              <div className="h-3.5 w-3/4 animate-pulse rounded-full bg-slate-200" />
-              <p className="pt-1 text-xs font-medium text-slate-400">키워드와 content 생성 중</p>
+            <div className="mx-auto flex w-full flex-col items-center gap-2">
+              <div className="h-4 w-[116px] animate-pulse rounded-full bg-black/10" />
+              <div className="h-4 w-[84px] animate-pulse rounded-full bg-black/10" />
             </div>
           ) : (
-            <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">
-              {item.body || "내용을 입력해 주세요."}
+            <p className="mx-auto max-w-full text-[16px] font-normal leading-[24.811px] text-[#4d4d4d] line-clamp-2">
+              {body}
             </p>
           )}
         </div>
         {pending ? (
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-[28px] flex justify-center gap-[13px]">
             {[0, 1, 2].map((index) => (
-              <span key={`${item.id}-pending-keyword-${index}`} className="h-6 w-16 animate-pulse rounded-full bg-white/80" />
+              <span key={`${item.id}-pending-keyword-${index}`} className="h-4 w-[48px] animate-pulse rounded-full bg-black/10" />
             ))}
           </div>
-        ) : keywords.length > 0 ? (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {keywords.map((keyword) => (
-              <span key={`${item.id}-${keyword}`} className="max-w-[170px] truncate whitespace-nowrap rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+        ) : (
+          <div className="mt-[28px] flex max-w-full justify-center gap-[13px] overflow-hidden">
+            {displayKeywords.map((keyword, index) => (
+              <span key={`${item.id}-${keyword}-${index}`} className="max-w-[58px] truncate whitespace-nowrap text-[16px] font-normal leading-[24.811px] text-[#4d4d4d]">
                 #{keyword}
               </span>
             ))}
           </div>
-        ) : null}
+        )}
         {item.point_id ? (
-          <p className={`mt-3 text-xs font-medium ${tone.accent}`}>연결 노드: {item.point_id}</p>
+          <p className={`absolute bottom-3 left-4 right-4 truncate text-[11px] font-medium ${tone.accent}`}>
+            연결 노드: {item.point_id}
+          </p>
         ) : null}
       </div>
     </div>
@@ -1540,6 +1690,8 @@ function serializeSharedProblemGroups(groups: ProblemGroupViewModel[]) {
     conclusion: group.conclusion,
     conclusion_user_edited: group.conclusion_user_edited,
     status: group.status,
+    source_signature: group.source_signature,
+    source_agenda_signatures: group.source_agenda_signatures,
   }));
 }
 
@@ -1848,6 +2000,7 @@ export default function MeetingCanvasTab({
   const [agendaOverrides, setAgendaOverrides] = useState<Record<string, AgendaOverride>>({});
   const [canvasItems, setCanvasItems] = useState<CanvasItemViewModel[]>([]);
   const [topicCollapsedOverrides, setTopicCollapsedOverrides] = useState<Record<string, boolean>>({});
+  const [latestHighlightedTopicId, setLatestHighlightedTopicId] = useState("");
   const [customGroups, setCustomGroups] = useState<CustomGroupViewModel[]>([]);
   const [customGroupDraftTitle, setCustomGroupDraftTitle] = useState("");
   const [editingAgendaId, setEditingAgendaId] = useState("");
@@ -1919,8 +2072,6 @@ export default function MeetingCanvasTab({
   const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startWidth: number } | null>(null);
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
-  const lastAutoFitSignatureRef = useRef("");
-  const suppressNextAutoFitRef = useRef(false);
   const workspaceLoadedRef = useRef(false);
   const workspaceHydratingRef = useRef(false);
   const workspaceSaveTimerRef = useRef<number | null>(null);
@@ -1931,6 +2082,7 @@ export default function MeetingCanvasTab({
   const lastIncomingSharedSyncIdRef = useRef("");
   const lastSharedSyncSignatureRef = useRef("");
   const localNodeOverridesRef = useRef(createLocalNodeOverrideMap());
+  const previousCanvasItemSignaturesRef = useRef<Record<string, string>>({});
   const pendingNodePlacementsRef = useRef<Record<string, { x: number; y: number }>>({});
   const analysisSignatureAtImportRef = useRef("");
   const placementFeedbackTimerRef = useRef<number | null>(null);
@@ -2073,11 +2225,11 @@ export default function MeetingCanvasTab({
   useEffect(() => {
     autoProblemDefinitionRef.current = false;
     problemConclusionEntryHandledRef.current = false;
-    lastAutoFitSignatureRef.current = "";
     lastIncomingSharedSyncIdRef.current = "";
     lastSharedSyncSignatureRef.current = "";
     applyingRemoteSharedSyncRef.current = false;
     localNodeOverridesRef.current = createLocalNodeOverrideMap();
+    previousCanvasItemSignaturesRef.current = {};
     lastWorkspaceFieldSignaturesRef.current = createWorkspaceFieldSignatures();
     workspaceLoadedRef.current = false;
     workspaceHydratingRef.current = false;
@@ -2104,6 +2256,7 @@ export default function MeetingCanvasTab({
     setAgendaOverrides({});
     setCanvasItems([]);
     setTopicCollapsedOverrides({});
+    setLatestHighlightedTopicId("");
     setIdeaCreateStack(0);
     setCustomGroups([]);
     setMeetingGoalDraft("");
@@ -2172,6 +2325,28 @@ export default function MeetingCanvasTab({
     solutionTopics,
     stage,
   ]);
+
+  useEffect(() => {
+    const nextSignatures = Object.fromEntries(
+      canvasItems.map((item) => [item.id, getCanvasItemChangeSignature(item)] as const),
+    );
+    const previousSignatures = previousCanvasItemSignaturesRef.current;
+    const hadPreviousItems = Object.keys(previousSignatures).length > 0;
+
+    previousCanvasItemSignaturesRef.current = nextSignatures;
+    if (!hadPreviousItems) {
+      return;
+    }
+
+    const changedItems = canvasItems.filter((item) => previousSignatures[item.id] !== nextSignatures[item.id]);
+    const removedItemIds = Object.keys(previousSignatures).filter((itemId) => !nextSignatures[itemId]);
+    if (changedItems.length === 0 && removedItemIds.length === 0) {
+      return;
+    }
+
+    const changedTopic = [...changedItems].reverse().find(isTopicCanvasItem);
+    setLatestHighlightedTopicId(changedTopic?.id || "");
+  }, [canvasItems]);
 
   useEffect(() => {
     if (!importOverrideActive) {
@@ -3025,11 +3200,14 @@ export default function MeetingCanvasTab({
   );
 
   const handleGenerateAllProblemGroupConclusions = useCallback(
-    async (groups: ProblemGroupViewModel[]) => {
+    async (groups: ProblemGroupViewModel[], targetGroupIds?: string[]) => {
       if (groups.length === 0) return;
 
+      const targetGroupIdSet = targetGroupIds?.length ? new Set(targetGroupIds) : null;
       const targetGroups = groups.filter(
-        (group) => !(group.insight_user_edited && group.conclusion_user_edited),
+        (group) =>
+          (!targetGroupIdSet || targetGroupIdSet.has(group.group_id)) &&
+          !(group.insight_user_edited && group.conclusion_user_edited),
       );
       if (targetGroups.length === 0) {
         setActivityMessage("모든 문제 정의 그룹의 Insight와 결론이 수동 수정 상태라 AI 재생성을 건너뜁니다.");
@@ -3950,6 +4128,7 @@ export default function MeetingCanvasTab({
                   topic_collapsed: getTopicCollapsed(item),
                 }
               : item;
+          const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
           const computedPosition = computedCanvasPositions.get(item.id);
           const savedPosition =
             nodePositions.ideation?.[nodeId] ||
@@ -3982,10 +4161,13 @@ export default function MeetingCanvasTab({
             positionSource,
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
-            className: "rounded-[24px] border shadow-[0_16px_36px_rgba(148,163,184,0.16)]",
+            className: "!border-0 !bg-transparent !p-0 !shadow-none",
             style: {
               width: CANVAS_ITEM_NODE_WIDTH,
-              borderRadius: 24,
+              height: CANVAS_ITEM_NODE_HEIGHT,
+              background: "transparent",
+              border: "none",
+              boxShadow: "none",
               padding: 0,
             },
             data: {
@@ -3999,6 +4181,7 @@ export default function MeetingCanvasTab({
                 item.point_id,
                 item.parent_topic_id || "",
                 isTopicCanvasItem(item) && getTopicCollapsed(item) ? "collapsed" : "expanded",
+                highlighted,
                 ...(item.child_item_ids || []),
                 selectedCanvasItemId === item.id,
               ]),
@@ -4007,13 +4190,14 @@ export default function MeetingCanvasTab({
                 selectedCanvasItemId === item.id,
                 linkedAgendaTitle,
                 handleToggleTopicCollapsed,
+                highlighted,
               ),
             },
           };
         }),
       ],
     };
-  }, [stage, agendaModels, canvasItems, dropProblemGroupId, getTopicCollapsed, handleToggleTopicCollapsed, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedProblemGroupId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+  }, [stage, agendaModels, canvasItems, dropProblemGroupId, getTopicCollapsed, handleToggleTopicCollapsed, latestHighlightedTopicId, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedProblemGroupId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
     if (!workspaceLoadedRef.current || workspaceHydratingRef.current) {
@@ -4057,29 +4241,6 @@ export default function MeetingCanvasTab({
       return nextEdges.length === current.length ? current : nextEdges;
     });
   }, [graphBlueprint]);
-
-  const autoFitSignature = useMemo(
-    () => `${meetingId}|${stage}|${nodes.map((node) => node.id).join("|")}`,
-    [meetingId, nodes, stage],
-  );
-
-  useEffect(() => {
-    if (!flowRef.current || nodes.length === 0) return;
-    if (lastAutoFitSignatureRef.current === autoFitSignature) return;
-
-    lastAutoFitSignatureRef.current = autoFitSignature;
-
-    if (suppressNextAutoFitRef.current) {
-      suppressNextAutoFitRef.current = false;
-      return;
-    }
-
-    const frame = window.requestAnimationFrame(() => {
-      flowRef.current?.fitView({ padding: stage === "problem-definition" ? 0.08 : 0.2, duration: 250 });
-    });
-
-    return () => window.cancelAnimationFrame(frame);
-  }, [autoFitSignature, nodes.length, stage]);
 
   useEffect(() => {
     const handlePointerMove = (event: MouseEvent) => {
@@ -4393,29 +4554,138 @@ export default function MeetingCanvasTab({
     setProblemDefinitionStagePending(true);
     setBusy(true);
     try {
-      const result = await generateCanvasProblemDefinition({
-        meeting_id: meetingId,
-        topic: meetingTopicForAi,
-        agendas: agendaModels.map((agenda) => ({
-          agenda_id: agenda.id,
-          title: agenda.title,
-          keywords: agenda.keywords,
-          summary_bullets: agenda.summaryBullets,
-        })),
-        ideas: personalNotes.map((note) => ({
-          id: note.id,
-          agenda_id: note.agendaId,
-          kind: note.kind,
-          title: note.title,
-          body: note.body,
-        })),
-      });
-      const nextGroups = hydrateProblemGroups(result.groups, problemGroups);
+      const agendaInputs = buildProblemDefinitionAgendaInputs(agendaModels);
+      const ideaInputs = buildProblemDefinitionIdeaInputs(canvasItems, personalNotes);
+      const agendaSignatures = buildProblemDefinitionAgendaSignatures(agendaModels, canvasItems, personalNotes);
+      const agendaById = new Map(agendaInputs.map((agenda) => [agenda.agenda_id, agenda]));
+      const agendaIdSet = new Set(agendaInputs.map((agenda) => agenda.agenda_id));
+      const ideasForAgendaIds = (agendaIds: string[]) => {
+        const targetAgendaIds = new Set(agendaIds);
+        return ideaInputs.filter((idea) => targetAgendaIds.has(idea.agenda_id));
+      };
+
+      let nextGroups: ProblemGroupViewModel[] = [];
+      let refreshedGroupIds: string[] = [];
+      let warning = "";
+
+      if (problemGroups.length === 0) {
+        const result = await generateCanvasProblemDefinition({
+          meeting_id: meetingId,
+          topic: meetingTopicForAi,
+          agendas: agendaInputs,
+          ideas: ideaInputs,
+        });
+        warning = result.warning || "";
+        nextGroups = hydrateProblemGroups(result.groups, []).map((group) =>
+          stampProblemGroupSource(group, agendaSignatures),
+        );
+        refreshedGroupIds = nextGroups.map((group) => group.group_id);
+      } else {
+        let workingGroups = problemGroups.filter((group) => {
+          const groupAgendaIds = group.agenda_ids || [];
+          if (groupAgendaIds.length === 0) return true;
+          return groupAgendaIds.some((agendaId) => agendaIdSet.has(agendaId));
+        });
+        const usedGroupIds = new Set(workingGroups.map((group) => group.group_id));
+        const refreshTargets: Array<{
+          agendaIds: string[];
+          previousGroup?: ProblemGroupViewModel;
+        }> = [];
+
+        workingGroups.forEach((group) => {
+          const agendaIds = (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId));
+          if (shouldRefreshProblemGroup(group, agendaSignatures, agendaIdSet)) {
+            refreshTargets.push({
+              agendaIds,
+              previousGroup: group,
+            });
+          }
+        });
+
+        const coveredAgendaIds = new Set(
+          workingGroups.flatMap((group) => (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId))),
+        );
+        agendaInputs.forEach((agenda) => {
+          if (!coveredAgendaIds.has(agenda.agenda_id)) {
+            refreshTargets.push({
+              agendaIds: [agenda.agenda_id],
+            });
+          }
+        });
+
+        for (const target of refreshTargets) {
+          const targetAgendas = target.agendaIds
+            .map((agendaId) => agendaById.get(agendaId))
+            .filter((agenda): agenda is ReturnType<typeof buildProblemDefinitionAgendaInputs>[number] => Boolean(agenda));
+          if (targetAgendas.length === 0) continue;
+
+          const result = await generateCanvasProblemDefinition({
+            meeting_id: meetingId,
+            topic: meetingTopicForAi,
+            agendas: targetAgendas,
+            ideas: ideasForAgendaIds(target.agendaIds),
+          });
+          if (result.warning && !warning) {
+            warning = result.warning;
+          }
+
+          const generatedGroups = hydrateProblemGroups(result.groups, []).map((group, index) => {
+            const previousGroup = index === 0 ? target.previousGroup : undefined;
+            const nextGroupId =
+              previousGroup?.group_id ||
+              makeUniqueProblemGroupId(
+                group.group_id || `problem-group-${group.agenda_ids[0] || target.agendaIds[0] || Date.now()}`,
+                usedGroupIds,
+              );
+            const mergedGroup: ProblemGroupViewModel = {
+              ...group,
+              group_id: nextGroupId,
+              insight_lens: previousGroup?.insight_user_edited
+                ? previousGroup.insight_lens
+                : group.insight_lens,
+              insight_user_edited: previousGroup?.insight_user_edited ?? group.insight_user_edited ?? false,
+              conclusion: previousGroup?.conclusion_user_edited
+                ? previousGroup.conclusion
+                : group.conclusion,
+              conclusion_user_edited:
+                previousGroup?.conclusion_user_edited ?? group.conclusion_user_edited ?? false,
+              status: "draft",
+            };
+            return stampProblemGroupSource(mergedGroup, agendaSignatures);
+          });
+
+          if (target.previousGroup) {
+            const replacement = generatedGroups[0];
+            if (replacement) {
+              workingGroups = workingGroups.map((group) =>
+                group.group_id === target.previousGroup?.group_id ? replacement : group,
+              );
+              refreshedGroupIds.push(replacement.group_id);
+            }
+            if (generatedGroups.length > 1) {
+              const extras = generatedGroups.slice(1);
+              workingGroups = [...workingGroups, ...extras];
+              refreshedGroupIds.push(...extras.map((group) => group.group_id));
+            }
+          } else if (generatedGroups.length > 0) {
+            workingGroups = [...workingGroups, ...generatedGroups];
+            refreshedGroupIds.push(...generatedGroups.map((group) => group.group_id));
+          }
+        }
+
+        nextGroups = workingGroups.map((group) =>
+          refreshedGroupIds.includes(group.group_id)
+            ? group
+            : stampProblemGroupSource(group, agendaSignatures),
+        );
+      }
+
       problemConclusionEntryHandledRef.current = false;
       setProblemGroups(nextGroups);
-      setSelectedProblemGroupId(nextGroups[0]?.group_id || "");
+      const nextSelectedGroupId = refreshedGroupIds[0] || nextGroups[0]?.group_id || "";
+      setSelectedProblemGroupId(nextSelectedGroupId);
       setSelectedSolutionTopicId("");
-      setSelectedNodeId(nextGroups[0] ? `problem-${nextGroups[0].group_id}` : "");
+      setSelectedNodeId(nextSelectedGroupId ? `problem-${nextSelectedGroupId}` : "");
       setEditingProblemGroupId("");
       setEditingSolutionTopicId("");
       setStage("problem-definition");
@@ -4425,10 +4695,15 @@ export default function MeetingCanvasTab({
           problemGroups: nextGroups,
         });
       }
-      setActivityMessage(result.warning || `문제 정의 주제 ${nextGroups.length}개를 생성했습니다.`);
-      if (nextGroups.length > 0) {
+      setActivityMessage(
+        warning ||
+          (refreshedGroupIds.length > 0
+            ? `변경된 그룹분류 ${refreshedGroupIds.length}개만 문제 정의를 갱신했습니다.`
+            : "변경된 그룹분류가 없어 기존 문제 정의를 유지했습니다."),
+      );
+      if (refreshedGroupIds.length > 0) {
         problemConclusionEntryHandledRef.current = true;
-        await handleGenerateAllProblemGroupConclusions(nextGroups);
+        await handleGenerateAllProblemGroupConclusions(nextGroups, refreshedGroupIds);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -4672,7 +4947,6 @@ export default function MeetingCanvasTab({
           },
         };
 
-        suppressNextAutoFitRef.current = true;
         pendingNodePlacementsRef.current[nextNodeId] = {
           x: flowPosition.x,
           y: flowPosition.y,
@@ -4773,7 +5047,6 @@ export default function MeetingCanvasTab({
           : tool === "comment"
             ? "코멘트 내용을 입력해 주세요."
             : "메모 내용을 입력해 주세요.";
-      suppressNextAutoFitRef.current = true;
       pendingNodePlacementsRef.current[nextNodeId] = {
         x: flowPosition.x,
         y: flowPosition.y,

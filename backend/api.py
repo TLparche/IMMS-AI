@@ -464,6 +464,12 @@ def _normalize_canvas_workspace_problem_groups(
             "conclusion": _safe_text(group.conclusion),
             "conclusion_user_edited": bool(group.conclusion_user_edited),
             "status": _safe_text(group.status, "draft"),
+            "source_signature": _safe_text(group.source_signature),
+            "source_agenda_signatures": {
+                _safe_text(key): _safe_text(value)
+                for key, value in (group.source_agenda_signatures or {}).items()
+                if _safe_text(key) and _safe_text(value)
+            },
         }
         for group in (groups or [])
         if _safe_text(group.group_id) and _safe_text(group.topic)
@@ -1804,6 +1810,8 @@ class CanvasWorkspaceProblemGroupInput(BaseModel):
     conclusion: str = ""
     conclusion_user_edited: bool = False
     status: str = "draft"
+    source_signature: str = ""
+    source_agenda_signatures: dict[str, str] = Field(default_factory=dict)
 
 
 class CanvasWorkspaceSolutionTopicInput(BaseModel):
