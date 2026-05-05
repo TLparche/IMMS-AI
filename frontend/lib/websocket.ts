@@ -140,6 +140,7 @@ export class WebSocketClient {
       combinedChunkCount?: number
       trimmedFromSilence?: boolean
     },
+    meetingGoal?: string,
   ) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('⚠️ WebSocket not connected, cannot send audio')
@@ -158,6 +159,7 @@ export class WebSocketClient {
         audio_data: base64Audio,
         audio_mime: audioBlob.type || audioMeta?.mimeType || 'audio/wav',
         audio_filename: audioBlob.type === 'audio/wav' || audioMeta?.mimeType === 'audio/wav' ? 'chunk.wav' : 'chunk.webm',
+        meeting_goal: meetingGoal || '',
         timestamp: new Date().toISOString(),
         audio_meta: audioMeta
           ? {

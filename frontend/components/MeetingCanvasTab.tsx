@@ -23,7 +23,6 @@ import {
   getCanvasPersonalNotes,
   confirmCanvasPlacement,
   getCanvasIdeaAssimilationWorkspaceJob,
-  generateMeetingGoal,
   generateProblemGroupConclusion,
   generateCanvasProblemDefinition,
   generateCanvasSolutionStage,
@@ -114,6 +113,7 @@ type SolutionTopicViewModel = CanvasSolutionTopicResponse & {
 };
 
 type WorkspaceFieldSignatures = {
+  meeting_goal: string;
   stage: string;
   agenda_overrides: string;
   canvas_items: string;
@@ -180,6 +180,7 @@ function logCanvasIdeaAssimilationJob(
 
 function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
   return {
+    meeting_goal: "",
     stage: "",
     agenda_overrides: "",
     canvas_items: "",
@@ -328,6 +329,7 @@ function serializeCustomGroups(groups: CustomGroupViewModel[]) {
 }
 
 function buildWorkspaceFieldSignatures(input: {
+  meetingGoal: string;
   stage: CanvasStage;
   agendaOverrides: Record<string, AgendaOverride>;
   canvasItems: CanvasItemViewModel[];
@@ -338,6 +340,7 @@ function buildWorkspaceFieldSignatures(input: {
   importedState: MeetingState | null;
 }): WorkspaceFieldSignatures {
   return {
+    meeting_goal: input.meetingGoal.trim(),
     stage: input.stage,
     agenda_overrides: JSON.stringify(serializeAgendaOverrides(input.agendaOverrides)),
     canvas_items: JSON.stringify(buildWorkspaceCanvasItemsPayload(input.canvasItems)),
@@ -351,6 +354,7 @@ function buildWorkspaceFieldSignatures(input: {
 
 function buildFullWorkspacePatchPayload(input: {
   meetingId: string;
+  meetingGoal: string;
   stage: CanvasStage;
   agendaOverrides: Record<string, AgendaOverride>;
   canvasItems: CanvasItemViewModel[];
@@ -362,6 +366,7 @@ function buildFullWorkspacePatchPayload(input: {
 }) {
   return {
     meeting_id: input.meetingId,
+    meeting_goal: input.meetingGoal.trim(),
     stage: input.stage,
     agenda_overrides: serializeAgendaOverrides(input.agendaOverrides),
     canvas_items: serializeSharedCanvasItems(input.canvasItems),
@@ -527,6 +532,9 @@ type MeetingCanvasTabProps = {
   userId: string;
   meetingId: string;
   meetingTitle: string;
+  meetingGoal: string;
+  onMeetingGoalChange: (goal: string) => void;
+  onMeetingGoalSync?: (goal: string) => void;
   transcripts: MeetingTranscript[];
   agendas: MeetingAgenda[];
   analysisState: MeetingState | null;
@@ -584,12 +592,6 @@ function toolPreviewTone(tool: CanvasTool) {
 function isAudioImportFile(file: File) {
   const suffix = file.name.split(".").pop()?.toLowerCase() || "";
   return ["wav", "mp3", "m4a", "webm"].includes(suffix);
-}
-
-function buildFallbackMeetingGoal(topic: string) {
-  const cleanTopic = topic.trim();
-  if (!cleanTopic) return "이번 회의에서 실행 방향과 핵심 우선순위를 정리한다.";
-  return `${cleanTopic}에 대해 실행 방향과 핵심 우선순위를 정리한다.`;
 }
 
 function extractAgendaIdFromNodeId(nodeId: string) {
@@ -1103,6 +1105,17 @@ function getCanvasItemMergedSourceCount(item: CanvasItemViewModel): number {
 
 function isTopicCanvasItem(item: CanvasItemViewModel) {
   return item.kind === "topic";
+}
+
+function isCountableIdeationChildNode(item: CanvasItemViewModel) {
+  if (isTopicCanvasItem(item)) return true;
+  return !item.ai_pending && Boolean(item.title.trim() || item.body.trim());
+}
+
+function getCanvasIdeaCreateStackFallback(items: CanvasItemViewModel[]) {
+  return items
+    .filter((item) => item.ai_generated && !item.ai_pending && Boolean(item.title.trim() || item.body.trim()))
+    .reduce((sum, item) => sum + getCanvasItemMergedSourceCount(item), 0);
 }
 
 function getTopicChildCount(item: CanvasItemViewModel) {
@@ -1628,6 +1641,7 @@ function serializeSharedSolutionTopics(topics: SolutionTopicViewModel[]) {
 }
 
 function buildSharedCanvasSignature(payload: {
+  meeting_goal?: string;
   stage: CanvasStage;
   agenda_overrides: Record<string, unknown>;
   canvas_items: unknown[];
@@ -1766,6 +1780,9 @@ export default function MeetingCanvasTab({
   userId,
   meetingId,
   meetingTitle,
+  meetingGoal,
+  onMeetingGoalChange,
+  onMeetingGoalSync,
   transcripts,
   agendas,
   analysisState,
@@ -1831,8 +1848,7 @@ export default function MeetingCanvasTab({
   const [draggingPersonalNoteId, setDraggingPersonalNoteId] = useState("");
   const [dropProblemGroupId, setDropProblemGroupId] = useState("");
   const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>("detail");
-  const [generatedMeetingGoal, setGeneratedMeetingGoal] = useState("");
-  const [meetingGoalBusy, setMeetingGoalBusy] = useState(false);
+  const [meetingGoalDraft, setMeetingGoalDraft] = useState(meetingGoal);
   const [conclusionRefreshingGroupId, setConclusionRefreshingGroupId] = useState("");
   const [conclusionBatchBusy, setConclusionBatchBusy] = useState(false);
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
@@ -1840,6 +1856,7 @@ export default function MeetingCanvasTab({
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
+  const [ideaCreateStack, setIdeaCreateStack] = useState(0);
   const [showTranscriptCollection, setShowTranscriptCollection] = useState(false);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
@@ -1893,6 +1910,7 @@ export default function MeetingCanvasTab({
   const ideaSilenceTimerRef = useRef<number | null>(null);
   const ideaAssimilationInFlightRef = useRef(false);
   const latestSharedWorkspaceRef = useRef<{
+    meetingGoal: string;
     stage: CanvasStage;
     agendaOverrides: Record<string, AgendaOverride>;
     canvasItems: CanvasItemViewModel[];
@@ -1902,6 +1920,7 @@ export default function MeetingCanvasTab({
     nodePositions: CanvasNodePositionsByStage;
     importedState: MeetingState | null;
   }>({
+    meetingGoal: "",
     stage: "ideation",
     agendaOverrides: {},
     canvasItems: [],
@@ -1954,11 +1973,24 @@ export default function MeetingCanvasTab({
 
     return [...hydratedBaseModels, ...customAgendaModels];
   }, [effectiveState, agendas, transcripts, agendaOverrides, customGroups]);
-  const meetingGoalTopic = useMemo(
-    () => meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim(),
-    [effectiveState?.meeting_goal, meetingTitle],
-  );
-  const displayMeetingGoal = generatedMeetingGoal || buildFallbackMeetingGoal(meetingGoalTopic);
+  const ideationNodeCountSummary = useMemo(() => {
+    const agendaIdSet = new Set(agendaModels.map((agenda) => agenda.id));
+    const directChildCount = canvasItems.filter(
+      (item) =>
+        agendaIdSet.has(item.agenda_id) &&
+        !item.parent_topic_id &&
+        isCountableIdeationChildNode(item),
+    ).length;
+    const fallbackStack = getCanvasIdeaCreateStackFallback(canvasItems);
+    const stack = ideaCreateStack > 0 ? ideaCreateStack : fallbackStack;
+
+    return {
+      directChildCount,
+      target: 3 + Math.floor(stack / 4),
+    };
+  }, [agendaModels, canvasItems, ideaCreateStack]);
+  const activeMeetingGoal = meetingGoalDraft.trim();
+  const meetingTopicForAi = activeMeetingGoal || meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim() || "회의 주제";
   const transcriptStripItems = useMemo(() => {
     const summaryRows = sttFlowSummaries
       .slice(-3)
@@ -2024,6 +2056,7 @@ export default function MeetingCanvasTab({
     ideaBufferStartedAtRef.current = null;
     ideaAssimilationInFlightRef.current = false;
     latestSharedWorkspaceRef.current = {
+      meetingGoal: "",
       stage: "ideation",
       agendaOverrides: {},
       canvasItems: [],
@@ -2038,7 +2071,10 @@ export default function MeetingCanvasTab({
     setImportOverrideActive(false);
     setAgendaOverrides({});
     setCanvasItems([]);
+    setIdeaCreateStack(0);
     setCustomGroups([]);
+    setMeetingGoalDraft("");
+    onMeetingGoalChange("");
     setCustomGroupDraftTitle("");
     setEditingAgendaId("");
     setEditingCanvasItemId("");
@@ -2072,10 +2108,11 @@ export default function MeetingCanvasTab({
       window.clearTimeout(ideaSilenceTimerRef.current);
       ideaSilenceTimerRef.current = null;
     }
-  }, [meetingId]);
+  }, [meetingId, onMeetingGoalChange]);
 
   useEffect(() => {
     latestSharedWorkspaceRef.current = {
+      meetingGoal: meetingGoalDraft.trim(),
       stage,
       agendaOverrides,
       canvasItems,
@@ -2090,6 +2127,7 @@ export default function MeetingCanvasTab({
     agendaOverrides,
     canvasItems,
     customGroups,
+    meetingGoalDraft,
     nodePositions,
     persistedSharedImportedState,
     problemGroups,
@@ -2144,6 +2182,7 @@ export default function MeetingCanvasTab({
     setCanvasItems([]);
     setCustomGroups([]);
     setCustomGroupDraftTitle("");
+    setIdeaCreateStack(0);
     setNodePositions({});
     setImportedState(null);
     setStage("ideation");
@@ -2226,6 +2265,7 @@ export default function MeetingCanvasTab({
         const nextImportedState = shouldUseLocalCanvas
           ? savedLocalCanvasState?.imported_state || null
           : saved.imported_state || null;
+        const nextMeetingGoal = saved.meeting_goal || "";
         const nextImportOverrideActive = shouldUseLocalCanvas
           ? Boolean(savedLocalCanvasState?.import_override_active && nextImportedState)
           : Boolean(saved.imported_state);
@@ -2236,6 +2276,9 @@ export default function MeetingCanvasTab({
         setAgendaOverrides(nextAgendaOverrides);
         setCanvasItems(nextCanvasItems);
         setCustomGroups(nextCustomGroups);
+        setIdeaCreateStack(saved.idea_create_stack || 0);
+        setMeetingGoalDraft(nextMeetingGoal);
+        onMeetingGoalChange(nextMeetingGoal);
         setSharedSyncEnabled(nextSharedSyncEnabled);
         setNodePositions(nextNodePositions);
         setImportedState(nextImportedState);
@@ -2245,6 +2288,7 @@ export default function MeetingCanvasTab({
         setImportOverrideActive(nextImportOverrideActive);
         setStage(nextStage);
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
+          meeting_goal: nextMeetingGoal,
           stage: nextStage,
           agenda_overrides: nextAgendaOverrides,
           canvas_items: nextCanvasItems,
@@ -2255,6 +2299,7 @@ export default function MeetingCanvasTab({
           imported_state: nextImportedState,
         });
         lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
+          meetingGoal: nextMeetingGoal,
           stage: nextStage,
           agendaOverrides: nextAgendaOverrides,
           canvasItems: nextCanvasItems,
@@ -2300,11 +2345,13 @@ export default function MeetingCanvasTab({
         setAgendaOverrides({});
         setCanvasItems([]);
         setCustomGroups([]);
+        setIdeaCreateStack(0);
         setSharedSyncEnabled(true);
         setNodePositions({});
         setImportedState(null);
         setStage("ideation");
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
+          meeting_goal: "",
           stage: "ideation",
           agenda_overrides: {},
           canvas_items: [],
@@ -2315,6 +2362,7 @@ export default function MeetingCanvasTab({
           imported_state: null,
         });
         lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
+          meetingGoal: "",
           stage: "ideation",
           agendaOverrides: {},
           canvasItems: [],
@@ -2349,6 +2397,7 @@ export default function MeetingCanvasTab({
 
     setAgendaOverrides({});
     setCanvasItems([]);
+    setIdeaCreateStack(0);
     setImportedState(null);
     setImportOverrideActive(false);
     setProblemGroups([]);
@@ -2441,37 +2490,8 @@ export default function MeetingCanvasTab({
   }, [sharedSyncEnabled]);
 
   useEffect(() => {
-    let cancelled = false;
-    const topic = meetingGoalTopic;
-
-    if (!topic) {
-      setGeneratedMeetingGoal(buildFallbackMeetingGoal(""));
-      setMeetingGoalBusy(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setMeetingGoalBusy(true);
-    void generateMeetingGoal({ meeting_id: meetingId, topic })
-      .then((result) => {
-        if (cancelled) return;
-        setGeneratedMeetingGoal(result.goal || buildFallbackMeetingGoal(topic));
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setGeneratedMeetingGoal(buildFallbackMeetingGoal(topic));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setMeetingGoalBusy(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [meetingGoalTopic, meetingId]);
+    setMeetingGoalDraft(meetingGoal);
+  }, [meetingGoal]);
 
   useEffect(() => {
     const syncViewportMode = () => {
@@ -2486,7 +2506,7 @@ export default function MeetingCanvasTab({
   const buildProblemConclusionPayload = useCallback(
     (group: ProblemGroupViewModel) => ({
       meeting_id: meetingId,
-      meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+      meeting_topic: meetingTopicForAi,
       group: {
         group_id: group.group_id,
         topic: group.topic,
@@ -2501,7 +2521,7 @@ export default function MeetingCanvasTab({
         })),
       },
     }),
-    [effectiveState?.meeting_goal, generatedMeetingGoal, meetingId, meetingTitle],
+    [meetingId, meetingTopicForAi],
   );
 
   const forceBroadcastSharedCanvas = useCallback(
@@ -2514,12 +2534,14 @@ export default function MeetingCanvasTab({
       solutionTopics?: SolutionTopicViewModel[];
       nodePositions?: CanvasNodePositionsByStage;
       importedState?: MeetingState | null;
+      meetingGoal?: string;
     }) => {
       if (!meetingId || !userId) {
         return;
       }
 
       const snapshot = {
+        meeting_goal: overrides?.meetingGoal ?? meetingGoalDraft.trim(),
         stage: overrides?.stage ?? stage,
         agenda_overrides: serializeAgendaOverrides(overrides?.agendaOverrides ?? agendaOverrides),
         canvas_items: serializeSharedCanvasItems(overrides?.canvasItems ?? canvasItems),
@@ -2539,6 +2561,7 @@ export default function MeetingCanvasTab({
         meeting_id: meetingId,
         updated_by: userId,
         updated_at: new Date().toISOString(),
+        meeting_goal: snapshot.meeting_goal,
         stage: snapshot.stage,
         agenda_overrides: snapshot.agenda_overrides,
         canvas_items: snapshot.canvas_items,
@@ -2553,6 +2576,7 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       canvasItems,
       customGroups,
+      meetingGoalDraft,
       meetingId,
       nodePositions,
       onSharedCanvasSync,
@@ -2570,14 +2594,19 @@ export default function MeetingCanvasTab({
 
       const nextCanvasItems = hydrateCanvasItems(workspace.canvas_items || []);
       const nextNodePositions = workspace.node_positions || {};
+      const nextMeetingGoal = typeof workspace.meeting_goal === "string" ? workspace.meeting_goal : meetingGoalDraft;
       (workspace.idea_processed_utterance_ids || []).forEach((id) => {
         if (id) processedIdeaUtteranceIdsRef.current.add(id);
       });
 
       setCanvasItems(nextCanvasItems);
+      setMeetingGoalDraft(nextMeetingGoal);
+      onMeetingGoalChange(nextMeetingGoal);
+      setIdeaCreateStack(workspace.idea_create_stack || 0);
       setNodePositions(nextNodePositions);
       latestSharedWorkspaceRef.current = {
         ...latestSharedWorkspaceRef.current,
+        meetingGoal: nextMeetingGoal,
         canvasItems: nextCanvasItems,
         nodePositions: nextNodePositions,
         importedState: persistedSharedImportedState,
@@ -2588,6 +2617,7 @@ export default function MeetingCanvasTab({
           meetingId,
           buildFullWorkspacePatchPayload({
             meetingId,
+            meetingGoal: nextMeetingGoal,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItems,
@@ -2599,6 +2629,7 @@ export default function MeetingCanvasTab({
           }),
         );
         forceBroadcastSharedCanvas({
+          meetingGoal: nextMeetingGoal,
           canvasItems: nextCanvasItems,
           nodePositions: nextNodePositions,
         });
@@ -2608,7 +2639,9 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       customGroups,
       forceBroadcastSharedCanvas,
+      meetingGoalDraft,
       meetingId,
+      onMeetingGoalChange,
       persistedSharedImportedState,
       problemGroups,
       sharedSyncEnabled,
@@ -2696,7 +2729,7 @@ export default function MeetingCanvasTab({
         });
         const started = await startCanvasIdeaAssimilationWorkspace({
           meeting_id: meetingId,
-          meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+          meeting_topic: meetingTopicForAi,
           selected_agenda_id: selectedAgendaId || agendaModels[0]?.id || "",
           context_utterances: contextRows.map((row) => ({
             id: row.id,
@@ -2802,10 +2835,8 @@ export default function MeetingCanvasTab({
     [
       agendaModels,
       applyServerIdeaWorkspace,
-      effectiveState?.meeting_goal,
-      generatedMeetingGoal,
+      meetingTopicForAi,
       meetingId,
-      meetingTitle,
       selectedAgendaId,
       stage,
       transcripts,
@@ -3060,7 +3091,6 @@ export default function MeetingCanvasTab({
   useEffect(() => {
     if (
       !meetingId ||
-      !sharedSyncEnabled ||
       !workspaceLoadedRef.current ||
       workspaceHydratingRef.current ||
       problemDefinitionStagePending ||
@@ -3073,7 +3103,9 @@ export default function MeetingCanvasTab({
 
     const nextProblemGroupsPayload = buildWorkspaceProblemGroupsPayload(problemGroups);
     const nextSolutionTopicsPayload = buildWorkspaceSolutionTopicsPayload(solutionTopics);
+    const nextMeetingGoal = meetingGoalDraft.trim();
     const nextSignatures = buildWorkspaceFieldSignatures({
+      meetingGoal: nextMeetingGoal,
       stage,
       agendaOverrides,
       canvasItems,
@@ -3086,6 +3118,7 @@ export default function MeetingCanvasTab({
     const previousSignatures = lastWorkspaceFieldSignaturesRef.current;
     const patch: {
       meeting_id: string;
+      meeting_goal?: string;
       stage?: CanvasStage;
       agenda_overrides?: ReturnType<typeof serializeAgendaOverrides>;
       canvas_items?: ReturnType<typeof serializeSharedCanvasItems>;
@@ -3099,35 +3132,41 @@ export default function MeetingCanvasTab({
     };
 
     let hasChanges = false;
-    if (nextSignatures.stage !== previousSignatures.stage) {
+    let meetingGoalChanged = false;
+    if (nextSignatures.meeting_goal !== previousSignatures.meeting_goal) {
+      patch.meeting_goal = nextMeetingGoal;
+      hasChanges = true;
+      meetingGoalChanged = true;
+    }
+    if (sharedSyncEnabled && nextSignatures.stage !== previousSignatures.stage) {
       patch.stage = stage;
       hasChanges = true;
     }
-    if (nextSignatures.agenda_overrides !== previousSignatures.agenda_overrides) {
+    if (sharedSyncEnabled && nextSignatures.agenda_overrides !== previousSignatures.agenda_overrides) {
       patch.agenda_overrides = serializeAgendaOverrides(agendaOverrides);
       hasChanges = true;
     }
-    if (nextSignatures.canvas_items !== previousSignatures.canvas_items) {
+    if (sharedSyncEnabled && nextSignatures.canvas_items !== previousSignatures.canvas_items) {
       patch.canvas_items = serializeSharedCanvasItems(canvasItems);
       hasChanges = true;
     }
-    if (nextSignatures.custom_groups !== previousSignatures.custom_groups) {
+    if (sharedSyncEnabled && nextSignatures.custom_groups !== previousSignatures.custom_groups) {
       patch.custom_groups = serializeCustomGroups(customGroups);
       hasChanges = true;
     }
-    if (nextSignatures.problem_groups !== previousSignatures.problem_groups) {
+    if (sharedSyncEnabled && nextSignatures.problem_groups !== previousSignatures.problem_groups) {
       patch.problem_groups = nextProblemGroupsPayload;
       hasChanges = true;
     }
-    if (nextSignatures.solution_topics !== previousSignatures.solution_topics) {
+    if (sharedSyncEnabled && nextSignatures.solution_topics !== previousSignatures.solution_topics) {
       patch.solution_topics = nextSolutionTopicsPayload;
       hasChanges = true;
     }
-    if (nextSignatures.node_positions !== previousSignatures.node_positions) {
+    if (sharedSyncEnabled && nextSignatures.node_positions !== previousSignatures.node_positions) {
       patch.node_positions = nodePositions;
       hasChanges = true;
     }
-    if (nextSignatures.imported_state !== previousSignatures.imported_state) {
+    if (sharedSyncEnabled && nextSignatures.imported_state !== previousSignatures.imported_state) {
       patch.imported_state = persistedSharedImportedState;
       hasChanges = true;
     }
@@ -3143,7 +3182,15 @@ export default function MeetingCanvasTab({
     workspaceSaveTimerRef.current = window.setTimeout(() => {
       void saveCanvasWorkspacePatch(patch)
         .then(() => {
-          lastWorkspaceFieldSignaturesRef.current = nextSignatures;
+          if (meetingGoalChanged) {
+            onMeetingGoalSync?.(nextMeetingGoal);
+          }
+          lastWorkspaceFieldSignaturesRef.current = sharedSyncEnabled
+            ? nextSignatures
+            : {
+                ...lastWorkspaceFieldSignaturesRef.current,
+                meeting_goal: nextSignatures.meeting_goal,
+              };
         })
         .catch((error) => {
           console.error("Failed to save canvas workspace patch:", error);
@@ -3161,8 +3208,10 @@ export default function MeetingCanvasTab({
     canvasItems,
     conclusionBatchBusy,
     customGroups,
+    meetingGoalDraft,
     meetingId,
     nodePositions,
+    onMeetingGoalSync,
     persistedSharedImportedState,
     problemDefinitionStagePending,
     problemGroups,
@@ -3177,12 +3226,14 @@ export default function MeetingCanvasTab({
       sharedSyncEnabled
         ? {
             shared_sync_enabled: true,
+            meeting_goal: meetingGoalDraft.trim(),
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
             custom_groups: serializeCustomGroups(customGroups),
           }
         : {
             shared_sync_enabled: false,
+            meeting_goal: meetingGoalDraft.trim(),
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
             custom_groups: serializeCustomGroups(customGroups),
@@ -3198,6 +3249,7 @@ export default function MeetingCanvasTab({
       canvasItems,
       customGroups,
       importOverrideActive,
+      meetingGoalDraft,
       nodePositions,
       persistedSharedImportedState,
       problemGroups,
@@ -3243,6 +3295,7 @@ export default function MeetingCanvasTab({
 
   const sharedCanvasSnapshot = useMemo(
     () => ({
+      meeting_goal: meetingGoalDraft.trim(),
       stage,
       agenda_overrides: serializeAgendaOverrides(agendaOverrides),
       canvas_items: serializeSharedCanvasItems(canvasItems),
@@ -3252,7 +3305,7 @@ export default function MeetingCanvasTab({
       node_positions: nodePositions,
       imported_state: persistedSharedImportedState,
     }),
-    [agendaOverrides, canvasItems, customGroups, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
+    [agendaOverrides, canvasItems, customGroups, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
   );
 
   useEffect(() => {
@@ -3264,6 +3317,7 @@ export default function MeetingCanvasTab({
       meetingId,
       buildFullWorkspacePatchPayload({
         meetingId,
+        meetingGoal: meetingGoalDraft,
         stage,
         agendaOverrides,
         canvasItems,
@@ -3339,7 +3393,9 @@ export default function MeetingCanvasTab({
             : "ideation";
     const incomingCanvasItems = hydrateCanvasItems(incomingSharedCanvasSync.canvas_items || []);
     const incomingCustomGroups = hydrateCustomGroups(incomingSharedCanvasSync.custom_groups || []);
+    const incomingMeetingGoal = incomingSharedCanvasSync.meeting_goal || "";
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
+      meeting_goal: incomingMeetingGoal,
       stage: incomingStage,
       agenda_overrides: incomingSharedCanvasSync.agenda_overrides || {},
       canvas_items: incomingCanvasItems,
@@ -3365,6 +3421,8 @@ export default function MeetingCanvasTab({
 
     setProblemGroups(nextProblemGroups);
     setSolutionTopics(nextSolutionTopics);
+    setMeetingGoalDraft(incomingMeetingGoal);
+    onMeetingGoalChange(incomingMeetingGoal);
     setAgendaOverrides(incomingSharedCanvasSync.agenda_overrides || {});
     setCanvasItems(incomingCanvasItems);
     setCustomGroups(incomingCustomGroups);
@@ -3387,6 +3445,7 @@ export default function MeetingCanvasTab({
     }
     setStage(incomingStage);
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
+      meetingGoal: incomingMeetingGoal,
       stage: incomingStage,
       agendaOverrides: incomingSharedCanvasSync.agenda_overrides || {},
       canvasItems: incomingCanvasItems,
@@ -3418,7 +3477,7 @@ export default function MeetingCanvasTab({
     window.setTimeout(() => {
       applyingRemoteSharedSyncRef.current = false;
     }, 0);
-  }, [analysisStateSignature, incomingSharedCanvasSync, meetingId, problemGroups, sharedSyncEnabled, solutionTopics, userId]);
+  }, [analysisStateSignature, incomingSharedCanvasSync, meetingId, onMeetingGoalChange, problemGroups, sharedSyncEnabled, solutionTopics, userId]);
 
   useEffect(() => {
     const flushPendingCanvasState = () => {
@@ -3479,6 +3538,7 @@ export default function MeetingCanvasTab({
       onSharedCanvasSync({
         sync_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         meeting_id: meetingId,
+        meeting_goal: sharedCanvasSnapshot.meeting_goal,
         updated_by: userId,
         updated_at: new Date().toISOString(),
         stage: sharedCanvasSnapshot.stage,
@@ -3540,6 +3600,7 @@ export default function MeetingCanvasTab({
             meetingId,
             buildFullWorkspacePatchPayload({
               meetingId,
+              meetingGoal: meetingGoalDraft,
               stage,
               agendaOverrides,
               canvasItems: nextCanvasItemsSnapshot,
@@ -4332,7 +4393,7 @@ export default function MeetingCanvasTab({
     try {
       const result = await generateCanvasProblemDefinition({
         meeting_id: meetingId,
-        topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+        topic: meetingTopicForAi,
         agendas: agendaModels.map((agenda) => ({
           agenda_id: agenda.id,
           title: agenda.title,
@@ -4395,7 +4456,7 @@ export default function MeetingCanvasTab({
     try {
       const result = await generateCanvasSolutionStage({
         meeting_id: meetingId,
-        meeting_topic: generatedMeetingGoal || meetingTitle || effectiveState?.meeting_goal || "회의 주제",
+        meeting_topic: meetingTopicForAi,
         topics: finalizedGroups.map((group, index) => ({
           group_id: group.group_id,
           topic_no: index + 1,
@@ -4657,6 +4718,7 @@ export default function MeetingCanvasTab({
             meetingId,
             buildFullWorkspacePatchPayload({
               meetingId,
+              meetingGoal: meetingGoalDraft,
               stage,
               agendaOverrides,
               canvasItems,
@@ -4792,6 +4854,7 @@ export default function MeetingCanvasTab({
           meetingId,
           buildFullWorkspacePatchPayload({
             meetingId,
+            meetingGoal: meetingGoalDraft,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
@@ -4995,6 +5058,7 @@ export default function MeetingCanvasTab({
           meetingId,
           buildFullWorkspacePatchPayload({
             meetingId,
+            meetingGoal: meetingGoalDraft,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot || canvasItems,
@@ -5573,6 +5637,7 @@ export default function MeetingCanvasTab({
           meetingId,
           buildFullWorkspacePatchPayload({
             meetingId,
+            meetingGoal: meetingGoalDraft,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
@@ -5978,6 +6043,9 @@ export default function MeetingCanvasTab({
               >
                 불러오기
               </button>
+              <span className="inline-flex h-[30px] items-center rounded-full border border-black/10 bg-[#f9f9f9] px-3 text-[11px] font-semibold leading-none text-[#6f6f6f]">
+                1차 노드 {ideationNodeCountSummary.directChildCount} · 기준 {ideationNodeCountSummary.target}
+              </span>
             </div>
 
             <div className="min-w-0 justify-self-center text-center">
@@ -5985,9 +6053,19 @@ export default function MeetingCanvasTab({
                 <span>{meetingTitle || "회의 제목"}</span>
                 <span className={`h-2.5 w-2.5 rounded-full ${isRecording ? "bg-[#34c759]" : "bg-[#d9d9d9]"}`} />
               </div>
-              <h2 className="mt-3 truncate text-[32px] font-semibold leading-[38px] tracking-normal text-black">
-                {meetingGoalBusy ? "회의 목표를 정리하는 중입니다." : displayMeetingGoal}
-              </h2>
+              <label className="mt-3 block">
+                <span className="sr-only">회의 목표 입력</span>
+                <input
+                  value={meetingGoalDraft}
+                  onChange={(event) => {
+                    const nextGoal = event.target.value;
+                    setMeetingGoalDraft(nextGoal);
+                    onMeetingGoalChange(nextGoal);
+                  }}
+                  placeholder="회의 목표를 입력해 주세요"
+                  className="mx-auto block w-full max-w-[760px] truncate rounded-xl border border-transparent bg-transparent px-3 py-1 text-center text-[32px] font-semibold leading-[38px] tracking-normal text-black outline-none transition placeholder:text-black/30 hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                />
+              </label>
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-4 justify-self-end">
@@ -6029,6 +6107,7 @@ export default function MeetingCanvasTab({
                         analysisSignatureAtImportRef.current = analysisStateSignature;
                         setImportOverrideActive(true);
                         setCanvasItems([]);
+                        setIdeaCreateStack(0);
                         setCustomGroups([]);
                         setProblemGroups([]);
                         setSolutionTopics([]);

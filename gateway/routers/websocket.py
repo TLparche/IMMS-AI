@@ -279,11 +279,14 @@ async def transcribe_selected_chunk(candidate: dict[str, Any]) -> dict[str, Any]
     audio_bytes = candidate.get("audio_bytes") or b""
     audio_mime = str(candidate.get("audio_mime") or candidate.get("audio_meta", {}).get("mime_type") or "audio/wav")
     audio_filename = str(candidate.get("audio_filename") or ("chunk.wav" if audio_mime.lower().startswith("audio/wav") else "chunk.webm"))
+    workspace = latest_canvas_workspace_by_meeting.get(str(candidate.get("meeting_id") or "")) or {}
+    meeting_goal = str(candidate.get("meeting_goal") or workspace.get("meeting_goal") or "").strip()
     started_at = time.perf_counter()
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{AI_BACKEND_URL}/api/transcribe-chunk",
-            files={'audio_file': (audio_filename, audio_bytes, audio_mime)}
+            files={'audio_file': (audio_filename, audio_bytes, audio_mime)},
+            data={'meeting_goal': meeting_goal},
         )
         elapsed_ms = round((time.perf_counter() - started_at) * 1000)
         if response.status_code != 200:
@@ -746,6 +749,7 @@ async def websocket_endpoint(
                 'solution_topics': current_workspace.get('solution_topics') or [],
                 'node_positions': current_workspace.get('node_positions') or {},
                 'imported_state': current_workspace.get('imported_state'),
+                'meeting_goal': current_workspace.get('meeting_goal') or '',
             })
         except Exception as e:
             print(f"❌ Failed to send initial canvas sync to {user_id}: {e}")
@@ -807,6 +811,8 @@ async def websocket_endpoint(
                 audio_meta = normalize_audio_meta(message.get('audio_meta') or {})
                 audio_mime = str(message.get('audio_mime') or audio_meta.get("mime_type") or "audio/wav")
                 audio_filename = str(message.get('audio_filename') or ("chunk.wav" if audio_mime.lower().startswith("audio/wav") else "chunk.webm"))
+                workspace = latest_canvas_workspace_by_meeting.get(meeting_id) or {}
+                meeting_goal = str(message.get("meeting_goal") or workspace.get("meeting_goal") or "").strip()
                 
                 try:
                     audio_bytes = base64.b64decode(audio_data)
@@ -827,6 +833,7 @@ async def websocket_endpoint(
                         "audio_mime": audio_mime,
                         "audio_filename": audio_filename,
                         "audio_meta": audio_meta,
+                        "meeting_goal": meeting_goal,
                         "started_at_ms": iso_to_epoch_ms(audio_meta.get("started_at") or message.get("timestamp")),
                     }
                     await queue_audio_for_fusion(meeting_id, candidate)
@@ -904,6 +911,20 @@ async def websocket_endpoint(
                     persist_canvas_workspace(meeting_id, workspace),
                     broadcast_to_meeting(meeting_id, sync_message, exclude_user=user_id),
                 )
+
+            elif message_type == 'meeting_goal_sync':
+                meeting_goal = str(message.get("meeting_goal") or "").strip()
+                workspace = latest_canvas_workspace_by_meeting.get(meeting_id)
+                if isinstance(workspace, dict):
+                    workspace["meeting_goal"] = meeting_goal
+                    latest_canvas_workspace_by_meeting[meeting_id] = copy.deepcopy(workspace)
+                await broadcast_to_meeting(meeting_id, {
+                    'type': 'meeting_goal_updated',
+                    'meeting_id': meeting_id,
+                    'meeting_goal': meeting_goal,
+                    'updated_by': user_id,
+                    'timestamp': datetime.utcnow().isoformat(),
+                }, exclude_user=user_id)
 
             elif message_type == 'mic_calibration':
                 profile = message.get('profile') or {}

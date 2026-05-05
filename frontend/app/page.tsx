@@ -178,6 +178,7 @@ function HomeContent() {
   const meetingId = searchParams.get("meeting_id");
 
   const [meetingTitle, setMeetingTitle] = useState("회의 워크스페이스");
+  const [meetingGoal, setMeetingGoal] = useState("");
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [agendas, setAgendas] = useState<Agenda[]>([]);
   const [analysisState, setAnalysisState] = useState<MeetingState | null>(null);
@@ -202,6 +203,7 @@ function HomeContent() {
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
   const isRecordingRef = useRef(isRecording);
   const meetingTitleRef = useRef(meetingTitle);
+  const meetingGoalRef = useRef(meetingGoal);
   const transcriptsRef = useRef(transcripts);
   const autoSyncTimerRef = useRef<number | null>(null);
   const autoSyncInFlightRef = useRef(false);
@@ -221,6 +223,10 @@ function HomeContent() {
   useEffect(() => {
     meetingTitleRef.current = meetingTitle;
   }, [meetingTitle]);
+
+  useEffect(() => {
+    meetingGoalRef.current = meetingGoal;
+  }, [meetingGoal]);
 
   useEffect(() => {
     transcriptsRef.current = transcripts;
@@ -298,6 +304,7 @@ function HomeContent() {
     queuedSyncSignatureRef.current = "";
     autoSyncInFlightRef.current = false;
     setIncomingCanvasSync(null);
+    setMeetingGoal("");
     setIncomingCanvasStateRequestId("");
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
     setSttProgressText("");
@@ -333,11 +340,12 @@ function HomeContent() {
         );
 
         setMeetingTitle(nextMeetingTitle);
+        setMeetingGoal(workspaceState?.meeting_goal || "");
         setTranscripts(nextTranscripts);
 
         if (workspaceState?.imported_state) {
           applyMeetingStateToUi(workspaceState.imported_state);
-          lastSyncedSignatureRef.current = buildTranscriptSyncSignature(nextMeetingTitle, nextTranscripts);
+          lastSyncedSignatureRef.current = buildTranscriptSyncSignature(workspaceState?.meeting_goal || nextMeetingTitle, nextTranscripts);
         } else {
           setAnalysisState(null);
           setAgendas([]);
@@ -409,6 +417,13 @@ function HomeContent() {
         ]),
       );
       showLiveSpeechPreview(speaker, text, nextTimestamp);
+    });
+
+    wsClient.on("meeting_goal_updated", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      setMeetingGoal(readString(payload.meeting_goal));
     });
 
     wsClient.on("stt_flow_summaries_updated", (message) => {
@@ -673,10 +688,10 @@ function HomeContent() {
   }, []);
 
   const syncBackendFromMeeting = async (analyze = true) => {
-    const currentMeetingTitle = meetingTitleRef.current;
+    const currentMeetingGoal = meetingGoalRef.current || meetingTitleRef.current;
     const currentTranscripts = transcriptsRef.current;
     const state = await syncTranscript({
-      meeting_goal: currentMeetingTitle,
+      meeting_goal: currentMeetingGoal,
       window_size: 12,
       reset_state: true,
       auto_analyze: analyze,
@@ -702,7 +717,7 @@ function HomeContent() {
             const nextTranscripts = mapMeetingStateToTranscriptRows(result.state);
             setTranscripts(nextTranscripts);
             applyMeetingStateToUi(result.state);
-            lastSyncedSignatureRef.current = buildTranscriptSyncSignature(meetingTitleRef.current, nextTranscripts);
+            lastSyncedSignatureRef.current = buildTranscriptSyncSignature(meetingGoalRef.current || meetingTitleRef.current, nextTranscripts);
             queuedSyncSignatureRef.current = "";
             setAudioImportRevision((prev) => prev + 1);
             setCanvasSyncStatus(
@@ -747,7 +762,7 @@ function HomeContent() {
 
       const started = await startAudioImportJob({
         meeting_id: meetingId,
-        meeting_goal: meetingTitleRef.current,
+        meeting_goal: meetingGoalRef.current || meetingTitleRef.current,
         user_id: user.id,
         file,
         reset_state: true,
@@ -868,7 +883,7 @@ function HomeContent() {
           combinedChunkCount: metrics.combinedChunkCount,
           bytes: blob.size,
         });
-        wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics);
+        wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics, meetingGoalRef.current);
       } else {
         console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
           bytes: blob.size,
@@ -923,6 +938,11 @@ function HomeContent() {
       workspace: payload,
     });
   }, []);
+  const broadcastMeetingGoalSync = useCallback((goal: string) => {
+    wsClientRef.current?.sendMessage("meeting_goal_sync", {
+      meeting_goal: goal,
+    });
+  }, []);
   const audioImportBusy = audioImportJob?.status === "queued" || audioImportJob?.status === "processing";
   const audioImportStatusText = audioImportJob
     ? audioImportJob.status === "completed"
@@ -949,6 +969,9 @@ function HomeContent() {
         userId={user.id}
         meetingId={meetingId}
         meetingTitle={meetingTitle}
+        meetingGoal={meetingGoal}
+        onMeetingGoalChange={setMeetingGoal}
+        onMeetingGoalSync={broadcastMeetingGoalSync}
         transcripts={canvasTranscripts}
         agendas={canvasAgendas}
         analysisState={analysisState}

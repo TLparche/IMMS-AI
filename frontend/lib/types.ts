@@ -361,6 +361,7 @@ export interface CanvasNodePositionsByStage {
 export interface CanvasWorkspaceStateResponse {
   ok: boolean;
   meeting_id: string;
+  meeting_goal?: string;
   stage: "ideation" | "problem-definition" | "solution";
   agenda_overrides?: Record<
     string,
@@ -383,6 +384,7 @@ export interface CanvasWorkspaceStateResponse {
 
 export interface CanvasWorkspacePatchRequest {
   meeting_id: string;
+  meeting_goal?: string;
   stage?: "ideation" | "problem-definition" | "solution";
   agenda_overrides?: Record<
     string,
@@ -402,6 +404,7 @@ export interface CanvasWorkspacePatchRequest {
 
 export interface CanvasLocalState {
   shared_sync_enabled?: boolean;
+  meeting_goal?: string;
   agenda_overrides?: Record<
     string,
     {
@@ -432,6 +435,7 @@ export interface CanvasPersonalNotesStateResponse {
 export interface CanvasRealtimeSyncPayload {
   sync_id: string;
   meeting_id: string;
+  meeting_goal?: string;
   updated_by: string;
   updated_at: string;
   stage: "ideation" | "problem-definition" | "solution";
@@ -458,6 +462,7 @@ export interface MeetingGoalSuggestionResponse {
   generated_at: string;
   topic: string;
   goal: string;
+  goals?: string[];
 }
 
 export interface CanvasPlacementConfirmResponse {

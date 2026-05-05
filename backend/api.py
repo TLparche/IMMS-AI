@@ -768,6 +768,7 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
 def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], saved_at: str) -> dict[str, Any]:
     return {
         "meeting_id": _safe_text(meeting_id),
+        "meeting_goal": _safe_text(source.get("meeting_goal")),
         "stage": _normalize_canvas_stage(source.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
@@ -795,6 +796,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "meeting_id": _safe_text(workspace.get("meeting_id")),
+        "meeting_goal": _safe_text(workspace.get("meeting_goal")),
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
@@ -1003,6 +1005,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     if not isinstance(workspace, dict):
         workspace = {}
     workspace.setdefault("meeting_id", normalized_meeting_id)
+    workspace.setdefault("meeting_goal", "")
     workspace.setdefault("stage", "ideation")
     workspace.setdefault("agenda_overrides", {})
     workspace.setdefault("canvas_items", [])
@@ -1821,6 +1824,7 @@ class CanvasWorkspaceSolutionTopicInput(BaseModel):
 
 class CanvasWorkspaceStateInput(BaseModel):
     meeting_id: str = ""
+    meeting_goal: str = ""
     stage: str = "ideation"
     agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
@@ -1833,6 +1837,7 @@ class CanvasWorkspaceStateInput(BaseModel):
 
 class CanvasWorkspacePatchInput(BaseModel):
     meeting_id: str = ""
+    meeting_goal: str | None = None
     stage: str | None = None
     agenda_overrides: dict[str, dict[str, Any]] | None = None
     canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
@@ -2155,6 +2160,24 @@ def _build_meeting_goal_local(topic: str) -> str:
     return f"{clean_topic}에 대해 실행 방향과 핵심 우선순위를 정리한다."
 
 
+def _build_meeting_goal_local_options(topic: str) -> list[str]:
+    clean_topic = _safe_text(topic, "이번 회의").strip()
+    if not clean_topic:
+        return [
+            "이번 회의에서 실행 방향과 우선순위를 정리한다.",
+            "이번 회의의 핵심 쟁점과 결정 기준을 합의한다.",
+            "이번 회의에서 다음 실행 과제를 명확히 한다.",
+        ]
+    return _dedup_preserve(
+        [
+            f"{clean_topic}에 대해 실행 방향과 핵심 우선순위를 정리한다.",
+            f"{clean_topic}의 핵심 쟁점과 의사결정 기준을 합의한다.",
+            f"{clean_topic}에서 다음 실행 과제와 담당 범위를 정리한다.",
+        ],
+        limit=3,
+    )
+
+
 def _build_meeting_goal_prompt(topic: str) -> str:
     payload = {
         "meeting_topic": _safe_text(topic),
@@ -2162,19 +2185,25 @@ def _build_meeting_goal_prompt(topic: str) -> str:
     return (
         "너는 회의 제목을 보고 회의 목표를 한 문장으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
         "[목표]\n"
-        "- meeting_topic을 바탕으로 이번 회의가 무엇을 정리하거나 결정해야 하는지 한 문장으로 쓴다.\n"
+        "- meeting_topic을 바탕으로 이번 회의가 무엇을 정리하거나 결정해야 하는지 목표 후보 3개를 쓴다.\n"
         "- 제목을 그대로 반복하지 말고, 회의에서 얻고 싶은 결과나 방향이 드러나게 쓴다.\n"
         "- 너무 추상적이지 않게, 실행 또는 정리의 대상이 보이도록 쓴다.\n\n"
         "[입력 JSON]\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
         "[출력 JSON 스키마]\n"
         "{\n"
-        '  "goal": "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다."\n'
+        '  "goal": "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다.",\n'
+        '  "goals": [\n'
+        '    "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다.",\n'
+        '    "키링 굿즈 출시를 위한 고객 반응과 제작 우선순위를 합의한다.",\n'
+        '    "키링 굿즈 아이디어의 실현 가능성과 다음 실행 과제를 정한다."\n'
+        "  ]\n"
         "}\n\n"
         "[규칙]\n"
-        "- goal은 한국어 1문장.\n"
+        "- goal은 가장 추천하는 목표 1개다.\n"
+        "- goals는 사용자가 선택할 수 있는 서로 다른 관점의 목표 3개다.\n"
         "- 제목 복붙이 아니라 회의 목적이 드러나는 재작성 문장.\n"
-        "- 18~40자 정도의 짧고 분명한 문장.\n"
+        "- 각 목표는 한국어 1문장, 18~48자 정도의 짧고 분명한 문장.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 
@@ -5300,13 +5329,16 @@ def _get_whisper_model():
         return _WHISPER_MODEL
 
 
-def _transcribe_with_whisper(data: bytes, suffix: str) -> str:
+def _transcribe_with_whisper(data: bytes, suffix: str, meeting_goal: str = "") -> str:
     model = _get_whisper_model()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
     try:
         kwargs = {"language": "ko", "task": "transcribe", "verbose": False}
+        clean_goal = _safe_text(meeting_goal)
+        if clean_goal:
+            kwargs["initial_prompt"] = f"회의 목표: {clean_goal}. 회의 관련 고유명사와 핵심 용어를 한국어로 정확히 전사한다."
         try:
             import torch
 
@@ -7848,6 +7880,7 @@ def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
 
     def _compute() -> dict[str, Any]:
         goal = _build_meeting_goal_local(topic)
+        goals = _build_meeting_goal_local_options(topic)
         used_llm = False
         warning = ""
 
@@ -7860,16 +7893,26 @@ def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
                     prompt=_build_meeting_goal_prompt(topic),
                     stage="canvas_meeting_goal",
                     temperature=0.2,
-                    max_tokens=220,
+                    max_tokens=420,
                 )
                 candidate = _safe_text(parsed.get("goal")) if isinstance(parsed, dict) else ""
+                raw_goals = parsed.get("goals") if isinstance(parsed, dict) else []
+                llm_goals = [
+                    _safe_text(value)
+                    for value in (raw_goals if isinstance(raw_goals, list) else [])
+                    if _safe_text(value)
+                ]
+                if not candidate and llm_goals:
+                    candidate = llm_goals[0]
                 if candidate:
-                    goal = candidate
+                    goals = _dedup_preserve([candidate, *llm_goals, *goals], limit=3)
+                    goal = goals[0] if goals else candidate
                     used_llm = True
                     RT.last_llm_parsed_json = {
                         "stage": "canvas_meeting_goal",
                         "topic": topic,
                         "goal": goal,
+                        "goals": goals,
                     }
                     RT.last_llm_parsed_at = _now_ts()
                 else:
@@ -7888,6 +7931,7 @@ def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
             "generated_at": _now_ts(),
             "topic": topic,
             "goal": goal,
+            "goals": goals,
         }
     return _run_canvas_llm_cached_request(
         RT,
@@ -8083,6 +8127,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     saved_at = _now_ts()
     previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
     workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
+    workspace["meeting_goal"] = _safe_text(payload.meeting_goal)
     workspace["stage"] = _normalize_canvas_stage(payload.stage)
     workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
     workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
@@ -8101,6 +8146,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
         "[canvas workspace PUT]",
         {
             "meeting_id": normalized_meeting_id,
+            "meeting_goal": _safe_text(workspace.get("meeting_goal"))[:80],
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),
@@ -8122,6 +8168,8 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
     workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
     provided_fields = set(getattr(payload, "model_fields_set", set()))
 
+    if "meeting_goal" in provided_fields:
+        workspace["meeting_goal"] = _safe_text(payload.meeting_goal)
     if "stage" in provided_fields:
         workspace["stage"] = _normalize_canvas_stage(payload.stage)
     if "agenda_overrides" in provided_fields:
@@ -8150,6 +8198,7 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         {
             "meeting_id": normalized_meeting_id,
             "fields": sorted(list(provided_fields)),
+            "meeting_goal": _safe_text(workspace.get("meeting_goal"))[:80],
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),
@@ -8373,6 +8422,7 @@ async def post_stt_chunk(
 @app.post("/api/transcribe-chunk")
 async def post_transcribe_chunk(
     audio_file: UploadFile = File(...),
+    meeting_goal: str = Form(default=""),
 ):
     """
     Gateway에서 호출하는 전사 엔드포인트
@@ -8385,11 +8435,12 @@ async def post_transcribe_chunk(
             return {"text": "", "language": "ko", "error": "empty audio"}
         
         suffix = Path(audio_file.filename or "chunk.webm").suffix or ".webm"
-        text = _transcribe_with_whisper(blob, suffix=suffix)
+        text = _transcribe_with_whisper(blob, suffix=suffix, meeting_goal=meeting_goal)
         elapsed_ms = round((time.perf_counter() - started_at) * 1000)
         print(
             f"[STT] transcribed chunk model={WHISPER_MODEL_NAME} "
-            f"bytes={len(blob)} suffix={suffix} elapsed_ms={elapsed_ms} chars={len(_safe_text(text))}"
+            f"bytes={len(blob)} suffix={suffix} elapsed_ms={elapsed_ms} "
+            f"meeting_goal={bool(_safe_text(meeting_goal))} chars={len(_safe_text(text))}"
         )
         
         return {
