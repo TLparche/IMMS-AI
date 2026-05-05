@@ -1,7 +1,8 @@
 param(
   [int]$BackendPort = 8000,
   [int]$GatewayPort = 8001,
-  [int]$TunnelTimeoutSeconds = 90
+  [int]$TunnelTimeoutSeconds = 90,
+  [switch]$KeepExistingPortProcesses
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,10 +27,9 @@ function Start-LoggedProcess {
     [string]$LogDirectory
   )
 
-  $stdoutPath = Join-Path $LogDirectory "$Name.out.log"
-  $stderrPath = Join-Path $LogDirectory "$Name.err.log"
-  if (Test-Path -LiteralPath $stdoutPath) { Remove-Item -LiteralPath $stdoutPath -Force }
-  if (Test-Path -LiteralPath $stderrPath) { Remove-Item -LiteralPath $stderrPath -Force }
+  $runId = if ($script:DemoTunnelRunId) { $script:DemoTunnelRunId } else { Get-Date -Format "yyyyMMdd-HHmmss" }
+  $stdoutPath = Join-Path $LogDirectory "$Name.$runId.out.log"
+  $stderrPath = Join-Path $LogDirectory "$Name.$runId.err.log"
 
   $process = Start-Process `
     -FilePath $FilePath `
@@ -45,6 +45,26 @@ function Start-LoggedProcess {
     Process = $process
     Stdout = $stdoutPath
     Stderr = $stderrPath
+  }
+}
+
+function Stop-PortListeners {
+  param([int[]]$Ports)
+
+  $listeners = Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue
+  foreach ($listener in $listeners) {
+    $ownerProcessId = [int]$listener.OwningProcess
+    if ($ownerProcessId -le 0 -or $ownerProcessId -eq $PID) {
+      continue
+    }
+
+    try {
+      $process = Get-Process -Id $ownerProcessId -ErrorAction Stop
+      Write-Host "Stopping existing listener on port $($listener.LocalPort): $($process.ProcessName) (PID $ownerProcessId)"
+      Stop-Process -Id $ownerProcessId -Force -ErrorAction Stop
+    } catch {
+      Write-Warning "Failed to stop process on port $($listener.LocalPort) (PID $ownerProcessId): $($_.Exception.Message)"
+    }
   }
 }
 
@@ -110,6 +130,12 @@ if (-not $cloudflaredCommand) {
 
 $logDir = Join-Path $projectRoot ".codex-temp\demo-tunnels"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$script:DemoTunnelRunId = Get-Date -Format "yyyyMMdd-HHmmss"
+
+if (-not $KeepExistingPortProcesses) {
+  Stop-PortListeners -Ports @($BackendPort, $GatewayPort)
+  Start-Sleep -Milliseconds 500
+}
 
 $started = @()
 

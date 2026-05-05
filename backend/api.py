@@ -6676,6 +6676,33 @@ def _canvas_topic_descendant_ids(workspace: dict[str, Any], topic_id: str) -> se
     return descendants
 
 
+def _canvas_topic_leaf_child_ids(workspace: dict[str, Any], topic_id: str) -> list[str]:
+    leaves: list[str] = []
+    pending = list(_canvas_topic_child_ids(workspace, topic_id))
+    seen: set[str] = set()
+
+    while pending:
+        child_id = _safe_text(pending.pop(0))
+        if not child_id or child_id in seen:
+            continue
+        seen.add(child_id)
+        child = next(
+            (
+                item
+                for item in (workspace.get("canvas_items") or [])
+                if isinstance(item, dict) and _safe_text(item.get("id")) == child_id
+            ),
+            None,
+        )
+        if child and _is_canvas_topic_item(child):
+            pending.extend(_canvas_topic_child_ids(workspace, child_id))
+            continue
+        if child:
+            leaves.append(child_id)
+
+    return _dedup_preserve(leaves, limit=400)
+
+
 def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
     stored = _safe_nonnegative_int(workspace.get("idea_create_stack"))
     if stored > 0:
@@ -6954,7 +6981,8 @@ def _build_canvas_topic_clustering_prompt(
         "- nodes는 모두 그룹 분류 바로 아래 direct child 후보이다.\n"
         "- 반드시 가장 유사한 2개만 pair로 반환한다. 3개 이상 선택 금지.\n"
         "- 서로 의미가 충분히 유사하지 않으면 pair를 빈 배열로 반환한다.\n"
-        "- kind=topic인 노드도 후보가 될 수 있다. topic끼리 유사하면 상위 topic으로 묶을 수 있다.\n"
+        "- kind=topic인 노드도 후보가 될 수 있다. topic끼리 유사하면 topic들을 하위에 넣는 것이 아니라 하나의 새 topic으로 통합한다.\n"
+        "- topic node 아래에는 다른 topic node가 들어가면 안 된다. topic pair를 고르더라도 서버가 기존 topic의 실제 하위 아이디어만 새 topic 아래로 평탄화한다.\n"
         "- title/body/keywords는 선택한 pair 2개를 대표하는 topic 문구로 작성한다.\n"
         "- 서버가 pair를 검증한 뒤 새 topic 생성 또는 기존 topic 업데이트를 결정한다.\n"
         "- JSON만 반환한다.\n\n"
@@ -7058,20 +7086,73 @@ def _apply_canvas_topic_clustering_result(
     topic_pair_ids = [item_id for item_id in pair_ids if _is_canvas_topic_item(items_by_id.get(item_id) or {})]
 
     created_topics: list[dict[str, Any]] = []
+    created_topic_insert_index: int | None = None
+    removed_topic_ids: set[str] = set()
     now_ms = int(time.time() * 1000)
 
     assignments: dict[str, str] = {}
     topic_updates: dict[str, dict[str, Any]] = {}
+    source_workspace = {"canvas_items": canvas_items}
 
     if len(topic_pair_ids) == 1:
         topic_id = topic_pair_ids[0]
         child_id = pair_ids[0] if pair_ids[1] == topic_id else pair_ids[1]
+        nested_topic_ids = {
+            descendant_id
+            for descendant_id in _canvas_topic_descendant_ids(source_workspace, topic_id)
+            if _is_canvas_topic_item(items_by_id.get(descendant_id) or {})
+        }
+        for nested_topic_id in nested_topic_ids:
+            removed_topic_ids.add(nested_topic_id)
+            for leaf_child_id in _canvas_topic_leaf_child_ids(source_workspace, nested_topic_id):
+                if leaf_child_id not in removed_topic_ids:
+                    assignments[leaf_child_id] = topic_id
         assignments[child_id] = topic_id
         topic_updates[topic_id] = {
             "title": title,
             "body": body,
             "keywords": keywords,
         }
+    elif len(topic_pair_ids) == 2:
+        removed_topic_ids.update(topic_pair_ids)
+        leaf_child_ids: list[str] = []
+        for source_topic_id in topic_pair_ids:
+            removed_topic_ids.update(
+                descendant_id
+                for descendant_id in _canvas_topic_descendant_ids(source_workspace, source_topic_id)
+                if _is_canvas_topic_item(items_by_id.get(descendant_id) or {})
+            )
+            leaf_child_ids.extend(_canvas_topic_leaf_child_ids(source_workspace, source_topic_id))
+        leaf_child_ids = _dedup_preserve(
+            [child_id for child_id in leaf_child_ids if child_id and child_id not in removed_topic_ids],
+            limit=400,
+        )
+        if not leaf_child_ids:
+            return 0
+        topic_id = f"ai-topic-{now_ms}-0-{uuid4().hex[:6]}"
+        topic = {
+            "id": topic_id,
+            "agenda_id": _safe_text(agenda_id),
+            "point_id": "",
+            "kind": "topic",
+            "title": title,
+            "body": body,
+            "keywords": keywords,
+            "key_evidence": [],
+            "refined_utterances": [],
+            "evidence_utterance_ids": [],
+            "ignored_utterance_ids": [],
+            "child_item_ids": leaf_child_ids,
+            "topic_collapsed": True,
+            "created_by": "ai",
+            "ai_generated": True,
+            "user_edited": False,
+            "manual_position": False,
+        }
+        created_topics.append(topic)
+        items_by_id[topic_id] = topic
+        for child_id in leaf_child_ids:
+            assignments[child_id] = topic_id
     else:
         topic_id = f"ai-topic-{now_ms}-0-{uuid4().hex[:6]}"
         topic = {
@@ -7098,6 +7179,15 @@ def _apply_canvas_topic_clustering_result(
         for child_id in pair_ids:
             assignments[child_id] = topic_id
 
+    if created_topics:
+        original_indices = [
+            index
+            for index, item in enumerate(canvas_items)
+            if _safe_text(item.get("id")) in pair_ids
+        ]
+        if original_indices:
+            created_topic_insert_index = min(original_indices)
+
     if not assignments and not created_topics:
         return 0
 
@@ -7105,11 +7195,14 @@ def _apply_canvas_topic_clustering_result(
     for child_id, topic_id in assignments.items():
         assigned_by_topic.setdefault(topic_id, []).append(child_id)
 
-    next_items: list[dict[str, Any]] = []
-    for item in created_topics + canvas_items:
+    topic_lookup_items = created_topics + canvas_items
+
+    def build_next_item(item: dict[str, Any]) -> dict[str, Any] | None:
         item_id = _safe_text(item.get("id"))
         if not item_id:
-            continue
+            return None
+        if item_id in removed_topic_ids:
+            return None
         next_item = copy.deepcopy(items_by_id.get(item_id, item))
         if item_id in assignments:
             next_item["parent_topic_id"] = assignments[item_id]
@@ -7117,7 +7210,11 @@ def _apply_canvas_topic_clustering_result(
             next_item["parent_topic_locked"] = False
             next_item["manual_position"] = False
         if _is_canvas_topic_item(next_item):
-            current_children = _canvas_topic_child_ids({"canvas_items": created_topics + canvas_items}, item_id)
+            current_children = [
+                child_id
+                for child_id in _canvas_topic_leaf_child_ids({"canvas_items": topic_lookup_items}, item_id)
+                if child_id not in removed_topic_ids
+            ]
             next_children = _dedup_preserve(current_children + assigned_by_topic.get(item_id, []), limit=400)
             next_item["child_item_ids"] = next_children
             next_item.setdefault("topic_collapsed", True)
@@ -7131,7 +7228,26 @@ def _apply_canvas_topic_clustering_result(
                     raw_keywords = raw_update.get("keywords")
                     if isinstance(raw_keywords, list) and raw_keywords:
                         next_item["keywords"] = [_safe_text(value) for value in raw_keywords if _safe_text(value)][:6]
-        next_items.append(next_item)
+        return next_item
+
+    next_items: list[dict[str, Any]] = []
+    inserted_created_topics = False
+    for index, item in enumerate(canvas_items):
+        if created_topic_insert_index == index and not inserted_created_topics:
+            for topic in created_topics:
+                next_topic = build_next_item(topic)
+                if next_topic:
+                    next_items.append(next_topic)
+            inserted_created_topics = True
+        next_item = build_next_item(item)
+        if next_item:
+            next_items.append(next_item)
+
+    if created_topics and not inserted_created_topics:
+        for topic in created_topics:
+            next_topic = build_next_item(topic)
+            if next_topic:
+                next_items.append(next_topic)
 
     workspace["canvas_items"] = next_items
     return len(assignments) + len(created_topics)
