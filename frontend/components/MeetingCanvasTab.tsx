@@ -74,6 +74,16 @@ const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solutio
 const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
 const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
 const IDEA_ASSIMILATION_SILENCE_FLUSH_MS = 8_000;
+const DEFAULT_LEFT_PANEL_RATIO = 0.22;
+const DEFAULT_RIGHT_PANEL_RATIO = 0.24;
+const MIN_LEFT_PANEL_RATIO = 0.16;
+const MAX_LEFT_PANEL_RATIO = 0.32;
+const MIN_RIGHT_PANEL_RATIO = 0.18;
+const MAX_RIGHT_PANEL_RATIO = 0.34;
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
 
 type PersonalNote = {
   id: string;
@@ -2049,8 +2059,8 @@ export default function MeetingCanvasTab({
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedEdgeId, setSelectedEdgeId] = useState("");
-  const [leftPanelWidth, setLeftPanelWidth] = useState(320);
-  const [rightPanelWidth, setRightPanelWidth] = useState(360);
+  const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
+  const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
   const [placementFeedback, setPlacementFeedback] = useState<{
     id: string;
@@ -2069,7 +2079,7 @@ export default function MeetingCanvasTab({
   const composerBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const canvasSurfaceRef = useRef<HTMLDivElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
-  const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startWidth: number } | null>(null);
+  const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startRatio: number } | null>(null);
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
   const workspaceLoadedRef = useRef(false);
@@ -4246,15 +4256,24 @@ export default function MeetingCanvasTab({
     const handlePointerMove = (event: MouseEvent) => {
       if (!resizeStateRef.current) return;
 
-      const deltaX = event.clientX - resizeStateRef.current.startX;
+      const viewportWidth = Math.max(window.innerWidth, 1);
+      const deltaRatio = (event.clientX - resizeStateRef.current.startX) / viewportWidth;
       if (resizeStateRef.current.side === "left") {
-        const nextWidth = Math.min(Math.max(resizeStateRef.current.startWidth + deltaX, 280), 460);
-        setLeftPanelWidth(nextWidth);
+        const nextRatio = clampNumber(
+          resizeStateRef.current.startRatio + deltaRatio,
+          MIN_LEFT_PANEL_RATIO,
+          MAX_LEFT_PANEL_RATIO,
+        );
+        setLeftPanelRatio(nextRatio);
         return;
       }
 
-      const nextWidth = Math.min(Math.max(resizeStateRef.current.startWidth - deltaX, 300), 500);
-      setRightPanelWidth(nextWidth);
+      const nextRatio = clampNumber(
+        resizeStateRef.current.startRatio - deltaRatio,
+        MIN_RIGHT_PANEL_RATIO,
+        MAX_RIGHT_PANEL_RATIO,
+      );
+      setRightPanelRatio(nextRatio);
     };
 
     const handlePointerUp = () => {
@@ -6261,7 +6280,7 @@ export default function MeetingCanvasTab({
     resizeStateRef.current = {
       side,
       startX: event.clientX,
-      startWidth: side === "left" ? leftPanelWidth : rightPanelWidth,
+      startRatio: side === "left" ? leftPanelRatio : rightPanelRatio,
     };
   };
 
@@ -6289,17 +6308,20 @@ export default function MeetingCanvasTab({
   };
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
+  const workspaceGridColumns = `clamp(240px, ${(leftPanelRatio * 100).toFixed(
+    2,
+  )}vw, 420px) minmax(0, 1fr) clamp(260px, ${(rightPanelRatio * 100).toFixed(2)}vw, 460px)`;
 
   return (
     <div className="h-full min-h-0 bg-[#f9f9f9] text-black">
       <section className="flex h-full min-h-0 flex-col bg-[#f9f9f9]">
         <div className="relative z-20 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-          <div className="grid min-h-[141px] grid-cols-[minmax(280px,1fr)_minmax(320px,760px)_minmax(360px,1fr)] items-center gap-4 px-[33px] py-4">
-            <div className="flex flex-wrap items-center justify-start gap-2 justify-self-start">
+          <div className="grid min-h-[clamp(96px,13vh,141px)] grid-cols-1 items-center justify-items-center gap-3 px-[clamp(16px,2.4vw,33px)] py-[clamp(12px,1.8vh,16px)] lg:grid-cols-[minmax(0,1fr)_minmax(260px,1.35fr)_minmax(0,1fr)] lg:justify-items-stretch">
+            <div className="flex w-full flex-wrap items-center justify-center gap-2 lg:justify-start lg:justify-self-start">
               <button
                 type="button"
                 onClick={() => void handleEndMeetingClick()}
-                className="h-[43px] rounded-[8px] bg-[#ef4e4e] px-6 text-xl font-semibold text-white hover:bg-[#df3f3f]"
+                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#ef4e4e] px-[clamp(14px,1.7vw,24px)] text-[clamp(16px,1.2vw,20px)] font-semibold text-white hover:bg-[#df3f3f]"
               >
                 종료
               </button>
@@ -6312,7 +6334,7 @@ export default function MeetingCanvasTab({
                     void onToggleRecording?.();
                   }
                 }}
-                className={`h-[43px] rounded-[8px] px-4 text-sm font-semibold ${
+                className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(12px,1.2vw,16px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
                   isRecording ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100" : "bg-[#1b59f8] text-white"
                 }`}
               >
@@ -6331,7 +6353,7 @@ export default function MeetingCanvasTab({
                     return next;
                   });
                 }}
-                className="h-[43px] rounded-[8px] bg-[#eff0f6] px-3 text-sm font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee]"
+                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee]"
               >
                 {syncModeLabel(sharedSyncEnabled)}
               </button>
@@ -6339,7 +6361,7 @@ export default function MeetingCanvasTab({
                 type="button"
                 disabled={audioImportBusy}
                 onClick={() => fileInputRef.current?.click()}
-                className="h-[43px] rounded-[8px] bg-[#eff0f6] px-3 text-sm font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 불러오기
               </button>
@@ -6349,7 +6371,7 @@ export default function MeetingCanvasTab({
             </div>
 
             <div className="min-w-0 justify-self-center text-center">
-              <div className="flex items-center justify-center gap-2 text-[20px] font-normal leading-[24.811px] text-[#4d4d4d]">
+              <div className="flex items-center justify-center gap-2 text-[clamp(14px,1.2vw,20px)] font-normal leading-[1.25] text-[#4d4d4d]">
                 <span>{meetingTitle || "회의 제목"}</span>
                 <span className={`h-2.5 w-2.5 rounded-full ${isRecording ? "bg-[#34c759]" : "bg-[#d9d9d9]"}`} />
               </div>
@@ -6363,19 +6385,19 @@ export default function MeetingCanvasTab({
                     onMeetingGoalChange(nextGoal);
                   }}
                   placeholder="회의 목표를 입력해 주세요"
-                  className="mx-auto block w-full max-w-[760px] truncate rounded-xl border border-transparent bg-transparent px-3 py-1 text-center text-[32px] font-semibold leading-[38px] tracking-normal text-black outline-none transition placeholder:text-black/30 hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                  className="mx-auto block w-full max-w-[min(760px,100%)] truncate rounded-xl border border-transparent bg-transparent px-3 py-1 text-center text-[clamp(20px,2.2vw,32px)] font-semibold leading-[1.2] tracking-normal text-black outline-none transition placeholder:text-black/30 hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
                 />
               </label>
             </div>
 
-            <div className="flex flex-wrap items-center justify-end gap-4 justify-self-end">
-              <div className="flex items-center gap-5">
+            <div className="flex w-full flex-wrap items-center justify-center gap-3 lg:justify-end lg:justify-self-end">
+              <div className="flex flex-wrap items-center justify-center gap-[clamp(8px,1.4vw,20px)]">
                 {(["ideation", "problem-definition", "solution"] as CanvasStage[]).map((item, index) => (
-                  <div key={item} className="flex items-center gap-4">
+                  <div key={item} className="flex items-center gap-[clamp(6px,1vw,16px)]">
                     <button
                       type="button"
                       onClick={() => void handleStageSelect(item)}
-                      className={`rounded-[8px] border px-4 py-2 text-[20px] font-semibold leading-[24.811px] transition ${
+                      className={`rounded-[8px] border px-[clamp(12px,1.2vw,16px)] py-[clamp(7px,0.9vh,8px)] text-[clamp(14px,1.2vw,20px)] font-semibold leading-[1.25] transition ${
                         stage === item
                           ? "border-[#1b59f8]/20 bg-[rgba(27,89,248,0.1)] text-[#1b59f8]"
                           : "border-black/10 bg-white text-black/50 hover:border-[#1b59f8]/20 hover:bg-[rgba(27,89,248,0.1)] hover:text-[#1b59f8]"
@@ -6383,7 +6405,7 @@ export default function MeetingCanvasTab({
                     >
                       {stageLabel(item)}
                     </button>
-                    {index < 2 ? <span className="text-2xl text-black/30">›</span> : null}
+                    {index < 2 ? <span className="text-[clamp(18px,1.5vw,24px)] text-black/30">›</span> : null}
                   </div>
                 ))}
               </div>
@@ -6454,10 +6476,10 @@ export default function MeetingCanvasTab({
             </div>
 
         <div
-          className="grid flex-1 min-h-0 grid-cols-1 bg-black/10 xl:gap-px xl:border-x xl:border-b xl:border-black/10"
-          style={isDesktopLayout ? { gridTemplateColumns: `${leftPanelWidth}px minmax(0,1fr) ${rightPanelWidth}px` } : undefined}
+          className="grid flex-1 min-h-0 grid-cols-1 overflow-y-auto bg-black/10 xl:overflow-hidden xl:gap-px xl:border-x xl:border-b xl:border-black/10"
+          style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
-          <aside className="imms-side-panel imms-left-panel relative border-b border-black/10 bg-[#f9f9f9] shadow-[inset_-1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:border-b-0">
+          <aside className="imms-side-panel imms-left-panel relative min-h-[min(42vh,520px)] border-b border-black/10 bg-[#f9f9f9] shadow-[inset_-1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:border-b-0">
             <button
               type="button"
               aria-label="왼쪽 패널 너비 조절"
@@ -6466,7 +6488,7 @@ export default function MeetingCanvasTab({
             >
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
-            <div className="imms-overlay-scroll h-full px-5 py-6 xl:overflow-y-auto">
+            <div className="imms-overlay-scroll h-full max-h-[min(62vh,620px)] overflow-y-auto px-[clamp(16px,1.6vw,20px)] py-[clamp(18px,2.2vh,24px)] xl:max-h-none xl:overflow-y-auto">
             <div className="imms-side-panel-surface p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -7400,8 +7422,8 @@ export default function MeetingCanvasTab({
             </div>
           </aside>
 
-          <section ref={canvasSurfaceRef} className="relative flex h-full min-h-0 flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:border-b-0">
-            <div className="relative grid min-h-[135px] shrink-0 grid-cols-1 divide-y divide-black/10 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] md:grid-cols-3 md:divide-x md:divide-y-0">
+          <section ref={canvasSurfaceRef} className="relative flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:h-full xl:min-h-0 xl:border-b-0">
+            <div className="relative grid min-h-[clamp(88px,12vh,135px)] shrink-0 grid-cols-1 divide-y divide-black/10 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] md:grid-cols-3 md:divide-x md:divide-y-0">
               <div className="pointer-events-none absolute left-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap gap-2">
                 <span className="rounded-full border border-blue-100 bg-blue-50/95 px-3 py-1 text-xs font-semibold text-blue-700 shadow-sm">
                   {sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중"}
@@ -7413,9 +7435,9 @@ export default function MeetingCanvasTab({
                 ) : null}
               </div>
               {transcriptStripItems.slice(0, 3).map((item, index) => (
-                <div key={`${item.timestamp || index}-${index}`} className="flex min-h-[135px] items-center gap-8 px-9 py-4">
-                  <span className="h-12 w-12 shrink-0 rounded-full bg-[#d9d9d9]" />
-                  <div className="min-w-0 text-base leading-[1.55] text-[#4d4d4d]">
+                <div key={`${item.timestamp || index}-${index}`} className="flex min-h-[clamp(88px,12vh,135px)] items-center gap-[clamp(12px,2vw,32px)] px-[clamp(16px,3vw,36px)] py-[clamp(12px,1.8vh,16px)]">
+                  <span className="h-[clamp(36px,4vw,48px)] w-[clamp(36px,4vw,48px)] shrink-0 rounded-full bg-[#d9d9d9]" />
+                  <div className="min-w-0 text-[clamp(13px,1vw,16px)] leading-[1.55] text-[#4d4d4d]">
                     <p className="line-clamp-2">{item.text}</p>
                     <p className="mt-1 text-xs text-black/35">{item.speaker}</p>
                   </div>
@@ -7665,22 +7687,22 @@ export default function MeetingCanvasTab({
             ) : null}
 
             {canvasStatusMessage ? (
-              <div className="pointer-events-none absolute inset-x-0 bottom-[104px] z-10 flex justify-center px-4">
+              <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(84px,12vh,112px)] z-10 flex justify-center px-4">
                 <div className="max-w-[min(640px,calc(100%-32px))] rounded-full border border-black/10 bg-white/95 px-4 py-2 text-center text-xs leading-5 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)] backdrop-blur-sm">
                   {canvasStatusMessage}
                 </div>
               </div>
             ) : null}
 
-            <div className="pointer-events-none absolute inset-x-0 bottom-8 z-10 flex justify-center px-3">
-              <div className="pointer-events-auto flex min-h-[60px] w-auto max-w-[calc(100%-24px)] items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-3 py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
+            <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
+              <div className="pointer-events-auto flex min-h-[clamp(52px,7vh,60px)] w-auto max-w-[min(720px,calc(100%-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
                 {(["note", "comment", "topic", "group"] as CanvasTool[]).map((item) => (
                   <button
                     key={item}
                     type="button"
                     onClick={() => armCanvasTool(item)}
                     disabled={stage !== "ideation"}
-                    className={`flex h-10 min-w-[92px] shrink-0 items-center justify-center rounded-[12px] px-4 text-base font-medium transition-all duration-150 ease-out ${
+                    className={`flex h-[clamp(36px,4.4vh,40px)] min-w-[clamp(74px,7vw,92px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(12px,1.2vw,16px)] text-[clamp(13px,1vw,16px)] font-medium transition-all duration-150 ease-out ${
                       armedCanvasTool === item
                         ? "bg-[#1b59f8]/10 text-[#1b59f8]"
                         : "text-[#4d4d4d] hover:bg-black/5"
@@ -7698,7 +7720,7 @@ export default function MeetingCanvasTab({
             </div>
           </section>
 
-          <aside className="imms-side-panel imms-right-panel imms-overlay-scroll relative bg-[#f9f9f9] px-5 py-6 shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:overflow-y-auto">
+          <aside className="imms-side-panel imms-right-panel imms-overlay-scroll relative min-h-[min(42vh,520px)] max-h-[min(62vh,620px)] overflow-y-auto bg-[#f9f9f9] px-[clamp(16px,1.6vw,20px)] py-[clamp(18px,2.2vh,24px)] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:max-h-none xl:overflow-y-auto">
             <button
               type="button"
               aria-label="오른쪽 패널 너비 조절"
