@@ -141,47 +141,51 @@ $started = @()
 
 try {
   Write-Host "Starting backend on http://localhost:$BackendPort ..."
-  $started += Start-LoggedProcess `
+  $backendProcess = Start-LoggedProcess `
     -Name "backend" `
     -FilePath $python `
     -ArgumentList @("-m", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "$BackendPort", "--reload") `
     -WorkingDirectory $projectRoot `
     -LogDirectory $logDir
+  $started += $backendProcess
 
   Write-Host "Starting gateway on http://localhost:$GatewayPort ..."
-  $started += Start-LoggedProcess `
+  $gatewayProcess = Start-LoggedProcess `
     -Name "gateway" `
     -FilePath $python `
     -ArgumentList @("-m", "uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "$GatewayPort", "--reload") `
     -WorkingDirectory $projectRoot `
     -LogDirectory $logDir
+  $started += $gatewayProcess
 
   Start-Sleep -Seconds 2
 
   Write-Host "Starting Cloudflare tunnel for gateway..."
-  $started += Start-LoggedProcess `
+  $gatewayTunnelProcess = Start-LoggedProcess `
     -Name "gateway-tunnel" `
     -FilePath $cloudflaredCommand.Source `
     -ArgumentList @("tunnel", "--url", "http://localhost:$GatewayPort") `
     -WorkingDirectory $projectRoot `
     -LogDirectory $logDir
+  $started += $gatewayTunnelProcess
 
   Write-Host "Starting Cloudflare tunnel for backend..."
-  $started += Start-LoggedProcess `
+  $backendTunnelProcess = Start-LoggedProcess `
     -Name "backend-tunnel" `
     -FilePath $cloudflaredCommand.Source `
     -ArgumentList @("tunnel", "--url", "http://localhost:$BackendPort") `
     -WorkingDirectory $projectRoot `
     -LogDirectory $logDir
+  $started += $backendTunnelProcess
 
   $gatewayTunnel = Wait-TunnelUrl `
     -Name "gateway" `
-    -LogPaths @((Join-Path $logDir "gateway-tunnel.out.log"), (Join-Path $logDir "gateway-tunnel.err.log")) `
+    -LogPaths @($gatewayTunnelProcess.Stdout, $gatewayTunnelProcess.Stderr) `
     -TimeoutSeconds $TunnelTimeoutSeconds
 
   $backendTunnel = Wait-TunnelUrl `
     -Name "backend" `
-    -LogPaths @((Join-Path $logDir "backend-tunnel.out.log"), (Join-Path $logDir "backend-tunnel.err.log")) `
+    -LogPaths @($backendTunnelProcess.Stdout, $backendTunnelProcess.Stderr) `
     -TimeoutSeconds $TunnelTimeoutSeconds
 
   Write-Host ""

@@ -6715,7 +6715,7 @@ def _canvas_idea_visible_target(workspace: dict[str, Any]) -> int:
 
 
 def _canvas_topic_cluster_target(workspace: dict[str, Any]) -> int:
-    return 3 + (_canvas_idea_create_stack_value(workspace) // 2)
+    return 3 + (_canvas_idea_create_stack_value(workspace) // 4)
 
 
 def _canvas_idea_compaction_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
