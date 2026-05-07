@@ -1180,9 +1180,11 @@ function canvasItemTone(kind: ComposerTool) {
 const CANVAS_ITEM_NODE_WIDTH = 320;
 const CANVAS_ITEM_NODE_MIN_HEIGHT = 252;
 const CANVAS_TOPIC_CHILD_GAP_X = 24;
+const CANVAS_TOPIC_CHILD_GAP_Y = 14;
+const CANVAS_TOPIC_CHILDS_PER_ROW = 999;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
-const CANVAS_AGENDA_BLOCK_GAP_X = 640;
+const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
 const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
 
 function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
@@ -1937,6 +1939,7 @@ function positionsEqual(
 function styleSignature(style?: React.CSSProperties) {
   return buildNodeContentSignature([
     style?.width,
+    style?.height,
     style?.minHeight,
     style?.borderRadius,
     style?.padding,
@@ -3707,12 +3710,57 @@ export default function MeetingCanvasTab({
     const incomingCustomGroups = hydrateCustomGroups(incomingSharedCanvasSync.custom_groups || []);
     const incomingMeetingGoal = incomingSharedCanvasSync.meeting_goal || "";
     const incomingMeetingGoalContext = incomingSharedCanvasSync.meeting_goal_context || "";
+    const editingCanvasItem =
+      incomingStage === "ideation" && editingCanvasItemId
+        ? canvasItems.find((item) => item.id === editingCanvasItemId) || null
+        : null;
+    let nextIncomingCanvasItems = incomingCanvasItems;
+    let nextIncomingNodePositions = incomingSharedCanvasSync.node_positions || {};
+
+    if (editingCanvasItem) {
+      let foundEditingItem = false;
+      nextIncomingCanvasItems = incomingCanvasItems.map((item) => {
+        if (item.id !== editingCanvasItem.id) return item;
+        foundEditingItem = true;
+        return {
+          ...item,
+          title: canvasItemDraftTitle,
+          body: canvasItemDraftBody,
+          user_edited: true,
+        };
+      });
+
+      if (!foundEditingItem) {
+        nextIncomingCanvasItems = [
+          {
+            ...editingCanvasItem,
+            title: canvasItemDraftTitle,
+            body: canvasItemDraftBody,
+            user_edited: true,
+          },
+          ...nextIncomingCanvasItems,
+        ];
+      }
+
+      const editingNodeId = `canvas-item-${editingCanvasItem.id}`;
+      const editingNodePosition = nodePositions.ideation?.[editingNodeId];
+      if (editingNodePosition) {
+        nextIncomingNodePositions = {
+          ...nextIncomingNodePositions,
+          ideation: {
+            ...(nextIncomingNodePositions.ideation || {}),
+            [editingNodeId]: editingNodePosition,
+          },
+        };
+      }
+    }
+
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       meeting_goal: incomingMeetingGoal,
       meeting_goal_context: incomingMeetingGoalContext,
       stage: incomingStage,
       agenda_overrides: incomingSharedCanvasSync.agenda_overrides || {},
-      canvas_items: incomingCanvasItems,
+      canvas_items: nextIncomingCanvasItems,
       custom_groups: serializeCustomGroups(incomingCustomGroups),
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
       solution_topics: serializeSharedSolutionTopics(
@@ -3721,7 +3769,7 @@ export default function MeetingCanvasTab({
           hydrateProblemGroups(incomingSharedCanvasSync.problem_groups || []),
         ),
       ),
-      node_positions: incomingSharedCanvasSync.node_positions || {},
+      node_positions: nextIncomingNodePositions,
       imported_state: incomingSharedCanvasSync.imported_state || null,
     });
     applyingRemoteSharedSyncRef.current = true;
@@ -3742,14 +3790,14 @@ export default function MeetingCanvasTab({
     onMeetingGoalChange(incomingMeetingGoal);
     onMeetingGoalContextChange(incomingMeetingGoalContext);
     setAgendaOverrides(incomingSharedCanvasSync.agenda_overrides || {});
-    setCanvasItems(incomingCanvasItems);
+    setCanvasItems(nextIncomingCanvasItems);
     setCustomGroups(incomingCustomGroups);
     setNodePositions((prev) =>
       sharedSyncEnabled
-        ? incomingSharedCanvasSync.node_positions || {}
+        ? nextIncomingNodePositions
         : mergeNodePositionsWithLocalOverrides(
             prev,
-            incomingSharedCanvasSync.node_positions || {},
+            nextIncomingNodePositions,
             localNodeOverridesRef.current,
         ),
     );
@@ -3767,11 +3815,11 @@ export default function MeetingCanvasTab({
       meetingGoalContext: incomingMeetingGoalContext,
       stage: incomingStage,
       agendaOverrides: incomingSharedCanvasSync.agenda_overrides || {},
-      canvasItems: incomingCanvasItems,
+      canvasItems: nextIncomingCanvasItems,
       customGroups: incomingCustomGroups,
       problemGroups: nextProblemGroups,
       solutionTopics: nextSolutionTopics,
-      nodePositions: incomingSharedCanvasSync.node_positions || {},
+      nodePositions: nextIncomingNodePositions,
       importedState: incomingSharedCanvasSync.imported_state || null,
     });
     setLeftPanelTab("detail");
@@ -3788,8 +3836,12 @@ export default function MeetingCanvasTab({
     } else {
       setSelectedProblemGroupId("");
       setSelectedSolutionTopicId("");
-      setSelectedCanvasItemId("");
-      setSelectedNodeId("");
+      const canKeepSelectedCanvasItem =
+        selectedCanvasItemId && nextIncomingCanvasItems.some((item) => item.id === selectedCanvasItemId);
+      const nextSelectedCanvasItemId =
+        editingCanvasItem?.id || (canKeepSelectedCanvasItem ? selectedCanvasItemId : "");
+      setSelectedCanvasItemId(nextSelectedCanvasItemId);
+      setSelectedNodeId(nextSelectedCanvasItemId ? `canvas-item-${nextSelectedCanvasItemId}` : "");
     }
     setActivityMessage("다른 참가자의 canvas 변경사항이 반영되었습니다.");
 
@@ -3798,11 +3850,17 @@ export default function MeetingCanvasTab({
     }, 0);
   }, [
     analysisStateSignature,
+    canvasItemDraftBody,
+    canvasItemDraftTitle,
+    canvasItems,
+    editingCanvasItemId,
     incomingSharedCanvasSync,
     meetingId,
+    nodePositions,
     onMeetingGoalChange,
     onMeetingGoalContextChange,
     problemGroups,
+    selectedCanvasItemId,
     sharedSyncEnabled,
     solutionTopics,
     userId,
@@ -4095,22 +4153,42 @@ export default function MeetingCanvasTab({
       return Boolean(parentTopic && !getTopicCollapsed(parentTopic));
     });
 
+    const sortAgendaLaneItems = (items: CanvasItemViewModel[]) => {
+      const originalOrder = new Map(canvasItems.map((item, index) => [item.id, index]));
+      return [...items].sort((left, right) => {
+        const leftTopic = isTopicCanvasItem(left) ? 0 : 1;
+        const rightTopic = isTopicCanvasItem(right) ? 0 : 1;
+        if (leftTopic !== rightTopic) return leftTopic - rightTopic;
+        return (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0);
+      });
+    };
+
     const getAgendaTopLevelItems = (agendaId: string) =>
-      canvasItems.filter((item) => item.agenda_id === agendaId && !item.parent_topic_id);
+      sortAgendaLaneItems(canvasItems.filter((item) => item.agenda_id === agendaId && !item.parent_topic_id));
 
     const getTopicChildItems = (topicId: string) =>
       (childIdsByTopic.get(topicId) || [])
         .map((childId) => canvasItemById.get(childId))
         .filter((item): item is CanvasItemViewModel => Boolean(item));
 
-    const estimateChildChainHeight = (topic: CanvasItemViewModel) => {
+    const estimateTopicChildLaneHeight = (topic: CanvasItemViewModel) => {
       if (getTopicCollapsed(topic)) return 0;
 
       const childItems = getTopicChildItems(topic.id);
       if (childItems.length === 0) return 0;
 
-      return Math.max(
-        ...childItems.map((child) => canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child)),
+      const rowHeights: number[] = [];
+      childItems.forEach((child, index) => {
+        const row = Math.floor(index / CANVAS_TOPIC_CHILDS_PER_ROW);
+        rowHeights[row] = Math.max(
+          rowHeights[row] || 0,
+          canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child),
+        );
+      });
+
+      return rowHeights.reduce(
+        (sum, height, index) => sum + height + (index === 0 ? 0 : CANVAS_TOPIC_CHILD_GAP_Y),
+        0,
       );
     };
 
@@ -4120,7 +4198,7 @@ export default function MeetingCanvasTab({
 
       const itemStackHeight = topLevelItems.reduce((sum, item, itemIndex) => {
         const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
-        const childChainHeight = isTopicCanvasItem(item) ? estimateChildChainHeight(item) : 0;
+        const childChainHeight = isTopicCanvasItem(item) ? estimateTopicChildLaneHeight(item) : 0;
         const rowHeight = Math.max(itemHeight, childChainHeight);
         const gap = itemIndex === 0 ? 0 : CANVAS_TOP_LEVEL_GAP_Y;
         return sum + gap + rowHeight;
@@ -4169,18 +4247,34 @@ export default function MeetingCanvasTab({
         let childChainHeight = 0;
         if (isTopicCanvasItem(item) && !getTopicCollapsed(item)) {
           const childItems = getTopicChildItems(item.id);
-          let nextChildX = topPosition.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X;
+          const childRowHeights: number[] = [];
+          let childBaseY = topPosition.y;
 
-          childItems.forEach((child) => {
-            computedCanvasPositions.set(child.id, {
-              x: nextChildX,
-              y: topPosition.y,
-            });
+          childItems.forEach((child, childIndex) => {
+            const childNodeId = `canvas-item-${child.id}`;
+            const childSavedPosition =
+              nodePositions.ideation?.[childNodeId] ||
+              pendingNodePlacementsRef.current[childNodeId] ||
+              (typeof child.x === "number" && typeof child.y === "number" ? { x: child.x, y: child.y } : undefined);
+            const childHeight = canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child);
+            const row = Math.floor(childIndex / CANVAS_TOPIC_CHILDS_PER_ROW);
+            const column = childIndex % CANVAS_TOPIC_CHILDS_PER_ROW;
+            if (column === 0 && row > 0) {
+              childBaseY += (childRowHeights[row - 1] || childHeight) + CANVAS_TOPIC_CHILD_GAP_Y;
+            }
+            const computedChildPosition = {
+              x: topPosition.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X + column * (CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X),
+              y: childBaseY,
+            };
+            computedCanvasPositions.set(
+              child.id,
+              child.manual_position && childSavedPosition ? childSavedPosition : computedChildPosition,
+            );
+            childRowHeights[row] = Math.max(childRowHeights[row] || 0, childHeight);
             childChainHeight = Math.max(
               childChainHeight,
-              canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child),
+              childBaseY - topPosition.y + childHeight,
             );
-            nextChildX += CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X;
           });
         }
 
