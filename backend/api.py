@@ -385,6 +385,8 @@ def _handle_runtime_db_exception(table_name: str, action: str, exc: Exception) -
 
 def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
     return {
+        "meeting_goal": _safe_text(workspace.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context")),
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
@@ -415,6 +417,8 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
 
     return {
         "meeting_id": _safe_text(meeting_id),
+        "meeting_goal": _safe_text(shared_state.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(shared_state.get("meeting_goal_context")),
         "stage": _normalize_canvas_stage(shared_state.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(shared_state.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(shared_state.get("canvas_items") or []),
@@ -751,6 +755,8 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
     shared_sync_enabled = _boolify(payload.get("shared_sync_enabled"), True)
     normalized: dict[str, Any] = {
         "shared_sync_enabled": shared_sync_enabled,
+        "meeting_goal": _safe_text(payload.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(payload.get("meeting_goal_context")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(payload.get("canvas_items") or []),
         "custom_groups": _normalize_canvas_custom_groups(payload.get("custom_groups") or []),
@@ -775,6 +781,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
     return {
         "meeting_id": _safe_text(meeting_id),
         "meeting_goal": _safe_text(source.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(source.get("meeting_goal_context")),
         "stage": _normalize_canvas_stage(source.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
@@ -803,6 +810,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "meeting_id": _safe_text(workspace.get("meeting_id")),
         "meeting_goal": _safe_text(workspace.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context")),
         "stage": _normalize_canvas_stage(workspace.get("stage")),
         "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
@@ -1012,6 +1020,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
         workspace = {}
     workspace.setdefault("meeting_id", normalized_meeting_id)
     workspace.setdefault("meeting_goal", "")
+    workspace.setdefault("meeting_goal_context", "")
     workspace.setdefault("stage", "ideation")
     workspace.setdefault("agenda_overrides", {})
     workspace.setdefault("canvas_items", [])
@@ -1833,6 +1842,7 @@ class CanvasWorkspaceSolutionTopicInput(BaseModel):
 class CanvasWorkspaceStateInput(BaseModel):
     meeting_id: str = ""
     meeting_goal: str = ""
+    meeting_goal_context: str = ""
     stage: str = "ideation"
     agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
@@ -1846,6 +1856,7 @@ class CanvasWorkspaceStateInput(BaseModel):
 class CanvasWorkspacePatchInput(BaseModel):
     meeting_id: str = ""
     meeting_goal: str | None = None
+    meeting_goal_context: str | None = None
     stage: str | None = None
     agenda_overrides: dict[str, dict[str, Any]] | None = None
     canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
@@ -8136,6 +8147,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
     workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
     workspace["meeting_goal"] = _safe_text(payload.meeting_goal)
+    workspace["meeting_goal_context"] = _safe_text(payload.meeting_goal_context)
     workspace["stage"] = _normalize_canvas_stage(payload.stage)
     workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
     workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
@@ -8155,6 +8167,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
         {
             "meeting_id": normalized_meeting_id,
             "meeting_goal": _safe_text(workspace.get("meeting_goal"))[:80],
+            "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context"))[:80],
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),
@@ -8178,6 +8191,8 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
 
     if "meeting_goal" in provided_fields:
         workspace["meeting_goal"] = _safe_text(payload.meeting_goal)
+    if "meeting_goal_context" in provided_fields:
+        workspace["meeting_goal_context"] = _safe_text(payload.meeting_goal_context)
     if "stage" in provided_fields:
         workspace["stage"] = _normalize_canvas_stage(payload.stage)
     if "agenda_overrides" in provided_fields:
@@ -8207,6 +8222,7 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
             "meeting_id": normalized_meeting_id,
             "fields": sorted(list(provided_fields)),
             "meeting_goal": _safe_text(workspace.get("meeting_goal"))[:80],
+            "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context"))[:80],
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),

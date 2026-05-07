@@ -89,6 +89,14 @@ function buildTranscriptSyncSignature(meetingGoal: string, rows: Transcript[]) {
   return [meetingGoal, ...rows.map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`)].join("\u0002");
 }
 
+function buildSttContext(goal: string, context: string, fallbackTitle: string) {
+  const cleanGoal = goal.trim() || fallbackTitle.trim();
+  const cleanContext = context.trim();
+  return [cleanGoal ? `회의 목표: ${cleanGoal}` : "", cleanContext ? `관련 맥락: ${cleanContext}` : ""]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function getTranscriptTime(row: Transcript) {
   const parsed = Date.parse(row.timestamp || "");
   return Number.isFinite(parsed) ? parsed : 0;
@@ -179,6 +187,7 @@ function HomeContent() {
 
   const [meetingTitle, setMeetingTitle] = useState("회의 워크스페이스");
   const [meetingGoal, setMeetingGoal] = useState("");
+  const [meetingGoalContext, setMeetingGoalContext] = useState("");
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [agendas, setAgendas] = useState<Agenda[]>([]);
   const [analysisState, setAnalysisState] = useState<MeetingState | null>(null);
@@ -204,6 +213,7 @@ function HomeContent() {
   const isRecordingRef = useRef(isRecording);
   const meetingTitleRef = useRef(meetingTitle);
   const meetingGoalRef = useRef(meetingGoal);
+  const meetingGoalContextRef = useRef(meetingGoalContext);
   const transcriptsRef = useRef(transcripts);
   const autoSyncTimerRef = useRef<number | null>(null);
   const autoSyncInFlightRef = useRef(false);
@@ -227,6 +237,10 @@ function HomeContent() {
   useEffect(() => {
     meetingGoalRef.current = meetingGoal;
   }, [meetingGoal]);
+
+  useEffect(() => {
+    meetingGoalContextRef.current = meetingGoalContext;
+  }, [meetingGoalContext]);
 
   useEffect(() => {
     transcriptsRef.current = transcripts;
@@ -305,6 +319,7 @@ function HomeContent() {
     autoSyncInFlightRef.current = false;
     setIncomingCanvasSync(null);
     setMeetingGoal("");
+    setMeetingGoalContext("");
     setIncomingCanvasStateRequestId("");
     setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
     setSttProgressText("");
@@ -341,6 +356,7 @@ function HomeContent() {
 
         setMeetingTitle(nextMeetingTitle);
         setMeetingGoal(workspaceState?.meeting_goal || "");
+        setMeetingGoalContext(workspaceState?.meeting_goal_context || "");
         setTranscripts(nextTranscripts);
 
         if (workspaceState?.imported_state) {
@@ -424,6 +440,7 @@ function HomeContent() {
       if (!isRecord(payload)) return;
       if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
       setMeetingGoal(readString(payload.meeting_goal));
+      setMeetingGoalContext(readString(payload.meeting_goal_context));
     });
 
     wsClient.on("stt_flow_summaries_updated", (message) => {
@@ -762,7 +779,7 @@ function HomeContent() {
 
       const started = await startAudioImportJob({
         meeting_id: meetingId,
-        meeting_goal: meetingGoalRef.current || meetingTitleRef.current,
+        meeting_goal: buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
         user_id: user.id,
         file,
         reset_state: true,
@@ -883,7 +900,12 @@ function HomeContent() {
           combinedChunkCount: metrics.combinedChunkCount,
           bytes: blob.size,
         });
-        wsClientRef.current.sendAudioChunk(blob, user.email || "Unknown", metrics, meetingGoalRef.current);
+        wsClientRef.current.sendAudioChunk(
+          blob,
+          user.email || "Unknown",
+          metrics,
+          buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
+        );
       } else {
         console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
           bytes: blob.size,
@@ -938,9 +960,10 @@ function HomeContent() {
       workspace: payload,
     });
   }, []);
-  const broadcastMeetingGoalSync = useCallback((goal: string) => {
+  const broadcastMeetingGoalSync = useCallback((goal: string, context = meetingGoalContextRef.current) => {
     wsClientRef.current?.sendMessage("meeting_goal_sync", {
       meeting_goal: goal,
+      meeting_goal_context: context,
     });
   }, []);
   const audioImportBusy = audioImportJob?.status === "queued" || audioImportJob?.status === "processing";
@@ -970,7 +993,9 @@ function HomeContent() {
         meetingId={meetingId}
         meetingTitle={meetingTitle}
         meetingGoal={meetingGoal}
+        meetingGoalContext={meetingGoalContext}
         onMeetingGoalChange={setMeetingGoal}
+        onMeetingGoalContextChange={setMeetingGoalContext}
         onMeetingGoalSync={broadcastMeetingGoalSync}
         transcripts={canvasTranscripts}
         agendas={canvasAgendas}

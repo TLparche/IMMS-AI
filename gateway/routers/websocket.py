@@ -750,6 +750,7 @@ async def websocket_endpoint(
                 'node_positions': current_workspace.get('node_positions') or {},
                 'imported_state': current_workspace.get('imported_state'),
                 'meeting_goal': current_workspace.get('meeting_goal') or '',
+                'meeting_goal_context': current_workspace.get('meeting_goal_context') or '',
             })
         except Exception as e:
             print(f"❌ Failed to send initial canvas sync to {user_id}: {e}")
@@ -914,14 +915,18 @@ async def websocket_endpoint(
 
             elif message_type == 'meeting_goal_sync':
                 meeting_goal = str(message.get("meeting_goal") or "").strip()
+                meeting_goal_context = str(message.get("meeting_goal_context") or "").strip()
                 workspace = latest_canvas_workspace_by_meeting.get(meeting_id)
-                if isinstance(workspace, dict):
-                    workspace["meeting_goal"] = meeting_goal
-                    latest_canvas_workspace_by_meeting[meeting_id] = copy.deepcopy(workspace)
+                if not isinstance(workspace, dict):
+                    workspace = {"meeting_id": meeting_id}
+                workspace["meeting_goal"] = meeting_goal
+                workspace["meeting_goal_context"] = meeting_goal_context
+                latest_canvas_workspace_by_meeting[meeting_id] = copy.deepcopy(workspace)
                 await broadcast_to_meeting(meeting_id, {
                     'type': 'meeting_goal_updated',
                     'meeting_id': meeting_id,
                     'meeting_goal': meeting_goal,
+                    'meeting_goal_context': meeting_goal_context,
                     'updated_by': user_id,
                     'timestamp': datetime.utcnow().isoformat(),
                 }, exclude_user=user_id)

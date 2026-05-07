@@ -74,12 +74,12 @@ const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solutio
 const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
 const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
 const IDEA_ASSIMILATION_SILENCE_FLUSH_MS = 8_000;
-const DEFAULT_LEFT_PANEL_RATIO = 0.22;
-const DEFAULT_RIGHT_PANEL_RATIO = 0.24;
-const MIN_LEFT_PANEL_RATIO = 0.16;
-const MAX_LEFT_PANEL_RATIO = 0.32;
-const MIN_RIGHT_PANEL_RATIO = 0.18;
-const MAX_RIGHT_PANEL_RATIO = 0.34;
+const DEFAULT_LEFT_PANEL_RATIO = 0.19;
+const DEFAULT_RIGHT_PANEL_RATIO = 0.2;
+const MIN_LEFT_PANEL_RATIO = 0.13;
+const MAX_LEFT_PANEL_RATIO = 0.28;
+const MIN_RIGHT_PANEL_RATIO = 0.14;
+const MAX_RIGHT_PANEL_RATIO = 0.3;
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -124,6 +124,7 @@ type SolutionTopicViewModel = CanvasSolutionTopicResponse & {
 
 type WorkspaceFieldSignatures = {
   meeting_goal: string;
+  meeting_goal_context: string;
   stage: string;
   agenda_overrides: string;
   canvas_items: string;
@@ -191,6 +192,7 @@ function logCanvasIdeaAssimilationJob(
 function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
   return {
     meeting_goal: "",
+    meeting_goal_context: "",
     stage: "",
     agenda_overrides: "",
     canvas_items: "",
@@ -342,6 +344,7 @@ function serializeCustomGroups(groups: CustomGroupViewModel[]) {
 
 function buildWorkspaceFieldSignatures(input: {
   meetingGoal: string;
+  meetingGoalContext: string;
   stage: CanvasStage;
   agendaOverrides: Record<string, AgendaOverride>;
   canvasItems: CanvasItemViewModel[];
@@ -353,6 +356,7 @@ function buildWorkspaceFieldSignatures(input: {
 }): WorkspaceFieldSignatures {
   return {
     meeting_goal: input.meetingGoal.trim(),
+    meeting_goal_context: input.meetingGoalContext.trim(),
     stage: input.stage,
     agenda_overrides: JSON.stringify(serializeAgendaOverrides(input.agendaOverrides)),
     canvas_items: JSON.stringify(buildWorkspaceCanvasItemsPayload(input.canvasItems)),
@@ -367,6 +371,7 @@ function buildWorkspaceFieldSignatures(input: {
 function buildFullWorkspacePatchPayload(input: {
   meetingId: string;
   meetingGoal: string;
+  meetingGoalContext: string;
   stage: CanvasStage;
   agendaOverrides: Record<string, AgendaOverride>;
   canvasItems: CanvasItemViewModel[];
@@ -379,6 +384,7 @@ function buildFullWorkspacePatchPayload(input: {
   return {
     meeting_id: input.meetingId,
     meeting_goal: input.meetingGoal.trim(),
+    meeting_goal_context: input.meetingGoalContext.trim(),
     stage: input.stage,
     agenda_overrides: serializeAgendaOverrides(input.agendaOverrides),
     canvas_items: serializeSharedCanvasItems(input.canvasItems),
@@ -576,8 +582,10 @@ type MeetingCanvasTabProps = {
   meetingId: string;
   meetingTitle: string;
   meetingGoal: string;
+  meetingGoalContext: string;
   onMeetingGoalChange: (goal: string) => void;
-  onMeetingGoalSync?: (goal: string) => void;
+  onMeetingGoalContextChange: (context: string) => void;
+  onMeetingGoalSync?: (goal: string, context?: string) => void;
   transcripts: MeetingTranscript[];
   agendas: MeetingAgenda[];
   analysisState: MeetingState | null;
@@ -1128,9 +1136,8 @@ function makeAgendaNodeLabel(title: string, summary: string, status: string, key
         <strong className="mt-4 block text-[17px] leading-7 text-slate-900">
           {title}
         </strong>
-        <div className="mt-4 rounded-[18px] border border-amber-100 bg-white px-4 py-3">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Summary</p>
-          <p className="mt-1 text-sm leading-6 text-slate-600">
+        <div className="mt-4 px-1">
+          <p className="text-sm leading-6 text-slate-600">
             {summary}
           </p>
         </div>
@@ -1170,16 +1177,27 @@ function canvasItemTone(kind: ComposerTool) {
   };
 }
 
-const CANVAS_ITEM_NODE_WIDTH = 248;
-const CANVAS_ITEM_NODE_HEIGHT = 197;
-const CANVAS_TOPIC_CHILD_GAP_X = 28;
+const CANVAS_ITEM_NODE_WIDTH = 320;
+const CANVAS_ITEM_NODE_MIN_HEIGHT = 252;
+const CANVAS_TOPIC_CHILD_GAP_X = 24;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 640;
 const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
 
-function estimateCanvasItemNodeHeight(_item: CanvasItemViewModel) {
-  return CANVAS_ITEM_NODE_HEIGHT;
+function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
+  const pending = Boolean(item.ai_pending);
+  const titleLines = Math.min(3, estimateWrappedLines(pending ? "AI 정리 중" : item.title || "내용 상세보기", 18));
+  const body = pending ? "요약 생성 중" : cleanCanvasNodeBodyText(item.body);
+  const bodyLines = body ? estimateWrappedLines(body, 26) : 0;
+  const keywordCount = pending ? 3 : Math.max((item.keywords || []).filter(Boolean).length, 3);
+  const keywordRows = Math.max(1, Math.ceil(keywordCount / 3));
+  const footerLines = item.point_id ? 1 : 0;
+
+  return Math.max(
+    CANVAS_ITEM_NODE_MIN_HEIGHT,
+    88 + titleLines * 26 + bodyLines * 25 + keywordRows * 28 + footerLines * 18,
+  );
 }
 
 const CANVAS_ITEM_KEYWORD_STOPWORDS = new Set([
@@ -1308,21 +1326,29 @@ function getCanvasItemChangeSignature(item: CanvasItemViewModel) {
   });
 }
 
+function cleanCanvasNodeBodyText(value: string | undefined) {
+  const text = (value || "").trim();
+  if (!text || /^content\s*:?\s*$/i.test(text)) {
+    return "";
+  }
+  return text;
+}
+
 function makeCanvasItemNodeLabel(
   item: CanvasItemViewModel,
   selected: boolean,
-  linkedAgendaTitle: string,
+  _linkedAgendaTitle: string,
   onToggleTopicCollapsed?: (itemId: string) => void,
   highlighted = false,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
-  const keywords = (item.keywords || []).filter(Boolean).slice(0, 3);
+  const keywords = (item.keywords || []).filter(Boolean);
   const pending = Boolean(item.ai_pending);
   const mergedSourceCount = getCanvasItemMergedSourceCount(item);
   const topicChildCount = getTopicChildCount(item);
   const showTopicToggle = isTopicCanvasItem(item) && topicChildCount > 0;
   const title = pending ? "AI 정리 중" : item.title || "내용 상세보기";
-  const body = pending ? "" : item.body || "요약 내용";
+  const body = pending ? "" : cleanCanvasNodeBodyText(item.body);
   const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
   const borderClass = selected ? "border-black" : "border-black/10";
   const displayKeywords = pending ? [] : keywords.length > 0 ? keywords : ["키워드", "키워드", "키워드"];
@@ -1330,61 +1356,56 @@ function makeCanvasItemNodeLabel(
   return (
     <div className="min-w-0">
       <div
-        className={`relative flex h-[197px] w-[248px] flex-col items-center justify-center rounded-[16px] border px-[30px] text-center font-['Inter','Noto_Sans_KR',sans-serif] transition-colors ${backgroundClass} ${borderClass}`}
+        className={`relative flex h-full min-h-[252px] w-full flex-col rounded-[18px] border px-5 py-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] transition-colors ${backgroundClass} ${borderClass}`}
       >
-        {showTopicToggle ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleTopicCollapsed?.(item.id);
-            }}
-            className="absolute right-3 top-3 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)] hover:bg-white"
-          >
-            {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
-          </button>
-        ) : mergedSourceCount > 1 ? (
-          <span className="absolute right-3 top-3 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)]">
-            묶음 {mergedSourceCount}
-          </span>
-        ) : null}
-        {linkedAgendaTitle ? (
-          <span className="absolute left-3 top-3 max-w-[92px] truncate rounded-full bg-white/70 px-2.5 py-1 text-[11px] text-[#6b6b6b]">
-            {linkedAgendaTitle}
-          </span>
-        ) : null}
-        <strong className="max-w-full text-[18px] font-semibold leading-[24.811px] text-black line-clamp-2">
+        <div className="flex min-h-[28px] w-full items-start justify-between gap-2">
+          <span />
+          {showTopicToggle ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleTopicCollapsed?.(item.id);
+              }}
+              className="shrink-0 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)] hover:bg-white"
+            >
+              {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
+            </button>
+          ) : mergedSourceCount > 1 ? (
+            <span className="shrink-0 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)]">
+              묶음 {mergedSourceCount}
+            </span>
+          ) : null}
+        </div>
+        <strong className="mt-3 max-w-full text-[18px] font-semibold leading-[24.811px] text-black line-clamp-2">
           {title}
         </strong>
-        <div className="mt-[20px] w-full">
-          {pending ? (
-            <div className="mx-auto flex w-full flex-col items-center gap-2">
-              <div className="h-4 w-[116px] animate-pulse rounded-full bg-black/10" />
-              <div className="h-4 w-[84px] animate-pulse rounded-full bg-black/10" />
-            </div>
-          ) : (
-            <p className="mx-auto max-w-full text-[16px] font-normal leading-[24.811px] text-[#4d4d4d] line-clamp-2">
-              {body}
-            </p>
-          )}
-        </div>
         {pending ? (
-          <div className="mt-[28px] flex justify-center gap-[13px]">
+          <p className="mt-3 text-[16px] font-normal leading-[24.811px] text-[#4d4d4d]">
+            요약 생성 중
+          </p>
+        ) : body ? (
+          <p className="mx-auto mt-3 max-w-full whitespace-pre-wrap break-words text-[16px] font-normal leading-[24.811px] text-[#4d4d4d]">
+            {body}
+          </p>
+        ) : null}
+        {pending ? (
+          <div className="mt-auto flex justify-center gap-2.5 pt-4">
             {[0, 1, 2].map((index) => (
               <span key={`${item.id}-pending-keyword-${index}`} className="h-4 w-[48px] animate-pulse rounded-full bg-black/10" />
             ))}
           </div>
         ) : (
-          <div className="mt-[28px] flex max-w-full justify-center gap-[13px] overflow-hidden">
+          <div className="mt-auto flex max-w-full flex-wrap justify-center gap-x-2.5 gap-y-1.5 pt-4">
             {displayKeywords.map((keyword, index) => (
-              <span key={`${item.id}-${keyword}-${index}`} className="max-w-[58px] truncate whitespace-nowrap text-[16px] font-normal leading-[24.811px] text-[#4d4d4d]">
+              <span key={`${item.id}-${keyword}-${index}`} className="max-w-[86px] truncate whitespace-nowrap text-[15px] font-normal leading-[24.811px] text-[#4d4d4d]">
                 #{keyword}
               </span>
             ))}
           </div>
         )}
         {item.point_id ? (
-          <p className={`absolute bottom-3 left-4 right-4 truncate text-[11px] font-medium ${tone.accent}`}>
+          <p className={`mt-1 truncate text-[11px] font-medium ${tone.accent}`}>
             연결 노드: {item.point_id}
           </p>
         ) : null}
@@ -1500,9 +1521,6 @@ function makeProblemGroupNodeLabel(
               <div key={item.id} className={`min-h-[136px] rounded-[12px] border p-5 shadow-[0_10px_22px_rgba(15,23,42,0.08)] ${palette.note}`}>
                 <p className="text-[19px] font-semibold leading-7 text-slate-900">
                   {item.title || `아이디어${itemIndex + 1}`}
-                </p>
-                <p className={`mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] ${palette.noteAccent}`}>
-                  {item.kind === "summary" ? "summary" : "memo"}
                 </p>
                 <p className="mt-3 line-clamp-4 text-[15px] leading-7 text-slate-600">
                   {item.body}
@@ -1835,6 +1853,7 @@ function serializeSharedSolutionTopics(topics: SolutionTopicViewModel[]) {
 
 function buildSharedCanvasSignature(payload: {
   meeting_goal?: string;
+  meeting_goal_context?: string;
   stage: CanvasStage;
   agenda_overrides: Record<string, unknown>;
   canvas_items: unknown[];
@@ -1974,7 +1993,9 @@ export default function MeetingCanvasTab({
   meetingId,
   meetingTitle,
   meetingGoal,
+  meetingGoalContext,
   onMeetingGoalChange,
+  onMeetingGoalContextChange,
   onMeetingGoalSync,
   transcripts,
   agendas,
@@ -2044,6 +2065,10 @@ export default function MeetingCanvasTab({
   const [dropProblemGroupId, setDropProblemGroupId] = useState("");
   const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>("detail");
   const [meetingGoalDraft, setMeetingGoalDraft] = useState(meetingGoal);
+  const [meetingGoalContextDraft, setMeetingGoalContextDraft] = useState(meetingGoalContext);
+  const [meetingGoalEditorDraft, setMeetingGoalEditorDraft] = useState(meetingGoal);
+  const [meetingGoalContextEditorDraft, setMeetingGoalContextEditorDraft] = useState(meetingGoalContext);
+  const [meetingGoalSaving, setMeetingGoalSaving] = useState(false);
   const [conclusionRefreshingGroupId, setConclusionRefreshingGroupId] = useState("");
   const [conclusionBatchBusy, setConclusionBatchBusy] = useState(false);
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
@@ -2059,6 +2084,7 @@ export default function MeetingCanvasTab({
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedEdgeId, setSelectedEdgeId] = useState("");
+  const [meetingGoalEditorOpen, setMeetingGoalEditorOpen] = useState(false);
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
@@ -2105,6 +2131,7 @@ export default function MeetingCanvasTab({
   const ideaAssimilationInFlightRef = useRef(false);
   const latestSharedWorkspaceRef = useRef<{
     meetingGoal: string;
+    meetingGoalContext: string;
     stage: CanvasStage;
     agendaOverrides: Record<string, AgendaOverride>;
     canvasItems: CanvasItemViewModel[];
@@ -2115,6 +2142,7 @@ export default function MeetingCanvasTab({
     importedState: MeetingState | null;
   }>({
     meetingGoal: "",
+    meetingGoalContext: "",
     stage: "ideation",
     agendaOverrides: {},
     canvasItems: [],
@@ -2251,6 +2279,7 @@ export default function MeetingCanvasTab({
     ideaAssimilationInFlightRef.current = false;
     latestSharedWorkspaceRef.current = {
       meetingGoal: "",
+      meetingGoalContext: "",
       stage: "ideation",
       agendaOverrides: {},
       canvasItems: [],
@@ -2270,7 +2299,13 @@ export default function MeetingCanvasTab({
     setIdeaCreateStack(0);
     setCustomGroups([]);
     setMeetingGoalDraft("");
+    setMeetingGoalContextDraft("");
+    setMeetingGoalEditorDraft("");
+    setMeetingGoalContextEditorDraft("");
+    setMeetingGoalSaving(false);
+    setMeetingGoalEditorOpen(false);
     onMeetingGoalChange("");
+    onMeetingGoalContextChange("");
     setCustomGroupDraftTitle("");
     setEditingAgendaId("");
     setEditingCanvasItemId("");
@@ -2304,7 +2339,7 @@ export default function MeetingCanvasTab({
       window.clearTimeout(ideaSilenceTimerRef.current);
       ideaSilenceTimerRef.current = null;
     }
-  }, [meetingId, onMeetingGoalChange]);
+  }, [meetingId, onMeetingGoalChange, onMeetingGoalContextChange]);
 
   useEffect(() => {
     setTopicCollapsedOverrides(readTopicCollapseOverrides(meetingId, userId));
@@ -2313,6 +2348,7 @@ export default function MeetingCanvasTab({
   useEffect(() => {
     latestSharedWorkspaceRef.current = {
       meetingGoal: meetingGoalDraft.trim(),
+      meetingGoalContext: meetingGoalContextDraft.trim(),
       stage,
       agendaOverrides,
       canvasItems,
@@ -2327,6 +2363,7 @@ export default function MeetingCanvasTab({
     agendaOverrides,
     canvasItems,
     customGroups,
+    meetingGoalContextDraft,
     meetingGoalDraft,
     nodePositions,
     persistedSharedImportedState,
@@ -2488,6 +2525,7 @@ export default function MeetingCanvasTab({
           ? savedLocalCanvasState?.imported_state || null
           : saved.imported_state || null;
         const nextMeetingGoal = saved.meeting_goal || "";
+        const nextMeetingGoalContext = saved.meeting_goal_context || "";
         const nextImportOverrideActive = shouldUseLocalCanvas
           ? Boolean(savedLocalCanvasState?.import_override_active && nextImportedState)
           : Boolean(saved.imported_state);
@@ -2500,7 +2538,11 @@ export default function MeetingCanvasTab({
         setCustomGroups(nextCustomGroups);
         setIdeaCreateStack(saved.idea_create_stack || 0);
         setMeetingGoalDraft(nextMeetingGoal);
+        setMeetingGoalContextDraft(nextMeetingGoalContext);
+        setMeetingGoalEditorDraft(nextMeetingGoal);
+        setMeetingGoalContextEditorDraft(nextMeetingGoalContext);
         onMeetingGoalChange(nextMeetingGoal);
+        onMeetingGoalContextChange(nextMeetingGoalContext);
         setSharedSyncEnabled(nextSharedSyncEnabled);
         setNodePositions(nextNodePositions);
         setImportedState(nextImportedState);
@@ -2511,6 +2553,7 @@ export default function MeetingCanvasTab({
         setStage(nextStage);
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           meeting_goal: nextMeetingGoal,
+          meeting_goal_context: nextMeetingGoalContext,
           stage: nextStage,
           agenda_overrides: nextAgendaOverrides,
           canvas_items: nextCanvasItems,
@@ -2522,6 +2565,7 @@ export default function MeetingCanvasTab({
         });
         lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
           meetingGoal: nextMeetingGoal,
+          meetingGoalContext: nextMeetingGoalContext,
           stage: nextStage,
           agendaOverrides: nextAgendaOverrides,
           canvasItems: nextCanvasItems,
@@ -2574,6 +2618,7 @@ export default function MeetingCanvasTab({
         setStage("ideation");
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           meeting_goal: "",
+          meeting_goal_context: "",
           stage: "ideation",
           agenda_overrides: {},
           canvas_items: [],
@@ -2585,6 +2630,7 @@ export default function MeetingCanvasTab({
         });
         lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
           meetingGoal: "",
+          meetingGoalContext: "",
           stage: "ideation",
           agendaOverrides: {},
           canvasItems: [],
@@ -2713,7 +2759,17 @@ export default function MeetingCanvasTab({
 
   useEffect(() => {
     setMeetingGoalDraft(meetingGoal);
-  }, [meetingGoal]);
+    if (!meetingGoalEditorOpen) {
+      setMeetingGoalEditorDraft(meetingGoal);
+    }
+  }, [meetingGoal, meetingGoalEditorOpen]);
+
+  useEffect(() => {
+    setMeetingGoalContextDraft(meetingGoalContext);
+    if (!meetingGoalEditorOpen) {
+      setMeetingGoalContextEditorDraft(meetingGoalContext);
+    }
+  }, [meetingGoalContext, meetingGoalEditorOpen]);
 
   useEffect(() => {
     const syncViewportMode = () => {
@@ -2757,6 +2813,7 @@ export default function MeetingCanvasTab({
       nodePositions?: CanvasNodePositionsByStage;
       importedState?: MeetingState | null;
       meetingGoal?: string;
+      meetingGoalContext?: string;
     }) => {
       if (!meetingId || !userId) {
         return;
@@ -2764,6 +2821,7 @@ export default function MeetingCanvasTab({
 
       const snapshot = {
         meeting_goal: overrides?.meetingGoal ?? meetingGoalDraft.trim(),
+        meeting_goal_context: overrides?.meetingGoalContext ?? meetingGoalContextDraft.trim(),
         stage: overrides?.stage ?? stage,
         agenda_overrides: serializeAgendaOverrides(overrides?.agendaOverrides ?? agendaOverrides),
         canvas_items: serializeSharedCanvasItems(overrides?.canvasItems ?? canvasItems),
@@ -2784,6 +2842,7 @@ export default function MeetingCanvasTab({
         updated_by: userId,
         updated_at: new Date().toISOString(),
         meeting_goal: snapshot.meeting_goal,
+        meeting_goal_context: snapshot.meeting_goal_context,
         stage: snapshot.stage,
         agenda_overrides: snapshot.agenda_overrides,
         canvas_items: snapshot.canvas_items,
@@ -2798,6 +2857,7 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       canvasItems,
       customGroups,
+      meetingGoalContextDraft,
       meetingGoalDraft,
       meetingId,
       nodePositions,
@@ -2817,18 +2877,25 @@ export default function MeetingCanvasTab({
       const nextCanvasItems = hydrateCanvasItems(workspace.canvas_items || []);
       const nextNodePositions = workspace.node_positions || {};
       const nextMeetingGoal = typeof workspace.meeting_goal === "string" ? workspace.meeting_goal : meetingGoalDraft;
+      const nextMeetingGoalContext =
+        typeof workspace.meeting_goal_context === "string" ? workspace.meeting_goal_context : meetingGoalContextDraft;
       (workspace.idea_processed_utterance_ids || []).forEach((id) => {
         if (id) processedIdeaUtteranceIdsRef.current.add(id);
       });
 
       setCanvasItems(nextCanvasItems);
       setMeetingGoalDraft(nextMeetingGoal);
+      setMeetingGoalContextDraft(nextMeetingGoalContext);
+      setMeetingGoalEditorDraft(nextMeetingGoal);
+      setMeetingGoalContextEditorDraft(nextMeetingGoalContext);
       onMeetingGoalChange(nextMeetingGoal);
+      onMeetingGoalContextChange(nextMeetingGoalContext);
       setIdeaCreateStack(workspace.idea_create_stack || 0);
       setNodePositions(nextNodePositions);
       latestSharedWorkspaceRef.current = {
         ...latestSharedWorkspaceRef.current,
         meetingGoal: nextMeetingGoal,
+        meetingGoalContext: nextMeetingGoalContext,
         canvasItems: nextCanvasItems,
         nodePositions: nextNodePositions,
         importedState: persistedSharedImportedState,
@@ -2840,6 +2907,7 @@ export default function MeetingCanvasTab({
           buildFullWorkspacePatchPayload({
             meetingId,
             meetingGoal: nextMeetingGoal,
+            meetingGoalContext: nextMeetingGoalContext,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItems,
@@ -2852,6 +2920,7 @@ export default function MeetingCanvasTab({
         );
         forceBroadcastSharedCanvas({
           meetingGoal: nextMeetingGoal,
+          meetingGoalContext: nextMeetingGoalContext,
           canvasItems: nextCanvasItems,
           nodePositions: nextNodePositions,
         });
@@ -2861,9 +2930,11 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       customGroups,
       forceBroadcastSharedCanvas,
+      meetingGoalContextDraft,
       meetingGoalDraft,
       meetingId,
       onMeetingGoalChange,
+      onMeetingGoalContextChange,
       persistedSharedImportedState,
       problemGroups,
       sharedSyncEnabled,
@@ -2930,7 +3001,7 @@ export default function MeetingCanvasTab({
       }
 
       ideaAssimilationInFlightRef.current = true;
-      setIdeaAssimilationStatus("AI가 키워드와 content를 생성 중");
+      setIdeaAssimilationStatus("AI가 키워드와 요약을 생성 중");
 
       try {
         const firstTargetIndex = transcripts.findIndex((row) => row.id === targetRows[0]?.id);
@@ -3329,8 +3400,10 @@ export default function MeetingCanvasTab({
     const nextProblemGroupsPayload = buildWorkspaceProblemGroupsPayload(problemGroups);
     const nextSolutionTopicsPayload = buildWorkspaceSolutionTopicsPayload(solutionTopics);
     const nextMeetingGoal = meetingGoalDraft.trim();
+    const nextMeetingGoalContext = meetingGoalContextDraft.trim();
     const nextSignatures = buildWorkspaceFieldSignatures({
       meetingGoal: nextMeetingGoal,
+      meetingGoalContext: nextMeetingGoalContext,
       stage,
       agendaOverrides,
       canvasItems,
@@ -3344,6 +3417,7 @@ export default function MeetingCanvasTab({
     const patch: {
       meeting_id: string;
       meeting_goal?: string;
+      meeting_goal_context?: string;
       stage?: CanvasStage;
       agenda_overrides?: ReturnType<typeof serializeAgendaOverrides>;
       canvas_items?: ReturnType<typeof serializeSharedCanvasItems>;
@@ -3358,8 +3432,12 @@ export default function MeetingCanvasTab({
 
     let hasChanges = false;
     let meetingGoalChanged = false;
-    if (nextSignatures.meeting_goal !== previousSignatures.meeting_goal) {
+    if (
+      nextSignatures.meeting_goal !== previousSignatures.meeting_goal ||
+      nextSignatures.meeting_goal_context !== previousSignatures.meeting_goal_context
+    ) {
       patch.meeting_goal = nextMeetingGoal;
+      patch.meeting_goal_context = nextMeetingGoalContext;
       hasChanges = true;
       meetingGoalChanged = true;
     }
@@ -3408,13 +3486,14 @@ export default function MeetingCanvasTab({
       void saveCanvasWorkspacePatch(patch)
         .then(() => {
           if (meetingGoalChanged) {
-            onMeetingGoalSync?.(nextMeetingGoal);
+            onMeetingGoalSync?.(nextMeetingGoal, nextMeetingGoalContext);
           }
           lastWorkspaceFieldSignaturesRef.current = sharedSyncEnabled
             ? nextSignatures
             : {
                 ...lastWorkspaceFieldSignaturesRef.current,
                 meeting_goal: nextSignatures.meeting_goal,
+                meeting_goal_context: nextSignatures.meeting_goal_context,
               };
         })
         .catch((error) => {
@@ -3433,6 +3512,7 @@ export default function MeetingCanvasTab({
     canvasItems,
     conclusionBatchBusy,
     customGroups,
+    meetingGoalContextDraft,
     meetingGoalDraft,
     meetingId,
     nodePositions,
@@ -3452,6 +3532,7 @@ export default function MeetingCanvasTab({
         ? {
             shared_sync_enabled: true,
             meeting_goal: meetingGoalDraft.trim(),
+            meeting_goal_context: meetingGoalContextDraft.trim(),
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
             custom_groups: serializeCustomGroups(customGroups),
@@ -3459,6 +3540,7 @@ export default function MeetingCanvasTab({
         : {
             shared_sync_enabled: false,
             meeting_goal: meetingGoalDraft.trim(),
+            meeting_goal_context: meetingGoalContextDraft.trim(),
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
             custom_groups: serializeCustomGroups(customGroups),
@@ -3474,6 +3556,7 @@ export default function MeetingCanvasTab({
       canvasItems,
       customGroups,
       importOverrideActive,
+      meetingGoalContextDraft,
       meetingGoalDraft,
       nodePositions,
       persistedSharedImportedState,
@@ -3521,6 +3604,7 @@ export default function MeetingCanvasTab({
   const sharedCanvasSnapshot = useMemo(
     () => ({
       meeting_goal: meetingGoalDraft.trim(),
+      meeting_goal_context: meetingGoalContextDraft.trim(),
       stage,
       agenda_overrides: serializeAgendaOverrides(agendaOverrides),
       canvas_items: serializeSharedCanvasItems(canvasItems),
@@ -3530,7 +3614,7 @@ export default function MeetingCanvasTab({
       node_positions: nodePositions,
       imported_state: persistedSharedImportedState,
     }),
-    [agendaOverrides, canvasItems, customGroups, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
+    [agendaOverrides, canvasItems, customGroups, meetingGoalContextDraft, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
   );
 
   useEffect(() => {
@@ -3543,6 +3627,7 @@ export default function MeetingCanvasTab({
       buildFullWorkspacePatchPayload({
         meetingId,
         meetingGoal: meetingGoalDraft,
+        meetingGoalContext: meetingGoalContextDraft,
         stage,
         agendaOverrides,
         canvasItems,
@@ -3557,6 +3642,8 @@ export default function MeetingCanvasTab({
     agendaOverrides,
     canvasItems,
     customGroups,
+    meetingGoalContextDraft,
+    meetingGoalDraft,
     meetingId,
     nodePositions,
     persistedSharedImportedState,
@@ -3619,8 +3706,10 @@ export default function MeetingCanvasTab({
     const incomingCanvasItems = hydrateCanvasItems(incomingSharedCanvasSync.canvas_items || []);
     const incomingCustomGroups = hydrateCustomGroups(incomingSharedCanvasSync.custom_groups || []);
     const incomingMeetingGoal = incomingSharedCanvasSync.meeting_goal || "";
+    const incomingMeetingGoalContext = incomingSharedCanvasSync.meeting_goal_context || "";
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       meeting_goal: incomingMeetingGoal,
+      meeting_goal_context: incomingMeetingGoalContext,
       stage: incomingStage,
       agenda_overrides: incomingSharedCanvasSync.agenda_overrides || {},
       canvas_items: incomingCanvasItems,
@@ -3647,7 +3736,11 @@ export default function MeetingCanvasTab({
     setProblemGroups(nextProblemGroups);
     setSolutionTopics(nextSolutionTopics);
     setMeetingGoalDraft(incomingMeetingGoal);
+    setMeetingGoalContextDraft(incomingMeetingGoalContext);
+    setMeetingGoalEditorDraft(incomingMeetingGoal);
+    setMeetingGoalContextEditorDraft(incomingMeetingGoalContext);
     onMeetingGoalChange(incomingMeetingGoal);
+    onMeetingGoalContextChange(incomingMeetingGoalContext);
     setAgendaOverrides(incomingSharedCanvasSync.agenda_overrides || {});
     setCanvasItems(incomingCanvasItems);
     setCustomGroups(incomingCustomGroups);
@@ -3671,6 +3764,7 @@ export default function MeetingCanvasTab({
     setStage(incomingStage);
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
       meetingGoal: incomingMeetingGoal,
+      meetingGoalContext: incomingMeetingGoalContext,
       stage: incomingStage,
       agendaOverrides: incomingSharedCanvasSync.agenda_overrides || {},
       canvasItems: incomingCanvasItems,
@@ -3702,7 +3796,17 @@ export default function MeetingCanvasTab({
     window.setTimeout(() => {
       applyingRemoteSharedSyncRef.current = false;
     }, 0);
-  }, [analysisStateSignature, incomingSharedCanvasSync, meetingId, onMeetingGoalChange, problemGroups, sharedSyncEnabled, solutionTopics, userId]);
+  }, [
+    analysisStateSignature,
+    incomingSharedCanvasSync,
+    meetingId,
+    onMeetingGoalChange,
+    onMeetingGoalContextChange,
+    problemGroups,
+    sharedSyncEnabled,
+    solutionTopics,
+    userId,
+  ]);
 
   useEffect(() => {
     const flushPendingCanvasState = () => {
@@ -3764,6 +3868,7 @@ export default function MeetingCanvasTab({
         sync_id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         meeting_id: meetingId,
         meeting_goal: sharedCanvasSnapshot.meeting_goal,
+        meeting_goal_context: sharedCanvasSnapshot.meeting_goal_context,
         updated_by: userId,
         updated_at: new Date().toISOString(),
         stage: sharedCanvasSnapshot.stage,
@@ -4160,9 +4265,10 @@ export default function MeetingCanvasTab({
                   : "fallback";
           const linkedAgendaTitle =
             agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
+          const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
           const fallbackPosition = {
-            x: 180 + ((index % 3) * 260),
-            y: 320 + Math.floor(index / 3) * 220,
+            x: 180 + ((index % 3) * (CANVAS_ITEM_NODE_WIDTH + 36)),
+            y: 320 + Math.floor(index / 3) * (itemHeight + CANVAS_TOP_LEVEL_GAP_Y),
           };
 
           return {
@@ -4174,7 +4280,7 @@ export default function MeetingCanvasTab({
             className: "!border-0 !bg-transparent !p-0 !shadow-none",
             style: {
               width: CANVAS_ITEM_NODE_WIDTH,
-              height: CANVAS_ITEM_NODE_HEIGHT,
+              height: itemHeight,
               background: "transparent",
               border: "none",
               boxShadow: "none",
@@ -5014,6 +5120,7 @@ export default function MeetingCanvasTab({
             buildFullWorkspacePatchPayload({
               meetingId,
               meetingGoal: meetingGoalDraft,
+              meetingGoalContext: meetingGoalContextDraft,
               stage,
               agendaOverrides,
               canvasItems,
@@ -5146,10 +5253,11 @@ export default function MeetingCanvasTab({
       if (sharedSyncEnabled) {
         writeSharedWorkspaceSessionCache(
           meetingId,
-          buildFullWorkspacePatchPayload({
-            meetingId,
-            meetingGoal: meetingGoalDraft,
-            stage,
+            buildFullWorkspacePatchPayload({
+              meetingId,
+              meetingGoal: meetingGoalDraft,
+              meetingGoalContext: meetingGoalContextDraft,
+              stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
             customGroups,
@@ -5198,6 +5306,8 @@ export default function MeetingCanvasTab({
       customGroupDraftTitle,
       customGroups,
       forceBroadcastSharedCanvas,
+      meetingGoalContextDraft,
+      meetingGoalDraft,
       meetingId,
       nodePositions,
       persistedSharedImportedState,
@@ -5378,6 +5488,7 @@ export default function MeetingCanvasTab({
           buildFullWorkspacePatchPayload({
             meetingId,
             meetingGoal: meetingGoalDraft,
+            meetingGoalContext: meetingGoalContextDraft,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot || canvasItems,
@@ -5957,6 +6068,7 @@ export default function MeetingCanvasTab({
           buildFullWorkspacePatchPayload({
             meetingId,
             meetingGoal: meetingGoalDraft,
+            meetingGoalContext: meetingGoalContextDraft,
             stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
@@ -6307,10 +6419,64 @@ export default function MeetingCanvasTab({
     await onEndMeeting?.();
   };
 
+  const handleOpenMeetingGoalEditor = () => {
+    setMeetingGoalEditorDraft(meetingGoalDraft);
+    setMeetingGoalContextEditorDraft(meetingGoalContextDraft);
+    setMeetingGoalEditorOpen(true);
+  };
+
+  const handleCancelMeetingGoalEdit = () => {
+    setMeetingGoalEditorDraft(meetingGoalDraft);
+    setMeetingGoalContextEditorDraft(meetingGoalContextDraft);
+    setMeetingGoalEditorOpen(false);
+  };
+
+  const handleSaveMeetingGoalEdit = async () => {
+    if (!meetingId || meetingGoalSaving) {
+      return;
+    }
+
+    const nextGoal = meetingGoalEditorDraft.trim();
+    const nextContext = meetingGoalContextEditorDraft.trim();
+    setMeetingGoalSaving(true);
+
+    try {
+      setMeetingGoalDraft(nextGoal);
+      setMeetingGoalContextDraft(nextContext);
+      onMeetingGoalChange(nextGoal);
+      onMeetingGoalContextChange(nextContext);
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        meetingGoal: nextGoal,
+        meetingGoalContext: nextContext,
+      };
+
+      await saveCanvasWorkspacePatch({
+        meeting_id: meetingId,
+        meeting_goal: nextGoal,
+        meeting_goal_context: nextContext,
+      });
+
+      lastWorkspaceFieldSignaturesRef.current = {
+        ...lastWorkspaceFieldSignaturesRef.current,
+        meeting_goal: nextGoal,
+        meeting_goal_context: nextContext,
+      };
+      onMeetingGoalSync?.(nextGoal, nextContext);
+      setMeetingGoalEditorOpen(false);
+      setActivityMessage("회의 목표와 관련 맥락을 저장하고 참가자에게 반영했습니다.");
+    } catch (error) {
+      console.error("Failed to save meeting goal:", error);
+      setActivityMessage("회의 목표 저장에 실패했습니다.");
+    } finally {
+      setMeetingGoalSaving(false);
+    }
+  };
+
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
-  const workspaceGridColumns = `clamp(240px, ${(leftPanelRatio * 100).toFixed(
+  const workspaceGridColumns = `clamp(200px, ${(leftPanelRatio * 100).toFixed(
     2,
-  )}vw, 420px) minmax(0, 1fr) clamp(260px, ${(rightPanelRatio * 100).toFixed(2)}vw, 460px)`;
+  )}vw, 360px) minmax(0, 1fr) clamp(220px, ${(rightPanelRatio * 100).toFixed(2)}vw, 400px)`;
 
   return (
     <div className="h-full min-h-0 bg-[#f9f9f9] text-black">
@@ -6370,24 +6536,98 @@ export default function MeetingCanvasTab({
               </span>
             </div>
 
-            <div className="min-w-0 justify-self-center text-center">
+            <div className="relative min-w-0 justify-self-center text-center">
               <div className="flex items-center justify-center gap-2 text-[clamp(14px,1.2vw,20px)] font-normal leading-[1.25] text-[#4d4d4d]">
                 <span>{meetingTitle || "회의 제목"}</span>
                 <span className={`h-2.5 w-2.5 rounded-full ${isRecording ? "bg-[#34c759]" : "bg-[#d9d9d9]"}`} />
               </div>
-              <label className="mt-3 block">
-                <span className="sr-only">회의 목표 입력</span>
-                <input
-                  value={meetingGoalDraft}
-                  onChange={(event) => {
-                    const nextGoal = event.target.value;
-                    setMeetingGoalDraft(nextGoal);
-                    onMeetingGoalChange(nextGoal);
-                  }}
-                  placeholder="회의 목표를 입력해 주세요"
-                  className="mx-auto block w-full max-w-[min(760px,100%)] truncate rounded-xl border border-transparent bg-transparent px-3 py-1 text-center text-[clamp(20px,2.2vw,32px)] font-semibold leading-[1.2] tracking-normal text-black outline-none transition placeholder:text-black/30 hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
-                />
-              </label>
+              <button
+                type="button"
+                onClick={meetingGoalEditorOpen ? handleCancelMeetingGoalEdit : handleOpenMeetingGoalEditor}
+                className="mx-auto mt-2 block w-full max-w-[min(760px,100%)] rounded-xl border border-transparent px-3 py-1 text-center transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#1b59f8]/10"
+              >
+                <span
+                  className={`block truncate text-[clamp(20px,2.2vw,32px)] font-semibold leading-[1.2] tracking-normal ${
+                    meetingGoalDraft.trim() ? "text-black" : "text-black/30"
+                  }`}
+                >
+                  {meetingGoalDraft.trim() || "회의 목표를 입력해 주세요"}
+                </span>
+                <span className="mt-1 block truncate text-[clamp(11px,0.85vw,13px)] font-normal leading-[1.35] text-[#4d4d4d]">
+                  {meetingGoalContextDraft.trim()
+                    ? `관련 맥락: ${meetingGoalContextDraft.trim()}`
+                    : "클릭해서 회의 목표와 관련 맥락을 입력"}
+                </span>
+              </button>
+
+              {meetingGoalEditorOpen ? (
+                <div className="absolute left-1/2 top-[calc(100%+12px)] z-30 w-[min(560px,calc(100vw-32px))] -translate-x-1/2 rounded-[16px] border border-black/10 bg-white p-4 text-left shadow-[0_5.64px_22.56px_rgba(0,0,0,0.08)]">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-[18px] font-semibold leading-[24.811px] text-black">회의 목표 설정</p>
+                      <p className="mt-1 text-[13px] leading-5 text-[#4d4d4d]">
+                        입력한 내용은 저장을 누른 뒤 STT와 AI 분석의 참고 정보로 사용됩니다.
+                      </p>
+                    </div>
+                  </div>
+                  <label className="mt-4 block">
+                    <span className="text-xs font-semibold text-[#4d4d4d]">회의 목표</span>
+                    <input
+                      value={meetingGoalEditorDraft}
+                      onChange={(event) => {
+                        const nextGoal = event.target.value;
+                        setMeetingGoalEditorDraft(nextGoal);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          handleCancelMeetingGoalEdit();
+                        }
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void handleSaveMeetingGoalEdit();
+                        }
+                      }}
+                      placeholder="예: 신규 회의 관리 시스템의 핵심 기능 우선순위 결정"
+                      className="mt-2 w-full rounded-[12px] border border-black/10 bg-[#f9f9f9] px-4 py-3 text-[16px] leading-6 text-black outline-none transition placeholder:text-black/30 focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                    />
+                  </label>
+                  <label className="mt-3 block">
+                    <span className="text-xs font-semibold text-[#4d4d4d]">관련 맥락</span>
+                    <textarea
+                      value={meetingGoalContextEditorDraft}
+                      onChange={(event) => {
+                        const nextContext = event.target.value;
+                        setMeetingGoalContextEditorDraft(nextContext);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          handleCancelMeetingGoalEdit();
+                        }
+                      }}
+                      placeholder="회의에서 자주 나올 제품명, 고유명사, 참가자 역할, 논의 범위 등을 입력해 주세요."
+                      className="mt-2 min-h-[92px] w-full resize-none rounded-[12px] border border-black/10 bg-[#f9f9f9] px-4 py-3 text-[15px] leading-6 text-[#4d4d4d] outline-none transition placeholder:text-black/30 focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                    />
+                  </label>
+                  <div className="mt-4 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCancelMeetingGoalEdit}
+                      disabled={meetingGoalSaving}
+                      className="rounded-[8px] bg-[#eff0f6] px-4 py-2 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      취소
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveMeetingGoalEdit()}
+                      disabled={meetingGoalSaving}
+                      className="rounded-[8px] bg-[#1b59f8] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {meetingGoalSaving ? "저장 중" : "저장"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
 
             <div className="flex w-full flex-wrap items-center justify-center gap-3 lg:justify-end lg:justify-self-end">
@@ -6479,7 +6719,7 @@ export default function MeetingCanvasTab({
           className="grid flex-1 min-h-0 grid-cols-1 overflow-y-auto bg-black/10 xl:overflow-hidden xl:gap-px xl:border-x xl:border-b xl:border-black/10"
           style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
-          <aside className="imms-side-panel imms-left-panel relative min-h-[min(42vh,520px)] border-b border-black/10 bg-[#f9f9f9] shadow-[inset_-1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:border-b-0">
+          <aside className="imms-side-panel imms-left-panel relative min-h-[min(34vh,420px)] border-b border-black/10 bg-[#f9f9f9] shadow-[inset_-1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:border-b-0">
             <button
               type="button"
               aria-label="왼쪽 패널 너비 조절"
@@ -6488,7 +6728,7 @@ export default function MeetingCanvasTab({
             >
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
-            <div className="imms-overlay-scroll h-full max-h-[min(62vh,620px)] overflow-y-auto px-[clamp(16px,1.6vw,20px)] py-[clamp(18px,2.2vh,24px)] xl:max-h-none xl:overflow-y-auto">
+            <div className="imms-overlay-scroll h-full max-h-[min(48vh,500px)] overflow-y-auto px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] xl:max-h-none xl:overflow-y-auto">
             <div className="imms-side-panel-surface p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -7720,7 +7960,7 @@ export default function MeetingCanvasTab({
             </div>
           </section>
 
-          <aside className="imms-side-panel imms-right-panel imms-overlay-scroll relative min-h-[min(42vh,520px)] max-h-[min(62vh,620px)] overflow-y-auto bg-[#f9f9f9] px-[clamp(16px,1.6vw,20px)] py-[clamp(18px,2.2vh,24px)] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:max-h-none xl:overflow-y-auto">
+          <aside className="imms-side-panel imms-right-panel imms-overlay-scroll relative min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] overflow-y-auto bg-[#f9f9f9] px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:max-h-none xl:overflow-y-auto">
             <button
               type="button"
               aria-label="오른쪽 패널 너비 조절"

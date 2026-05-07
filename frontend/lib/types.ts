@@ -366,6 +366,7 @@ export interface CanvasWorkspaceStateResponse {
   ok: boolean;
   meeting_id: string;
   meeting_goal?: string;
+  meeting_goal_context?: string;
   stage: "ideation" | "problem-definition" | "solution";
   agenda_overrides?: Record<
     string,
@@ -389,6 +390,7 @@ export interface CanvasWorkspaceStateResponse {
 export interface CanvasWorkspacePatchRequest {
   meeting_id: string;
   meeting_goal?: string;
+  meeting_goal_context?: string;
   stage?: "ideation" | "problem-definition" | "solution";
   agenda_overrides?: Record<
     string,
@@ -409,6 +411,7 @@ export interface CanvasWorkspacePatchRequest {
 export interface CanvasLocalState {
   shared_sync_enabled?: boolean;
   meeting_goal?: string;
+  meeting_goal_context?: string;
   agenda_overrides?: Record<
     string,
     {
@@ -440,6 +443,7 @@ export interface CanvasRealtimeSyncPayload {
   sync_id: string;
   meeting_id: string;
   meeting_goal?: string;
+  meeting_goal_context?: string;
   updated_by: string;
   updated_at: string;
   stage: "ideation" | "problem-definition" | "solution";
