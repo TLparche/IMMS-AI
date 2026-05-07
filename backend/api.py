@@ -7035,6 +7035,11 @@ def _build_canvas_topic_clustering_prompt(
         "- kind=topic인 노드도 후보가 될 수 있다. topic끼리 유사하면 topic들을 하위에 넣는 것이 아니라 하나의 새 topic으로 통합한다.\n"
         "- topic node 아래에는 다른 topic node가 들어가면 안 된다. topic pair를 고르더라도 서버가 기존 topic의 실제 하위 아이디어만 새 topic 아래로 평탄화한다.\n"
         "- title/body/keywords는 선택한 pair 2개를 대표하는 topic 문구로 작성한다.\n"
+        "- title은 10~24자 정도의 짧은 명사구로 쓴다. '요약', '정리', '논의', '관련' 같은 메타어를 쓰지 않는다.\n"
+        "- body는 topic 노드 본문에 들어갈 content다. 완성형 설명문이 아니라 핵심 대상 + 방향/문제/조건만 남긴 압축 구문이어야 한다.\n"
+        "- body는 최대 2줄로 작성하고, 각 줄은 12~36자 정도의 짧은 명사구/핵심 구문으로 쓴다.\n"
+        "- body에 '~합니다', '~됩니다', '~할 수 있습니다', '~로 보입니다' 같은 문장형 어미를 피한다.\n"
+        "- keywords는 3~6개로 작성하고, pair 전체의 중심 의미를 이루는 명사구만 넣는다.\n"
         "- 서버가 pair를 검증한 뒤 새 topic 생성 또는 기존 topic 업데이트를 결정한다.\n"
         "- JSON만 반환한다.\n\n"
         "반환 형식:\n"
@@ -7048,11 +7053,35 @@ def _build_canvas_topic_clustering_prompt(
     )
 
 
-def _normalize_topic_cluster_text(raw: Any, fallback: str = "") -> str:
+def _normalize_topic_cluster_title(raw: Any, fallback: str = "") -> str:
     text = _strip_idea_reference_text(raw, collapse_whitespace=False)
     if not text:
         return fallback
-    return _to_summary_point(text, 72)
+    text = re.sub(r"^(?:주제|topic|제목|요약|정리)\s*[:：-]\s*", "", text, flags=re.IGNORECASE)
+    return _to_summary_point(text, 24)
+
+
+def _normalize_topic_cluster_body(raw: Any, fallback: str = "") -> str:
+    text = _safe_text(raw)
+    if isinstance(raw, list):
+        text = "\n".join(_safe_text(item) for item in raw if _safe_text(item))
+    text = _strip_idea_reference_text(text, collapse_whitespace=False)
+    text = re.sub(r"^(?:내용|본문|요약|summary|content|body)\s*[:：-]\s*", "", text, flags=re.IGNORECASE)
+    candidates = [
+        _to_summary_point(part, 42)
+        for part in re.split(r"\n+|\s*/\s*|[;；]+", text)
+        if _safe_text(part)
+    ]
+    candidates = [
+        item
+        for item in candidates
+        if item
+        and item.lower() not in IDEA_KEYWORD_NOISE
+        and not re.fullmatch(r"(없음|해당 없음|n/?a)", item, flags=re.IGNORECASE)
+    ]
+    if not candidates and fallback:
+        candidates = [_to_summary_point(fallback, 42)]
+    return "\n".join(_dedup_preserve(candidates, limit=2))
 
 
 def _compute_canvas_topic_clustering_result(
@@ -7131,8 +7160,8 @@ def _apply_canvas_topic_clustering_result(
     if pair_ids[1] in _canvas_topic_descendant_ids({"canvas_items": canvas_items}, pair_ids[0]):
         return 0
 
-    title = _normalize_topic_cluster_text(result.get("title"), "AI 주제")
-    body = _normalize_topic_cluster_text(result.get("body") or result.get("summary"), "관련 아이디어 묶음")
+    title = _normalize_topic_cluster_title(result.get("title"), "AI 주제")
+    body = _normalize_topic_cluster_body(result.get("body") or result.get("summary"), title or "관련 아이디어 묶음")
     keywords = _normalize_idea_keywords(result.get("keywords") or [], f"{title} {body}", 6)
     topic_pair_ids = [item_id for item_id in pair_ids if _is_canvas_topic_item(items_by_id.get(item_id) or {})]
 
