@@ -212,11 +212,29 @@ export interface CanvasProblemDefinitionGroup {
     title: string;
     body: string;
   }>;
+  discussion_items?: CanvasProblemDiscussionItem[];
   source_summary_items: string[];
   conclusion: string;
   conclusion_user_edited?: boolean;
   source_signature?: string;
   source_agenda_signatures?: Record<string, string>;
+}
+
+export interface CanvasProblemDiscussionItem {
+  id: string;
+  parent_group_id: string;
+  title: string;
+  body: string;
+  keywords?: string[];
+  key_evidence?: string[];
+  refined_utterances?: CanvasRefinedUtterance[];
+  evidence_utterance_ids?: string[];
+  ignored_utterance_ids?: string[];
+  ai_pending?: boolean;
+  ai_generated?: boolean;
+  user_edited?: boolean;
+  created_by?: "ai" | "user" | "";
+  created_at?: string;
 }
 
 export interface CanvasProblemDefinitionResponse {
@@ -343,6 +361,7 @@ export interface CanvasWorkspaceProblemGroup {
     title: string;
     body: string;
   }>;
+  discussion_items?: CanvasProblemDiscussionItem[];
   source_summary_items: string[];
   conclusion: string;
   conclusion_user_edited?: boolean;
@@ -383,6 +402,7 @@ export interface CanvasWorkspaceStateResponse {
   node_positions?: CanvasNodePositionsByStage;
   idea_create_stack?: number;
   idea_processed_utterance_ids?: string[];
+  problem_processed_utterance_ids?: string[];
   imported_state?: MeetingState | null;
   saved_at?: string;
 }

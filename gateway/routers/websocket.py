@@ -357,18 +357,24 @@ async def request_flow_summary(turns: list[dict[str, Any]]) -> dict[str, Any]:
 
 async def maybe_generate_flow_summary(meeting_id: str, transcript: dict[str, Any]):
     state = get_fusion_state(meeting_id)
+    canvas_stage = str(transcript.get("canvas_stage") or "ideation")
     row = {
         "id": transcript.get("id"),
         "meeting_id": meeting_id,
         "speaker": transcript.get("speaker") or "화자",
         "text": transcript.get("text") or "",
         "timestamp": transcript.get("timestamp") or transcript.get("created_at") or datetime.utcnow().isoformat(),
+        "stage": canvas_stage,
     }
     if not str(row.get("text") or "").strip():
         return
 
     async with state.setdefault("flow_summary_lock", asyncio.Lock()):
-        buffer = state.setdefault("flow_summary_buffer", [])
+        buffers = state.setdefault("flow_summary_buffer_by_stage", {})
+        if not isinstance(buffers, dict):
+            buffers = {}
+            state["flow_summary_buffer_by_stage"] = buffers
+        buffer = buffers.setdefault(canvas_stage, [])
         buffer.append(row)
         if len(buffer) < 3:
             return
@@ -386,6 +392,7 @@ async def maybe_generate_flow_summary(meeting_id: str, transcript: dict[str, Any
         "id": f"{meeting_id}:flow-summary:{seq}",
         "text": summary or "현재 발언 정리 중",
         "timestamp": datetime.utcnow().isoformat(),
+        "stage": canvas_stage,
         "source_turn_ids": [str(turn.get("id") or "") for turn in turns],
         "source_timestamps": [str(turn.get("timestamp") or "") for turn in turns],
         "used_llm": bool(result.get("used_llm")),
@@ -395,7 +402,7 @@ async def maybe_generate_flow_summary(meeting_id: str, transcript: dict[str, Any
     async with state.setdefault("flow_summary_lock", asyncio.Lock()):
         summaries = state.setdefault("flow_summaries", [])
         summaries.append(item)
-        state["flow_summaries"] = summaries[-3:]
+        state["flow_summaries"] = summaries[-9:]
         payload_summaries = copy.deepcopy(state["flow_summaries"])
 
     await broadcast_to_meeting(meeting_id, {
@@ -417,6 +424,8 @@ async def transcribe_and_broadcast_winner(
     audio_started_at = audio_meta.get("started_at") or datetime.utcnow().isoformat()
     audio_ended_at = audio_meta.get("ended_at") or audio_started_at
     chunk_index = audio_meta.get("chunk_index")
+    canvas_stage = str(winner.get("canvas_stage") or "ideation")
+    canvas_target_id = str(winner.get("canvas_target_id") or "")
 
     await send_stt_debug(
         meeting_id,
@@ -459,6 +468,8 @@ async def transcribe_and_broadcast_winner(
         winner["speaker"],
         transcribed_text,
         transcript_timestamp=str(audio_started_at),
+        canvas_stage=canvas_stage,
+        canvas_target_id=canvas_target_id,
     )
     if not saved_transcript:
         await send_stt_debug(
@@ -495,7 +506,11 @@ async def transcribe_and_broadcast_winner(
             'audio_started_at': audio_started_at,
             'audio_ended_at': audio_ended_at,
             'audio_chunk_index': chunk_index,
+            'canvas_stage': saved_transcript.get("canvas_stage") or canvas_stage,
+            'canvas_target_id': saved_transcript.get("canvas_target_id") or canvas_target_id,
         },
+        'canvas_stage': saved_transcript.get("canvas_stage") or canvas_stage,
+        'canvas_target_id': saved_transcript.get("canvas_target_id") or canvas_target_id,
         'stt_elapsed_ms': transcription.get("elapsed_ms"),
         'backend_elapsed_ms': transcription.get("backend_elapsed_ms"),
         'audio_meta': audio_meta,
@@ -677,6 +692,8 @@ async def save_transcript(
     speaker: str,
     text: str,
     transcript_timestamp: str | None = None,
+    canvas_stage: str = "ideation",
+    canvas_target_id: str = "",
 ) -> dict[str, Any] | None:
     """전사 결과를 Supabase에 저장"""
     normalized_text = (text or "").strip()
@@ -692,12 +709,29 @@ async def save_transcript(
             'speaker': speaker,
             'text': normalized_text,
             'timestamp': transcript_timestamp,
+            'canvas_stage': canvas_stage,
+            'canvas_target_id': canvas_target_id,
         }
-        response = supabase.table('transcripts').insert(insert_payload).execute()
+        try:
+            response = supabase.table('transcripts').insert(insert_payload).execute()
+        except Exception as exc:
+            message = str(exc)
+            if "canvas_stage" not in message and "canvas_target_id" not in message:
+                raise
+            fallback_payload = {
+                key: value
+                for key, value in insert_payload.items()
+                if key not in {"canvas_stage", "canvas_target_id"}
+            }
+            response = supabase.table('transcripts').insert(fallback_payload).execute()
         print(f"💾 Saved transcript: {speaker}: {normalized_text[:50]}...")
         rows = response.data or []
         if rows and isinstance(rows[0], dict):
-            return rows[0]
+            return {
+                **rows[0],
+                "canvas_stage": canvas_stage,
+                "canvas_target_id": canvas_target_id,
+            }
         return insert_payload
     except Exception as e:
         print(f"❌ Failed to save transcript: {e}")
@@ -814,6 +848,10 @@ async def websocket_endpoint(
                 audio_filename = str(message.get('audio_filename') or ("chunk.wav" if audio_mime.lower().startswith("audio/wav") else "chunk.webm"))
                 workspace = latest_canvas_workspace_by_meeting.get(meeting_id) or {}
                 meeting_goal = str(message.get("meeting_goal") or workspace.get("meeting_goal") or "").strip()
+                canvas_stage = str(message.get("canvas_stage") or workspace.get("stage") or "ideation").strip() or "ideation"
+                if canvas_stage not in {"ideation", "problem-definition", "solution"}:
+                    canvas_stage = "ideation"
+                canvas_target_id = str(message.get("canvas_target_id") or "").strip()
                 
                 try:
                     audio_bytes = base64.b64decode(audio_data)
@@ -835,6 +873,8 @@ async def websocket_endpoint(
                         "audio_filename": audio_filename,
                         "audio_meta": audio_meta,
                         "meeting_goal": meeting_goal,
+                        "canvas_stage": canvas_stage,
+                        "canvas_target_id": canvas_target_id,
                         "started_at_ms": iso_to_epoch_ms(audio_meta.get("started_at") or message.get("timestamp")),
                     }
                     await queue_audio_for_fusion(meeting_id, candidate)

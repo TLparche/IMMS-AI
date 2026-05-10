@@ -47,9 +47,15 @@ CREATE TABLE IF NOT EXISTS transcripts (
   speaker TEXT NOT NULL,
   text TEXT NOT NULL,
   timestamp TEXT NOT NULL,
+  canvas_stage TEXT NOT NULL DEFAULT 'ideation',
+  canvas_target_id TEXT NOT NULL DEFAULT '',
   turn_id INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Existing projects created before stage-aware STT need these columns.
+ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS canvas_stage TEXT NOT NULL DEFAULT 'ideation';
+ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS canvas_target_id TEXT NOT NULL DEFAULT '';
 
 -- Agendas table
 CREATE TABLE IF NOT EXISTS agendas (

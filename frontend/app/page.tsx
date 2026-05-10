@@ -15,7 +15,19 @@ interface Transcript {
   speaker: string;
   text: string;
   timestamp: string;
+  canvas_stage?: "ideation" | "problem-definition" | "solution" | string;
+  canvas_target_id?: string;
 }
+
+type LoadedTranscriptRow = {
+  id: unknown;
+  speaker?: string | null;
+  text?: string | null;
+  timestamp?: string | null;
+  created_at?: string | null;
+  canvas_stage?: string | null;
+  canvas_target_id?: string | null;
+};
 
 interface Agenda {
   id: string;
@@ -62,6 +74,13 @@ export interface SttFlowSummaryItem {
   id: string;
   text: string;
   timestamp: string;
+  stage?: "ideation" | "problem-definition" | "solution" | string;
+}
+
+interface CanvasStageContext {
+  stage: "ideation" | "problem-definition" | "solution";
+  targetId?: string;
+  selectedNodeId?: string;
 }
 
 function createCalibrationAccumulator(): CalibrationAccumulator {
@@ -86,7 +105,12 @@ function dedupeTranscripts(rows: Transcript[]) {
 }
 
 function buildTranscriptSyncSignature(meetingGoal: string, rows: Transcript[]) {
-  return [meetingGoal, ...rows.map((row) => `${row.speaker}\u0001${row.text}\u0001${row.timestamp}`)].join("\u0002");
+  return [
+    meetingGoal,
+    ...rows.map((row) =>
+      `${row.speaker}\u0001${row.text}\u0001${row.timestamp}\u0001${row.canvas_stage || ""}\u0001${row.canvas_target_id || ""}`,
+    ),
+  ].join("\u0002");
 }
 
 function buildSttContext(goal: string, context: string, fallbackTitle: string) {
@@ -117,8 +141,38 @@ function mapMeetingStateToTranscriptRows(state: MeetingState): Transcript[] {
       speaker: row.speaker || "알 수 없음",
       text: row.text || "",
       timestamp: row.timestamp || new Date().toISOString(),
+      canvas_stage: "ideation",
+      canvas_target_id: "",
     })),
   );
+}
+
+async function loadTranscriptRows(meetingId: string): Promise<{
+  data: LoadedTranscriptRow[] | null;
+  error: unknown;
+}> {
+  const withStage = await supabase
+    .from("transcripts")
+    .select("id, speaker, text, timestamp, created_at, canvas_stage, canvas_target_id")
+    .eq("meeting_id", meetingId)
+    .order("timestamp", { ascending: true });
+
+  if (!withStage.error) {
+    return withStage as unknown as { data: LoadedTranscriptRow[] | null; error: unknown };
+  }
+
+  const message = `${withStage.error.message || ""} ${withStage.error.details || ""}`;
+  if (!message.includes("canvas_stage") && !message.includes("canvas_target_id")) {
+    return withStage as unknown as { data: LoadedTranscriptRow[] | null; error: unknown };
+  }
+
+  console.warn("[STT] transcripts table has no canvas stage columns; falling back to base transcript load");
+  const fallback = await supabase
+    .from("transcripts")
+    .select("id, speaker, text, timestamp, created_at")
+    .eq("meeting_id", meetingId)
+    .order("timestamp", { ascending: true });
+  return fallback as unknown as { data: LoadedTranscriptRow[] | null; error: unknown };
 }
 
 function mapAnalysisToUi(state: MeetingState) {
@@ -207,6 +261,7 @@ function HomeContent() {
   const [sttFlowSummaries, setSttFlowSummaries] = useState<SttFlowSummaryItem[]>([]);
   const [audioImportJob, setAudioImportJob] = useState<AudioImportJobStatusResponse | null>(null);
   const [audioImportRevision, setAudioImportRevision] = useState(0);
+  const [canvasStageContext, setCanvasStageContext] = useState<CanvasStageContext>({ stage: "ideation" });
 
   const wsClientRef = useRef<WebSocketClient | null>(null);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
@@ -215,6 +270,7 @@ function HomeContent() {
   const meetingGoalRef = useRef(meetingGoal);
   const meetingGoalContextRef = useRef(meetingGoalContext);
   const transcriptsRef = useRef(transcripts);
+  const canvasStageContextRef = useRef<CanvasStageContext>(canvasStageContext);
   const autoSyncTimerRef = useRef<number | null>(null);
   const autoSyncInFlightRef = useRef(false);
   const queuedSyncSignatureRef = useRef("");
@@ -245,6 +301,10 @@ function HomeContent() {
   useEffect(() => {
     transcriptsRef.current = transcripts;
   }, [transcripts]);
+
+  useEffect(() => {
+    canvasStageContextRef.current = canvasStageContext;
+  }, [canvasStageContext]);
 
   useEffect(() => {
     isRecordingRef.current = isRecording;
@@ -337,7 +397,7 @@ function HomeContent() {
           workspaceState,
         ] = await Promise.all([
           supabase.from("meetings").select("title").eq("id", meetingId).single(),
-          supabase.from("transcripts").select("id, speaker, text, timestamp, created_at").eq("meeting_id", meetingId).order("timestamp", { ascending: true }),
+          loadTranscriptRows(meetingId),
           getCanvasWorkspaceState(meetingId).catch(() => null),
         ]);
 
@@ -351,6 +411,8 @@ function HomeContent() {
             speaker: row.speaker || "알 수 없음",
             text: row.text || "",
             timestamp: row.timestamp || row.created_at || new Date().toISOString(),
+            canvas_stage: row.canvas_stage || "ideation",
+            canvas_target_id: row.canvas_target_id || "",
           })),
         );
 
@@ -405,6 +467,8 @@ function HomeContent() {
       const audioStartedAt = readString(transcriptPayload.audio_started_at || audioMetaPayload.started_at);
       const audioEndedAt = readString(transcriptPayload.audio_ended_at || audioMetaPayload.ended_at);
       const chunkIndex = readNumber(transcriptPayload.audio_chunk_index || audioMetaPayload.chunk_index, -1);
+      const canvasStage = readString(transcriptPayload.canvas_stage || payload.canvas_stage, "ideation");
+      const canvasTargetId = readString(transcriptPayload.canvas_target_id || payload.canvas_target_id);
       const recordingNow = isRecordingRef.current || Boolean(audioRecorderRef.current?.isRecording());
       console.info("[STT] 서버 전사 수신", {
         id: transcriptId,
@@ -414,6 +478,8 @@ function HomeContent() {
         audioStartedAt,
         audioEndedAt,
         chunkIndex,
+        canvasStage,
+        canvasTargetId,
         recording: recordingNow,
         elapsedMs: payload.stt_elapsed_ms,
         backendElapsedMs: payload.backend_elapsed_ms,
@@ -429,6 +495,8 @@ function HomeContent() {
             speaker,
             text,
             timestamp: nextTimestamp,
+            canvas_stage: canvasStage,
+            canvas_target_id: canvasTargetId,
           },
         ]),
       );
@@ -454,6 +522,7 @@ function HomeContent() {
           id: readString(item.id, `stt-flow-summary-${index}`),
           text: readString(item.text).slice(0, 30),
           timestamp: readString(item.timestamp, new Date().toISOString()),
+          stage: readString(item.stage, "ideation"),
         }))
         .filter((item) => item.text.trim())
         .slice(-3);
@@ -887,6 +956,7 @@ function HomeContent() {
         return;
       }
       if (wsClientRef.current?.isConnected()) {
+        const canvasContext = canvasStageContextRef.current;
         console.info("[STT] 음성 감지 - 전사 요청 전송", {
           rms: metrics.rms,
           peak: metrics.peak,
@@ -899,12 +969,19 @@ function HomeContent() {
           removedSilenceMs: metrics.removedSilenceMs,
           combinedChunkCount: metrics.combinedChunkCount,
           bytes: blob.size,
+          canvasStage: canvasContext.stage,
+          canvasTargetId: canvasContext.targetId || "",
         });
         wsClientRef.current.sendAudioChunk(
           blob,
           user.email || "Unknown",
           metrics,
           buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
+          {
+            stage: canvasContext.stage,
+            targetId: canvasContext.targetId,
+            selectedNodeId: canvasContext.selectedNodeId,
+          },
         );
       } else {
         console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
@@ -1017,6 +1094,7 @@ function HomeContent() {
         onStopRecording={toggleRecording}
         onEndMeeting={endMeeting}
         sttProgressText={sttProgressText}
+        onCanvasStageContextChange={setCanvasStageContext}
         recordingStatusText={
           calibrationState === "running"
             ? `마이크 캘리브레이션 ${calibrationSecondsLeft}s`

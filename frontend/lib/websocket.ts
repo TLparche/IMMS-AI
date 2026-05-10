@@ -141,6 +141,11 @@ export class WebSocketClient {
       trimmedFromSilence?: boolean
     },
     meetingGoal?: string,
+    canvasContext?: {
+      stage?: string
+      targetId?: string
+      selectedNodeId?: string
+    },
   ) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('⚠️ WebSocket not connected, cannot send audio')
@@ -160,6 +165,9 @@ export class WebSocketClient {
         audio_mime: audioBlob.type || audioMeta?.mimeType || 'audio/wav',
         audio_filename: audioBlob.type === 'audio/wav' || audioMeta?.mimeType === 'audio/wav' ? 'chunk.wav' : 'chunk.webm',
         meeting_goal: meetingGoal || '',
+        canvas_stage: canvasContext?.stage || 'ideation',
+        canvas_target_id: canvasContext?.targetId || '',
+        canvas_selected_node_id: canvasContext?.selectedNodeId || '',
         timestamp: new Date().toISOString(),
         audio_meta: audioMeta
           ? {
