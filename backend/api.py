@@ -476,6 +476,9 @@ def _normalize_canvas_workspace_problem_groups(
                 {
                     "id": _safe_text(item.id),
                     "parent_group_id": _safe_text(item.parent_group_id or group.group_id),
+                    "target_node_id": _safe_text(item.target_node_id),
+                    "target_node_label": _safe_text(item.target_node_label),
+                    "target_node_kind": _safe_text(item.target_node_kind),
                     "title": _safe_text(item.title),
                     "body": _safe_text(item.body),
                     "keywords": [_safe_text(value) for value in (item.keywords or []) if _safe_text(value)][:8],
@@ -1802,6 +1805,9 @@ class CanvasWorkspaceIdeaInput(BaseModel):
 class CanvasProblemDiscussionInput(BaseModel):
     id: str = ""
     parent_group_id: str = ""
+    target_node_id: str = ""
+    target_node_label: str = ""
+    target_node_kind: str = ""
     title: str = ""
     body: str = ""
     keywords: list[str] = Field(default_factory=list)
@@ -8122,6 +8128,9 @@ def _finalize_canvas_problem_discussion_workspace_job(
                 next_discussions.append(
                     {
                         **item,
+                        "target_node_id": _safe_text(item.get("target_node_id")),
+                        "target_node_label": _safe_text(item.get("target_node_label")),
+                        "target_node_kind": _safe_text(item.get("target_node_kind")),
                         "title": _safe_text(update.get("title"), "문제 의견"),
                         "body": _safe_text(update.get("body")),
                         "keywords": update.get("keywords") or [],
@@ -8146,6 +8155,9 @@ def _finalize_canvas_problem_discussion_workspace_job(
                         {
                             "id": pending_item_id,
                             "parent_group_id": fallback_group_id,
+                            "target_node_id": "",
+                            "target_node_label": "",
+                            "target_node_kind": "",
                             "title": _safe_text(update.get("title"), "문제 의견"),
                             "body": _safe_text(update.get("body")),
                             "keywords": update.get("keywords") or [],
@@ -8278,6 +8290,9 @@ def post_canvas_problem_discussion_workspace_start(payload: CanvasProblemDiscuss
     pending_item = {
         "id": pending_item_id,
         "parent_group_id": selected_group_id,
+        "target_node_id": "",
+        "target_node_label": "",
+        "target_node_kind": "",
         "title": "의견 정리 중",
         "body": "",
         "keywords": [],

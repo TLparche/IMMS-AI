@@ -2,6 +2,7 @@ param(
   [int]$BackendPort = 8000,
   [int]$GatewayPort = 8001,
   [int]$TunnelTimeoutSeconds = 90,
+  [int]$TunnelMaxAttempts = 4,
   [switch]$KeepExistingPortProcesses
 )
 
@@ -84,7 +85,8 @@ function Wait-TunnelUrl {
   param(
     [string]$Name,
     [string[]]$LogPaths,
-    [int]$TimeoutSeconds
+    [int]$TimeoutSeconds,
+    [object]$Process = $null
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -93,6 +95,20 @@ function Wait-TunnelUrl {
     $match = [regex]::Match($text, "https://[a-zA-Z0-9-]+\.trycloudflare\.com")
     if ($match.Success) {
       return $match.Value
+    }
+    if ($text -match "failed to unmarshal quick Tunnel|Error unmarshaling QuickTunnel response|Internal Server Error") {
+      Write-Warning "$Name tunnel quick tunnel 요청이 실패했습니다. 재시도합니다."
+      return ""
+    }
+    if ($Process -and $Process.HasExited) {
+      Start-Sleep -Milliseconds 300
+      $text = Read-LogText -Paths $LogPaths
+      $match = [regex]::Match($text, "https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+      if ($match.Success) {
+        return $match.Value
+      }
+      Write-Warning "$Name tunnel 프로세스가 URL 생성 전에 종료되었습니다. 재시도합니다."
+      return ""
     }
     Start-Sleep -Milliseconds 500
   }
@@ -104,6 +120,56 @@ function Wait-TunnelUrl {
     Write-Host ($recentLog.Split("`n") | Select-Object -Last 20) -Separator "`n"
   }
   return ""
+}
+
+function Start-TunnelWithRetry {
+  param(
+    [string]$Name,
+    [int]$Port,
+    [string]$CloudflaredPath,
+    [string]$WorkingDirectory,
+    [string]$LogDirectory,
+    [int]$TimeoutSeconds,
+    [int]$MaxAttempts
+  )
+
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt += 1) {
+    if ($attempt -gt 1) {
+      $delaySeconds = [Math]::Min(8, 2 * $attempt)
+      Write-Host "Retrying $Name tunnel ($attempt/$MaxAttempts) after ${delaySeconds}s..."
+      Start-Sleep -Seconds $delaySeconds
+    }
+
+    Write-Host "Starting Cloudflare tunnel for $Name..."
+    $tunnelProcess = Start-LoggedProcess `
+      -Name "$Name-tunnel" `
+      -FilePath $CloudflaredPath `
+      -ArgumentList @("tunnel", "--url", "http://localhost:$Port") `
+      -WorkingDirectory $WorkingDirectory `
+      -LogDirectory $LogDirectory
+
+    $url = Wait-TunnelUrl `
+      -Name $Name `
+      -LogPaths @($tunnelProcess.Stdout, $tunnelProcess.Stderr) `
+      -TimeoutSeconds $TimeoutSeconds `
+      -Process $tunnelProcess.Process
+
+    if ($url) {
+      return [pscustomobject]@{
+        Name = "$Name-tunnel"
+        Process = $tunnelProcess.Process
+        Stdout = $tunnelProcess.Stdout
+        Stderr = $tunnelProcess.Stderr
+        Url = $url
+      }
+    }
+
+    if ($tunnelProcess.Process -and -not $tunnelProcess.Process.HasExited) {
+      Stop-Process -Id $tunnelProcess.Process.Id -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  throw "$Name tunnel 생성에 실패했습니다. Cloudflare quick tunnel이 일시적으로 500을 반환했을 수 있습니다."
 }
 
 function Stop-StartedProcesses {
@@ -160,33 +226,28 @@ try {
 
   Start-Sleep -Seconds 2
 
-  Write-Host "Starting Cloudflare tunnel for gateway..."
-  $gatewayTunnelProcess = Start-LoggedProcess `
-    -Name "gateway-tunnel" `
-    -FilePath $cloudflaredCommand.Source `
-    -ArgumentList @("tunnel", "--url", "http://localhost:$GatewayPort") `
+  $gatewayTunnelProcess = Start-TunnelWithRetry `
+    -Name "gateway" `
+    -Port $GatewayPort `
+    -CloudflaredPath $cloudflaredCommand.Source `
     -WorkingDirectory $projectRoot `
-    -LogDirectory $logDir
+    -LogDirectory $logDir `
+    -TimeoutSeconds $TunnelTimeoutSeconds `
+    -MaxAttempts $TunnelMaxAttempts
   $started += $gatewayTunnelProcess
 
-  Write-Host "Starting Cloudflare tunnel for backend..."
-  $backendTunnelProcess = Start-LoggedProcess `
-    -Name "backend-tunnel" `
-    -FilePath $cloudflaredCommand.Source `
-    -ArgumentList @("tunnel", "--url", "http://localhost:$BackendPort") `
+  $backendTunnelProcess = Start-TunnelWithRetry `
+    -Name "backend" `
+    -Port $BackendPort `
+    -CloudflaredPath $cloudflaredCommand.Source `
     -WorkingDirectory $projectRoot `
-    -LogDirectory $logDir
+    -LogDirectory $logDir `
+    -TimeoutSeconds $TunnelTimeoutSeconds `
+    -MaxAttempts $TunnelMaxAttempts
   $started += $backendTunnelProcess
 
-  $gatewayTunnel = Wait-TunnelUrl `
-    -Name "gateway" `
-    -LogPaths @($gatewayTunnelProcess.Stdout, $gatewayTunnelProcess.Stderr) `
-    -TimeoutSeconds $TunnelTimeoutSeconds
-
-  $backendTunnel = Wait-TunnelUrl `
-    -Name "backend" `
-    -LogPaths @($backendTunnelProcess.Stdout, $backendTunnelProcess.Stderr) `
-    -TimeoutSeconds $TunnelTimeoutSeconds
+  $gatewayTunnel = $gatewayTunnelProcess.Url
+  $backendTunnel = $backendTunnelProcess.Url
 
   Write-Host ""
   Write-Host "==== Demo Tunnel URLs ===="

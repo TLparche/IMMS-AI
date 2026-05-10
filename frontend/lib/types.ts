@@ -223,6 +223,9 @@ export interface CanvasProblemDefinitionGroup {
 export interface CanvasProblemDiscussionItem {
   id: string;
   parent_group_id: string;
+  target_node_id?: string;
+  target_node_label?: string;
+  target_node_kind?: "topic" | "idea" | string;
   title: string;
   body: string;
   keywords?: string[];

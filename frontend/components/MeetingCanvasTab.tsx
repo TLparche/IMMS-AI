@@ -582,6 +582,9 @@ type ProblemGroupDisplayCard = {
   title: string;
   body: string;
   kind: string;
+  sourceNodeId: string;
+  sourceNodeKind: "topic" | "idea" | "summary";
+  attachable: boolean;
 };
 
 type MeetingCanvasTabProps = {
@@ -806,12 +809,18 @@ function buildProblemGroupDisplayCards(group: ProblemGroupViewModel): ProblemGro
     title: `아이디어${index + 1}`,
     body: stripLeadingTimestamp(item) || "아직 요약된 아이디어가 없습니다.",
     kind: "summary",
+    sourceNodeId: `${group.group_id}-summary-${index}`,
+    sourceNodeKind: index === 0 ? "topic" as const : "summary" as const,
+    attachable: index === 0,
   }));
   const personalCards = (group.ideas || []).map((idea, index) => ({
     id: idea.id || `${group.group_id}-idea-${index}`,
     title: idea.title || `메모${index + 1}`,
     body: idea.body || "메모 내용 없음",
     kind: idea.kind || "memo",
+    sourceNodeId: idea.id || `${group.group_id}-idea-${index}`,
+    sourceNodeKind: "idea" as const,
+    attachable: true,
   }));
 
   if (summaryCards.length === 0 && personalCards.length === 0) {
@@ -895,6 +904,26 @@ function resolveCanvasItemAgendaId(
   return "";
 }
 
+function resolveDirectProblemDefinitionAgendaId(
+  item: CanvasItemViewModel,
+  itemById: Map<string, CanvasItemViewModel>,
+) {
+  if (item.agenda_id && !item.parent_topic_id) {
+    return item.agenda_id;
+  }
+
+  if (!item.parent_topic_id) {
+    return "";
+  }
+
+  const parent = itemById.get(item.parent_topic_id);
+  if (!parent || !isTopicCanvasItem(parent) || parent.parent_topic_id) {
+    return "";
+  }
+
+  return parent.agenda_id || "";
+}
+
 function buildProblemDefinitionAgendaInputs(agendaModels: AgendaViewModel[]) {
   return agendaModels.map((agenda) => ({
     agenda_id: agenda.id,
@@ -912,7 +941,7 @@ function buildProblemDefinitionIdeaInputs(
   const canvasIdeas = canvasItems
     .map((item) => ({
       id: item.id,
-      agenda_id: resolveCanvasItemAgendaId(item, itemById),
+      agenda_id: resolveDirectProblemDefinitionAgendaId(item, itemById),
       kind: item.kind || "note",
       title: item.title || "",
       body: item.body || "",
@@ -950,7 +979,7 @@ function buildProblemDefinitionAgendaSignatures(
     const linkedCanvasItems = canvasItems
       .map((item) => ({
         id: item.id,
-        agenda_id: resolveCanvasItemAgendaId(item, itemById),
+        agenda_id: resolveDirectProblemDefinitionAgendaId(item, itemById),
         kind: item.kind || "note",
         title: item.title || "",
         body: item.body || "",
@@ -1516,6 +1545,8 @@ function makeProblemGroupNodeLabel(
   selected: boolean,
   loading: boolean,
   dropTarget: boolean,
+  selectedSourceNodeId: string,
+  onSourceNodeSelect: (sourceNodeId: string) => void,
   onDragOver: (event: React.DragEvent<HTMLDivElement>) => void,
   onDragLeave: () => void,
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void,
@@ -1545,7 +1576,33 @@ function makeProblemGroupNodeLabel(
         <div className="mt-6 grid grid-cols-2 gap-5">
           {noteCards.length > 0 ? (
             noteCards.map((item, itemIndex) => (
-              <div key={item.id} className={`min-h-[136px] rounded-[12px] border p-5 shadow-[0_10px_22px_rgba(15,23,42,0.08)] ${palette.note}`}>
+              <div
+                key={item.id}
+                data-problem-source-group-id={group.group_id}
+                data-problem-source-node-id={item.attachable ? item.sourceNodeId : undefined}
+                data-problem-source-node-kind={item.attachable ? item.sourceNodeKind : undefined}
+                data-problem-source-node-label={item.attachable ? item.title : undefined}
+                onClick={(event) => {
+                  if (!item.attachable) return;
+                  event.stopPropagation();
+                  onSourceNodeSelect(item.sourceNodeId);
+                }}
+                className={`min-h-[136px] rounded-[12px] border p-5 shadow-[0_10px_22px_rgba(15,23,42,0.08)] ${
+                  item.attachable ? "cursor-pointer" : ""
+                } ${
+                  selectedSourceNodeId === item.sourceNodeId ? "ring-2 ring-slate-900 ring-offset-2" : ""
+                } ${palette.note}`}
+              >
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
+                    {item.sourceNodeKind === "topic" ? "Topic" : item.sourceNodeKind === "idea" ? "Idea" : "Summary"}
+                  </span>
+                  {item.attachable ? (
+                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-slate-500">
+                      의견 연결 가능
+                    </span>
+                  ) : null}
+                </div>
                 <p className="text-[19px] font-semibold leading-7 text-slate-900">
                   {item.title || `아이디어${itemIndex + 1}`}
                 </p>
@@ -2011,6 +2068,43 @@ function positionsEqual(
   return (left?.x ?? 0) === (right?.x ?? 0) && (left?.y ?? 0) === (right?.y ?? 0);
 }
 
+type ProblemSourceDropTarget = {
+  groupId: string;
+  nodeId: string;
+  nodeKind: "topic" | "idea";
+  nodeLabel: string;
+};
+
+function findProblemSourceDropTarget(clientX: number, clientY: number): ProblemSourceDropTarget | null {
+  if (typeof document === "undefined" || !Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+    return null;
+  }
+
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>("[data-problem-source-node-id][data-problem-source-group-id]"),
+  );
+  for (const candidate of candidates) {
+    const rect = candidate.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+      continue;
+    }
+
+    const nodeKind = candidate.dataset.problemSourceNodeKind;
+    if (nodeKind !== "topic" && nodeKind !== "idea") {
+      return null;
+    }
+
+    return {
+      groupId: candidate.dataset.problemSourceGroupId || "",
+      nodeId: candidate.dataset.problemSourceNodeId || "",
+      nodeKind,
+      nodeLabel: candidate.dataset.problemSourceNodeLabel || "",
+    };
+  }
+
+  return null;
+}
+
 function styleSignature(style?: React.CSSProperties) {
   return buildNodeContentSignature([
     style?.width,
@@ -2136,6 +2230,7 @@ export default function MeetingCanvasTab({
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedCanvasItemId, setSelectedCanvasItemId] = useState("");
   const [selectedProblemGroupId, setSelectedProblemGroupId] = useState("");
+  const [selectedProblemSourceNodeId, setSelectedProblemSourceNodeId] = useState("");
   const [editingProblemGroupId, setEditingProblemGroupId] = useState("");
   const [problemGroupDraftTopic, setProblemGroupDraftTopic] = useState("");
   const [problemGroupDraftInsight, setProblemGroupDraftInsight] = useState("");
@@ -2419,6 +2514,7 @@ export default function MeetingCanvasTab({
     setEditingAgendaId("");
     setEditingCanvasItemId("");
     setEditingPersonalNoteId("");
+    setSelectedProblemSourceNodeId("");
     setArmedCanvasTool(null);
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
@@ -4379,6 +4475,9 @@ export default function MeetingCanvasTab({
             ...(group.discussion_items || []).flatMap((item) => [
               item.id,
               item.parent_group_id,
+              item.target_node_id || "",
+              item.target_node_label || "",
+              item.target_node_kind || "",
               item.ai_pending ? "pending" : "ready",
             ]),
           ]),
@@ -4410,6 +4509,7 @@ export default function MeetingCanvasTab({
                 selected,
                 loading,
                 dropTarget,
+                selectedProblemSourceNodeId,
                 group.insight_lens,
                 group.conclusion,
                 ...(group.keywords || []),
@@ -4428,6 +4528,12 @@ export default function MeetingCanvasTab({
                 selected,
                 loading,
                 dropTarget,
+                selectedProblemSourceNodeId,
+                (sourceNodeId) => {
+                  setSelectedProblemGroupId(group.group_id);
+                  setSelectedProblemSourceNodeId(sourceNodeId);
+                  setLeftPanelTab("agenda-list");
+                },
                 (event) => {
                   const types = Array.from(event.dataTransfer.types || []);
                   const isNoteDrag =
@@ -4459,7 +4565,7 @@ export default function MeetingCanvasTab({
           ...problemGroups.flatMap((group) => {
             const groupPosition = groupPositionById.get(group.group_id) || { x: 80, y: 120 };
             let nextY = groupPosition.y;
-            return (group.discussion_items || []).map((item) => {
+            return (group.discussion_items || []).filter((item) => !item.target_node_id).map((item) => {
               const nodeId = `problem-discussion-${item.id}`;
               const savedPosition = nodePositions["problem-definition"]?.[nodeId];
               const itemHeight = estimateProblemDiscussionNodeHeight(item);
@@ -4835,7 +4941,7 @@ export default function MeetingCanvasTab({
         }),
       ],
     };
-  }, [stage, agendaModels, canvasItems, dropProblemGroupId, getTopicCollapsed, handleToggleTopicCollapsed, latestHighlightedTopicId, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedNodeId, selectedProblemGroupId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+  }, [stage, agendaModels, canvasItems, dropProblemGroupId, getTopicCollapsed, handleToggleTopicCollapsed, latestHighlightedTopicId, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedNodeId, selectedProblemGroupId, selectedProblemSourceNodeId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
     if (!workspaceLoadedRef.current || workspaceHydratingRef.current) {
@@ -4976,6 +5082,23 @@ export default function MeetingCanvasTab({
     () => problemGroups.find((group) => group.group_id === selectedProblemGroupId) || problemGroups[0] || null,
     [problemGroups, selectedProblemGroupId],
   );
+  const selectedProblemSourceCards = useMemo(
+    () => (selectedProblemGroup ? buildProblemGroupDisplayCards(selectedProblemGroup).filter((card) => card.attachable) : []),
+    [selectedProblemGroup],
+  );
+  const selectedProblemSourceCard = useMemo(
+    () => selectedProblemSourceCards.find((card) => card.sourceNodeId === selectedProblemSourceNodeId) || selectedProblemSourceCards[0] || null,
+    [selectedProblemSourceCards, selectedProblemSourceNodeId],
+  );
+  const selectedProblemSourceOpinions = useMemo(
+    () =>
+      selectedProblemGroup && selectedProblemSourceCard
+        ? (selectedProblemGroup.discussion_items || []).filter(
+            (item) => item.target_node_id === selectedProblemSourceCard.sourceNodeId,
+          )
+        : [],
+    [selectedProblemGroup, selectedProblemSourceCard],
+  );
   const selectedSolutionTopic = useMemo(
     () => solutionTopics.find((topic) => topic.group_id === selectedSolutionTopicId) || solutionTopics[0] || null,
     [selectedSolutionTopicId, solutionTopics],
@@ -5010,6 +5133,24 @@ export default function MeetingCanvasTab({
     Boolean(selectedSolutionTopic) &&
     editingSolutionTopicId === selectedSolutionTopic?.group_id;
 
+  useEffect(() => {
+    if (stage !== "problem-definition" || !selectedProblemGroup) {
+      if (selectedProblemSourceNodeId) {
+        setSelectedProblemSourceNodeId("");
+      }
+      return;
+    }
+
+    if (
+      selectedProblemSourceNodeId &&
+      selectedProblemSourceCards.some((card) => card.sourceNodeId === selectedProblemSourceNodeId)
+    ) {
+      return;
+    }
+
+    setSelectedProblemSourceNodeId(selectedProblemSourceCards[0]?.sourceNodeId || "");
+  }, [selectedProblemGroup, selectedProblemSourceCards, selectedProblemSourceNodeId, stage]);
+
   const leftPanelDetail = useMemo(() => {
     if (stage === "problem-definition") {
       const selectedGroup = selectedProblemGroup;
@@ -5042,8 +5183,42 @@ export default function MeetingCanvasTab({
             label: "메모 수",
             value: `${selectedGroup.ideas.length}개`,
           },
+          {
+            label: "속한 의견",
+            value: `${(selectedGroup.discussion_items || []).filter((item) => item.target_node_id).length}개`,
+          },
         ],
-        organizeTitle: "안건 정리",
+        organizeTitle: "문제정의 정리",
+        selectedSourceNode: selectedProblemSourceCard
+          ? {
+              id: selectedProblemSourceCard.sourceNodeId,
+              label: selectedProblemSourceCard.title,
+              kind: selectedProblemSourceCard.sourceNodeKind,
+              body: selectedProblemSourceCard.body,
+            }
+          : null,
+        sourceNodes: selectedProblemSourceCards.map((card) => ({
+          id: card.sourceNodeId,
+          label: card.title,
+          kind: card.sourceNodeKind,
+          body: card.body,
+          opinionCount: (selectedGroup.discussion_items || []).filter((item) => item.target_node_id === card.sourceNodeId).length,
+        })),
+        attachedOpinions: selectedProblemSourceOpinions.map((item) => ({
+          id: item.id,
+          label: item.title || "의견",
+          value: item.body || "의견 내용이 없습니다.",
+          keywords: item.keywords || [],
+          createdAt: item.created_at || "",
+        })),
+        floatingOpinions: (selectedGroup.discussion_items || [])
+          .filter((item) => !item.target_node_id)
+          .map((item) => ({
+            id: item.id,
+            label: item.title || "의견",
+            value: item.body || "의견 내용이 없습니다.",
+            keywords: item.keywords || [],
+          })),
         evidenceItems: (selectedGroup.source_summary_items || []).filter(Boolean).map((value, index) => ({
           label: `근거 ${index + 1}`,
           value: stripLeadingTimestamp(value),
@@ -5195,7 +5370,7 @@ export default function MeetingCanvasTab({
       ],
       organizeTitle: "핵심 포인트",
     };
-  }, [agendaModels, canvasItems, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedSolutionTopic, stage]);
+  }, [agendaModels, canvasItems, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
 
   const handleGenerateProblemDefinition = async () => {
     setProblemDefinitionStagePending(true);
@@ -5883,7 +6058,7 @@ export default function MeetingCanvasTab({
     });
   };
 
-  const onNodeDragStop = (_event: React.MouseEvent, node: Node) => {
+  const onNodeDragStop = (event: React.MouseEvent, node: Node) => {
     if (!workspaceLoadedRef.current || workspaceHydratingRef.current || applyingRemoteSharedSyncRef.current) {
       return;
     }
@@ -5993,6 +6168,53 @@ export default function MeetingCanvasTab({
 
     if (stage === "problem-definition" && node.id.startsWith("problem-discussion-")) {
       const discussionId = node.id.slice("problem-discussion-".length);
+      const sourceDropTarget = findProblemSourceDropTarget(event.clientX, event.clientY);
+      if (sourceDropTarget?.groupId && sourceDropTarget.nodeId) {
+        let movedDiscussion: ProblemDiscussionViewModel | null = null;
+        nextProblemGroupsSnapshot = problemGroups.map((group) => {
+          const remaining = (group.discussion_items || []).filter((item) => {
+            if (item.id !== discussionId) return true;
+            movedDiscussion = {
+              ...item,
+              parent_group_id: sourceDropTarget.groupId,
+              target_node_id: sourceDropTarget.nodeId,
+              target_node_label: sourceDropTarget.nodeLabel,
+              target_node_kind: sourceDropTarget.nodeKind,
+            };
+            return false;
+          });
+          return {
+            ...group,
+            discussion_items: remaining,
+          };
+        }).map((group) =>
+          group.group_id === sourceDropTarget.groupId && movedDiscussion
+            ? {
+                ...group,
+                discussion_items: [
+                  ...(group.discussion_items || []),
+                  movedDiscussion,
+                ],
+              }
+            : group,
+        );
+
+        const nextStagePositions = {
+          ...(nextPositionsSnapshot["problem-definition"] || {}),
+        };
+        delete nextStagePositions[node.id];
+        nextPositionsSnapshot = {
+          ...nextPositionsSnapshot,
+          "problem-definition": nextStagePositions,
+        };
+
+        setProblemGroups(nextProblemGroupsSnapshot);
+        setSelectedProblemGroupId(sourceDropTarget.groupId);
+        setSelectedProblemSourceNodeId(sourceDropTarget.nodeId);
+        setSelectedNodeId(`problem-${sourceDropTarget.groupId}`);
+        setLeftPanelTab("agenda-list");
+        setActivityMessage(`의견 노드를 "${sourceDropTarget.nodeLabel || "선택한 노드"}"의 속한 의견으로 추가했습니다.`);
+      } else {
       const nearestGroup = problemGroups
         .map((group) => {
           const groupNode = nodes.find((candidate) => candidate.id === `problem-${group.group_id}`);
@@ -6039,7 +6261,9 @@ export default function MeetingCanvasTab({
         );
         setProblemGroups(nextProblemGroupsSnapshot);
         setSelectedProblemGroupId(nearestGroup.group_id);
+        setSelectedProblemSourceNodeId("");
         setActivityMessage(`의견 노드를 "${nearestGroup.topic}" 문제정의 아래로 이동했습니다.`);
+      }
       }
     }
 
@@ -7322,7 +7546,11 @@ export default function MeetingCanvasTab({
                 <p className="mt-[18px] text-base font-normal text-[#4d4d4d]">내용</p>
               </div>
               <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm text-[#4d4d4d]">
-                {leftPanelTab === "detail" ? "선택 정보" : `${agendaModels.length}개 그룹`}
+                {leftPanelTab === "detail"
+                  ? "선택 정보"
+                  : stage === "problem-definition"
+                    ? `${selectedProblemSourceOpinions.length}개 의견`
+                    : `${agendaModels.length}개 그룹`}
               </span>
             </div>
 
@@ -7339,7 +7567,7 @@ export default function MeetingCanvasTab({
                 onClick={() => setLeftPanelTab("agenda-list")}
                 className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${leftPanelTab === "agenda-list" ? "bg-[#1b59f8] text-white" : "text-[#4d4d4d] hover:bg-white hover:text-black"}`}
               >
-                안건 목록
+                {stage === "problem-definition" ? "속한 의견" : "안건 목록"}
               </button>
             </div>
             </div>
@@ -8088,6 +8316,114 @@ export default function MeetingCanvasTab({
                   </p>
                 )}
               </div>
+            ) : stage === "problem-definition" && selectedProblemGroup ? (
+              <div className="imms-left-panel-detail mt-4 space-y-4">
+                <section className="border-b border-slate-200/80 pb-6">
+                  <div className="flex items-center justify-between gap-3">
+                    <h4 className="text-lg font-semibold text-slate-900">속한 의견</h4>
+                    <span className="text-sm text-slate-500">
+                      {selectedProblemSourceOpinions.length}개
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-slate-500">
+                    Problem Note를 아래 topic/idea 노드 위로 드래그하면 캔버스에서 사라지고 이 목록에 들어갑니다.
+                  </p>
+                  <div className="mt-4 space-y-2">
+                    {leftPanelDetail?.sourceNodes?.length ? (
+                      leftPanelDetail.sourceNodes.map((source) => (
+                        <button
+                          key={source.id}
+                          type="button"
+                          onClick={() => setSelectedProblemSourceNodeId(source.id)}
+                          className={`w-full rounded-xl border px-4 py-3 text-left transition ${
+                            selectedProblemSourceCard?.sourceNodeId === source.id
+                              ? "border-slate-900 bg-white"
+                              : "border-slate-200 bg-[#fafafa] hover:bg-white"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                                {source.kind === "topic" ? "Topic" : "Idea"}
+                              </p>
+                              <p className="mt-1 text-base font-semibold leading-6 text-slate-900">
+                                {source.label}
+                              </p>
+                            </div>
+                            <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+                              {source.opinionCount}개
+                            </span>
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm leading-6 text-slate-500">
+                        의견을 연결할 topic/idea 노드가 없습니다.
+                      </p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="border-b border-slate-200/80 pb-6">
+                  <div className="flex items-center justify-between gap-3">
+                    <h4 className="text-lg font-semibold text-slate-900">
+                      {selectedProblemSourceCard?.title || "선택된 노드"}
+                    </h4>
+                    {selectedProblemSourceCard ? (
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+                        {selectedProblemSourceCard.sourceNodeKind === "topic" ? "Topic" : "Idea"}
+                      </span>
+                    ) : null}
+                  </div>
+                  {selectedProblemSourceCard?.body ? (
+                    <p className="mt-3 text-sm leading-6 text-slate-600">
+                      {stripLeadingTimestamp(selectedProblemSourceCard.body)}
+                    </p>
+                  ) : null}
+                  <div className="mt-4 space-y-3">
+                    {selectedProblemSourceOpinions.length > 0 ? (
+                      selectedProblemSourceOpinions.map((opinion) => (
+                        <div key={opinion.id} className="rounded-2xl border border-violet-100 bg-white px-4 py-4 shadow-sm">
+                          <p className="text-sm font-semibold text-violet-700">{opinion.title || "의견"}</p>
+                          <p className="mt-2 whitespace-pre-wrap text-base leading-7 text-slate-700">
+                            {stripLeadingTimestamp(opinion.body || "의견 내용이 없습니다.")}
+                          </p>
+                          {(opinion.keywords || []).length > 0 ? (
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {(opinion.keywords || []).slice(0, 5).map((keyword) => (
+                                <span key={`${opinion.id}-${keyword}`} className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700">
+                                  #{keyword}
+                                </span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm leading-6 text-slate-500">
+                        아직 이 노드에 속한 의견이 없습니다.
+                      </p>
+                    )}
+                  </div>
+                </section>
+
+                {(leftPanelDetail?.floatingOpinions || []).length > 0 ? (
+                  <section>
+                    <div className="flex items-center justify-between gap-3">
+                      <h4 className="text-lg font-semibold text-slate-900">아직 배치되지 않은 의견</h4>
+                      <span className="text-sm text-slate-500">{leftPanelDetail?.floatingOpinions?.length || 0}개</span>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      {(leftPanelDetail?.floatingOpinions || []).map((opinion) => (
+                        <div key={opinion.id} className="rounded-xl border border-slate-200 bg-[#fafafa] px-4 py-3">
+                          <p className="text-sm font-semibold text-slate-700">{opinion.label}</p>
+                          <p className="mt-1 text-sm leading-6 text-slate-500">{stripLeadingTimestamp(opinion.value)}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+              </div>
             ) : (
               <div className="imms-left-panel-detail mt-4 space-y-3">
                 <section className="border-b border-slate-200/80 pb-6">
@@ -8318,11 +8654,14 @@ export default function MeetingCanvasTab({
                       (group.discussion_items || []).some((item) => item.id === discussionId),
                     );
                     setSelectedProblemGroupId(parentGroup?.group_id || "");
+                    const discussion = parentGroup?.discussion_items?.find((item) => item.id === discussionId);
+                    setSelectedProblemSourceNodeId(discussion?.target_node_id || "");
                     setSelectedSolutionTopicId("");
                     setSelectedCanvasItemId("");
                     setEditingProblemGroupId("");
                   } else if (node.id.startsWith("problem-")) {
                     setSelectedProblemGroupId(node.id.slice("problem-".length));
+                    setSelectedProblemSourceNodeId("");
                     setSelectedSolutionTopicId("");
                     setSelectedCanvasItemId("");
                     setEditingProblemGroupId("");
