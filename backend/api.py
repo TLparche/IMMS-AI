@@ -393,7 +393,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
         "custom_groups": copy.deepcopy(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
-        "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
+        "node_positions": _normalize_canvas_node_positions(workspace.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
@@ -430,7 +430,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         "custom_groups": copy.deepcopy(shared_state.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
-        "node_positions": copy.deepcopy(shared_state.get("node_positions") or {}),
+        "node_positions": _normalize_canvas_node_positions(shared_state.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(shared_state.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
@@ -712,19 +712,11 @@ def _normalize_canvas_workspace_items(
             "child_item_ids": [_safe_text(value) for value in (item.child_item_ids or []) if _safe_text(value)][:400],
             "topic_collapsed": bool(item.topic_collapsed),
             "created_by": _safe_text(item.created_by) if _safe_text(item.created_by) in {"ai", "user"} else "",
-            "manual_position": bool(item.manual_position),
+            "manual_position": False,
             "ai_generated": bool(item.ai_generated),
             "user_edited": bool(item.user_edited),
             "ai_pending": bool(getattr(item, "ai_pending", False)),
         }
-
-        try:
-            if item.x is not None:
-                payload["x"] = float(item.x)
-            if item.y is not None:
-                payload["y"] = float(item.y)
-        except (TypeError, ValueError):
-            pass
 
         normalized.append(payload)
 
@@ -868,7 +860,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "custom_groups": _normalize_canvas_custom_groups(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
-        "node_positions": copy.deepcopy(workspace.get("node_positions") or {}),
+        "node_positions": _normalize_canvas_node_positions(workspace.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
             _safe_text(item)
@@ -5951,6 +5943,8 @@ def _normalize_canvas_node_positions(
             node_id = _safe_text(raw_node_id)
             if not node_id or not isinstance(raw_position, dict):
                 continue
+            if stage == "ideation" and not node_id.startswith("agenda-"):
+                continue
 
             try:
                 x = float(raw_position.get("x", 0) or 0)
@@ -6794,7 +6788,7 @@ def _apply_idea_update_to_canvas_item(item: dict[str, Any], update: dict[str, An
         list(item.get("refined_utterances") or []) + list(update.get("refinedUtterances") or []),
         limit=120,
     )
-    return {
+    next_item = {
         **item,
         "title": _safe_text(item.get("title")) if user_edited else (_safe_text(update.get("title")) or _safe_text(item.get("title"))),
         "body": _safe_text(item.get("body")) if user_edited else (_safe_text(update.get("summary")) or _safe_text(item.get("body"))),
@@ -6805,7 +6799,11 @@ def _apply_idea_update_to_canvas_item(item: dict[str, Any], update: dict[str, An
         "ignored_utterance_ids": next_ignored_ids,
         "ai_generated": bool(item.get("ai_generated")) or bool(update),
         "ai_pending": False,
+        "manual_position": False,
     }
+    next_item.pop("x", None)
+    next_item.pop("y", None)
+    return next_item
 
 
 def _idea_update_merge_allowed(item: dict[str, Any], update: dict[str, Any]) -> bool:
@@ -7220,32 +7218,17 @@ def _apply_canvas_idea_compaction_pair(
         "ai_generated": True,
         "user_edited": False,
         "ai_pending": False,
+        "manual_position": False,
     }
-
-    positions = copy.deepcopy(workspace.get("node_positions") or {})
-    ideation_positions = dict(positions.get("ideation") or {})
-    left_key = f"canvas-item-{left_id}"
-    right_key = f"canvas-item-{right_id}"
-    left_position = ideation_positions.get(left_key) if isinstance(ideation_positions.get(left_key), dict) else {}
-    right_position = ideation_positions.get(right_key) if isinstance(ideation_positions.get(right_key), dict) else {}
-    left_x = float(left_position.get("x") if left_position.get("x") is not None else left.get("x") or 0)
-    left_y = float(left_position.get("y") if left_position.get("y") is not None else left.get("y") or 0)
-    right_x = float(right_position.get("x") if right_position.get("x") is not None else right.get("x") or left_x)
-    right_y = float(right_position.get("y") if right_position.get("y") is not None else right.get("y") or left_y)
-    parent_x = (left_x + right_x) / 2
-    parent_y = (left_y + right_y) / 2
-    parent["x"] = parent_x
-    parent["y"] = parent_y
-    ideation_positions[left_key] = {"x": parent_x, "y": parent_y}
-    ideation_positions.pop(right_key, None)
-    positions["ideation"] = ideation_positions
+    parent.pop("x", None)
+    parent.pop("y", None)
 
     workspace["canvas_items"] = [
         parent if _safe_text(item.get("id")) == left_id else item
         for item in canvas_items
         if _safe_text(item.get("id")) != right_id
     ]
-    workspace["node_positions"] = positions
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
 
 
 def _maybe_compact_canvas_idea_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
@@ -7747,9 +7730,6 @@ def _finalize_canvas_idea_workspace_job(
                     created_item = _apply_idea_update_to_canvas_item(pending_item, update)
                 else:
                     created_id = f"ai-idea-{int(time.time() * 1000)}-{create_index}-{uuid4().hex[:6]}"
-                    layout_index = len(next_items) + create_index
-                    x = 180 + (layout_index % 3) * 300
-                    y = 300 + (layout_index // 3) * 230
                     created_item = _apply_idea_update_to_canvas_item(
                         {
                             "id": created_id,
@@ -7776,16 +7756,9 @@ def _finalize_canvas_idea_workspace_job(
                             "ai_generated": True,
                             "user_edited": False,
                             "ai_pending": False,
-                            "x": x,
-                            "y": y,
                         },
                         update,
                     )
-                    positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
-                    ideation_positions = dict(positions.get("ideation") or {})
-                    ideation_positions[f"canvas-item-{created_id}"] = {"x": x, "y": y}
-                    positions["ideation"] = ideation_positions
-                    latest_workspace["node_positions"] = positions
                 next_items.append(created_item)
 
             created_node_count = len(create_updates)
@@ -7967,9 +7940,6 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         for item in (workspace.get("canvas_items") or [])
         if isinstance(item, dict)
     ]
-    layout_index = len(canvas_items)
-    x = 180 + (layout_index % 3) * 300
-    y = 300 + (layout_index // 3) * 230
     pending_item = {
         "id": pending_item_id,
         "agenda_id": _safe_text(payload.selected_agenda_id),
@@ -7995,15 +7965,9 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         "ai_generated": True,
         "user_edited": False,
         "ai_pending": True,
-        "x": x,
-        "y": y,
     }
     workspace["canvas_items"] = [*canvas_items, pending_item]
-    positions = copy.deepcopy(workspace.get("node_positions") or {})
-    ideation_positions = dict(positions.get("ideation") or {})
-    ideation_positions[f"canvas-item-{pending_item_id}"] = {"x": x, "y": y}
-    positions["ideation"] = ideation_positions
-    workspace["node_positions"] = positions
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
     _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
 
     idea_payload = CanvasIdeaAssimilationInput(

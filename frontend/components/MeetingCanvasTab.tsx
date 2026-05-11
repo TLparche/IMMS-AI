@@ -326,12 +326,10 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasW
     child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean),
     topic_collapsed: Boolean(item.topic_collapsed),
     created_by: item.created_by || "",
-    manual_position: Boolean(item.manual_position),
+    manual_position: false,
     ai_generated: Boolean(item.ai_generated),
     user_edited: Boolean(item.user_edited),
     ai_pending: Boolean(item.ai_pending),
-    x: typeof item.x === "number" ? item.x : undefined,
-    y: typeof item.y === "number" ? item.y : undefined,
   }));
 }
 
@@ -370,7 +368,7 @@ function buildWorkspaceFieldSignatures(input: {
     custom_groups: JSON.stringify(serializeCustomGroups(input.customGroups)),
     problem_groups: JSON.stringify(buildWorkspaceProblemGroupsPayload(input.problemGroups)),
     solution_topics: JSON.stringify(buildWorkspaceSolutionTopicsPayload(input.solutionTopics)),
-    node_positions: JSON.stringify(input.nodePositions || {}),
+    node_positions: JSON.stringify(normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions)),
     imported_state: JSON.stringify(input.importedState || null),
   };
 }
@@ -398,7 +396,7 @@ function buildFullWorkspacePatchPayload(input: {
     custom_groups: serializeCustomGroups(input.customGroups),
     problem_groups: buildWorkspaceProblemGroupsPayload(input.problemGroups),
     solution_topics: buildWorkspaceSolutionTopicsPayload(input.solutionTopics),
-    node_positions: input.nodePositions,
+    node_positions: normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions),
     imported_state: input.importedState,
   };
 }
@@ -504,6 +502,32 @@ function summarizeRenderedNodesForDebug(nodes: Node[]) {
   };
 }
 
+function normalizeCanvasNodePositionsForComputedIdeation(
+  positions: CanvasNodePositionsByStage | undefined,
+): CanvasNodePositionsByStage {
+  if (!positions) return {};
+
+  const normalized: CanvasNodePositionsByStage = {};
+  CANVAS_STAGES.forEach((stageKey) => {
+    const stagePositions = positions[stageKey] || {};
+    const entries = Object.entries(stagePositions)
+      .filter(([nodeId]) => stageKey !== "ideation" || nodeId.startsWith("agenda-"))
+      .map(([nodeId, position]) => [
+        nodeId,
+        {
+          x: Number(position?.x || 0),
+          y: Number(position?.y || 0),
+        },
+      ] as const);
+
+    if (entries.length > 0) {
+      normalized[stageKey] = Object.fromEntries(entries);
+    }
+  });
+
+  return normalized;
+}
+
 function buildCanvasPersonalNotesPayload(
   meetingId: string,
   userId: string,
@@ -585,6 +609,11 @@ type ProblemGroupDisplayCard = {
   sourceNodeId: string;
   sourceNodeKind: "topic" | "idea" | "summary";
   attachable: boolean;
+};
+
+type AgendaDragPreviewState = {
+  agendaId: string;
+  originPosition: { x: number; y: number };
 };
 
 type MeetingCanvasTabProps = {
@@ -883,25 +912,6 @@ function makeStableSignature(value: unknown) {
     hash = Math.imul(hash, 16777619);
   }
   return `${text.length}:${(hash >>> 0).toString(36)}`;
-}
-
-function resolveCanvasItemAgendaId(
-  item: CanvasItemViewModel,
-  itemById: Map<string, CanvasItemViewModel>,
-) {
-  if (item.agenda_id) return item.agenda_id;
-
-  const visited = new Set<string>();
-  let current = item;
-  while (current.parent_topic_id && !visited.has(current.parent_topic_id)) {
-    visited.add(current.parent_topic_id);
-    const parent = itemById.get(current.parent_topic_id);
-    if (!parent) break;
-    if (parent.agenda_id) return parent.agenda_id;
-    current = parent;
-  }
-
-  return "";
 }
 
 function resolveDirectProblemDefinitionAgendaId(
@@ -1535,7 +1545,6 @@ function makeProblemGroupNodeLabel(
   loading: boolean,
   dropTarget: boolean,
   selectedSourceNodeId: string,
-  hoveredSourceNodeId: string,
   onSourceNodeSelect: (sourceNodeId: string) => void,
   onDragOver: (event: React.DragEvent<HTMLDivElement>) => void,
   onDragLeave: () => void,
@@ -1577,26 +1586,17 @@ function makeProblemGroupNodeLabel(
                   event.stopPropagation();
                   onSourceNodeSelect(item.sourceNodeId);
                 }}
-                data-problem-source-drop-active={hoveredSourceNodeId === item.sourceNodeId ? "true" : undefined}
-                className={`min-h-[136px] rounded-[12px] border p-5 shadow-[0_10px_22px_rgba(15,23,42,0.08)] ${
+                className={`imms-problem-source-card min-h-[136px] rounded-[12px] border p-5 shadow-[0_10px_22px_rgba(15,23,42,0.08)] ${
                   item.attachable ? "cursor-pointer" : ""
                 } ${
                   selectedSourceNodeId === item.sourceNodeId ? "ring-2 ring-slate-900 ring-offset-2" : ""
-                } ${
-                  hoveredSourceNodeId === item.sourceNodeId
-                    ? "scale-[1.02] border-blue-400 bg-blue-50 ring-4 ring-blue-200 ring-offset-2"
-                    : ""
                 } ${palette.note}`}
               >
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
                     {item.sourceNodeKind === "topic" ? "Topic" : item.sourceNodeKind === "idea" ? "Idea" : "Summary"}
                   </span>
-                  {hoveredSourceNodeId === item.sourceNodeId ? (
-                    <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-semibold text-white">
-                      여기에 의견 추가
-                    </span>
-                  ) : item.attachable ? (
+                  {item.attachable ? (
                     <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-slate-500">
                       의견 연결 가능
                     </span>
@@ -1884,10 +1884,12 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean).slice(0, 400),
       topic_collapsed: Boolean(item.topic_collapsed),
       created_by: item.created_by || "",
-      manual_position: Boolean(item.manual_position),
+      manual_position: false,
       ai_generated: Boolean(item.ai_generated),
       user_edited: Boolean(item.user_edited),
       ai_pending: Boolean(item.ai_pending),
+      x: undefined,
+      y: undefined,
     };
   });
 }
@@ -2029,7 +2031,7 @@ function mergeNodePositionsWithLocalOverrides(
     }
   });
 
-  return nextPositions;
+  return normalizeCanvasNodePositionsForComputedIdeation(nextPositions);
 }
 
 type CanvasNodeData = {
@@ -2052,6 +2054,9 @@ type CanvasNodeDescriptor = {
   className: string;
   style: React.CSSProperties;
   data: CanvasNodeData;
+  draggable?: boolean;
+  selectable?: boolean;
+  zIndex?: number;
 };
 
 function buildNodeContentSignature(parts: Array<string | number | boolean | undefined>) {
@@ -2067,14 +2072,44 @@ function positionsEqual(
   return (left?.x ?? 0) === (right?.x ?? 0) && (left?.y ?? 0) === (right?.y ?? 0);
 }
 
+function rectIntersectionArea(left: DOMRect, right: DOMRect) {
+  const width = Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left));
+  const height = Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+  return width * height;
+}
+
+function getReactFlowNodeElement(nodeId: string) {
+  if (typeof document === "undefined" || !nodeId) {
+    return null;
+  }
+  return Array.from(document.querySelectorAll<HTMLElement>(".react-flow__node"))
+    .find((element) => element.getAttribute("data-id") === nodeId) || null;
+}
+
 type ProblemSourceDropTarget = {
   groupId: string;
   nodeId: string;
   nodeKind: "topic" | "idea";
   nodeLabel: string;
+  element: HTMLElement;
 };
 
-function findProblemSourceDropTarget(clientX: number, clientY: number): ProblemSourceDropTarget | null {
+function makeProblemSourceDropTarget(candidate: HTMLElement): ProblemSourceDropTarget | null {
+  const nodeKind = candidate.dataset.problemSourceNodeKind;
+  if (nodeKind !== "topic" && nodeKind !== "idea") {
+    return null;
+  }
+
+  return {
+    groupId: candidate.dataset.problemSourceGroupId || "",
+    nodeId: candidate.dataset.problemSourceNodeId || "",
+    nodeKind,
+    nodeLabel: candidate.dataset.problemSourceNodeLabel || "",
+    element: candidate,
+  };
+}
+
+function findProblemSourceDropTarget(clientX: number, clientY: number, draggedNodeId?: string): ProblemSourceDropTarget | null {
   if (typeof document === "undefined" || !Number.isFinite(clientX) || !Number.isFinite(clientY)) {
     return null;
   }
@@ -2082,23 +2117,29 @@ function findProblemSourceDropTarget(clientX: number, clientY: number): ProblemS
   const candidates = Array.from(
     document.querySelectorAll<HTMLElement>("[data-problem-source-node-id][data-problem-source-group-id]"),
   );
+
+  const draggedElement = draggedNodeId ? getReactFlowNodeElement(draggedNodeId) : null;
+  if (draggedElement) {
+    const draggedRect = draggedElement.getBoundingClientRect();
+    const best = candidates
+      .map((candidate) => ({
+        candidate,
+        area: rectIntersectionArea(draggedRect, candidate.getBoundingClientRect()),
+      }))
+      .filter((entry) => entry.area >= 900)
+      .sort((left, right) => right.area - left.area)[0];
+    if (best) {
+      return makeProblemSourceDropTarget(best.candidate);
+    }
+  }
+
   for (const candidate of candidates) {
     const rect = candidate.getBoundingClientRect();
     if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
       continue;
     }
 
-    const nodeKind = candidate.dataset.problemSourceNodeKind;
-    if (nodeKind !== "topic" && nodeKind !== "idea") {
-      return null;
-    }
-
-    return {
-      groupId: candidate.dataset.problemSourceGroupId || "",
-      nodeId: candidate.dataset.problemSourceNodeId || "",
-      nodeKind,
-      nodeLabel: candidate.dataset.problemSourceNodeLabel || "",
-    };
+    return makeProblemSourceDropTarget(candidate);
   }
 
   return null;
@@ -2140,6 +2181,9 @@ function reconcileNodes(
       styleSignature(existingNode.style) !== styleSignature(descriptor.style) ||
       existingNode.sourcePosition !== descriptor.sourcePosition ||
       existingNode.targetPosition !== descriptor.targetPosition ||
+      existingNode.draggable !== descriptor.draggable ||
+      existingNode.selectable !== descriptor.selectable ||
+      existingNode.zIndex !== descriptor.zIndex ||
       existingContentSignature !== nextContentSignature;
 
     if (!nodeChanged && existingNode) {
@@ -2230,7 +2274,6 @@ export default function MeetingCanvasTab({
   const [selectedCanvasItemId, setSelectedCanvasItemId] = useState("");
   const [selectedProblemGroupId, setSelectedProblemGroupId] = useState("");
   const [selectedProblemSourceNodeId, setSelectedProblemSourceNodeId] = useState("");
-  const [hoveredProblemDropTargetId, setHoveredProblemDropTargetId] = useState("");
   const [editingProblemGroupId, setEditingProblemGroupId] = useState("");
   const [problemGroupDraftTopic, setProblemGroupDraftTopic] = useState("");
   const [problemGroupDraftInsight, setProblemGroupDraftInsight] = useState("");
@@ -2259,6 +2302,7 @@ export default function MeetingCanvasTab({
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedEdgeId, setSelectedEdgeId] = useState("");
+  const [agendaDragPreview, setAgendaDragPreview] = useState<AgendaDragPreviewState | null>(null);
   const [meetingGoalEditorOpen, setMeetingGoalEditorOpen] = useState(false);
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
@@ -2295,6 +2339,8 @@ export default function MeetingCanvasTab({
   const localNodeOverridesRef = useRef(createLocalNodeOverrideMap());
   const previousCanvasItemSignaturesRef = useRef<Record<string, string>>({});
   const pendingNodePlacementsRef = useRef<Record<string, { x: number; y: number }>>({});
+  const hoveredProblemDropTargetElementRef = useRef<HTMLElement | null>(null);
+  const agendaDragPreviewRef = useRef<AgendaDragPreviewState | null>(null);
   const analysisSignatureAtImportRef = useRef("");
   const placementFeedbackTimerRef = useRef<number | null>(null);
   const initialLayoutLogDoneRef = useRef(false);
@@ -2515,12 +2561,13 @@ export default function MeetingCanvasTab({
     setEditingCanvasItemId("");
     setEditingPersonalNoteId("");
     setSelectedProblemSourceNodeId("");
-    setHoveredProblemDropTargetId("");
     setArmedCanvasTool(null);
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
     setProblemDiscussionStatus("");
     setShowTranscriptCollection(false);
+    agendaDragPreviewRef.current = null;
+    setAgendaDragPreview(null);
     setPlacementFeedback(null);
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
@@ -2566,7 +2613,7 @@ export default function MeetingCanvasTab({
       customGroups,
       problemGroups,
       solutionTopics,
-      nodePositions,
+      nodePositions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       importedState: persistedSharedImportedState,
     };
     latestSharedSyncEnabledRef.current = sharedSyncEnabled;
@@ -2727,11 +2774,13 @@ export default function MeetingCanvasTab({
         const nextSolutionTopics = shouldUseLocalCanvas
           ? hydrateSolutionTopics(savedLocalCanvasState?.solution_topics || [], nextGroups, sharedSolutionTopics)
           : sharedSolutionTopics;
-        const nextNodePositions = shouldUseLocalCanvas
-          ? savedLocalCanvasState?.node_positions || {}
-          : Object.keys(saved.node_positions || {}).length > 0
-            ? saved.node_positions || {}
-            : cachedNodePositions || {};
+        const nextNodePositions = normalizeCanvasNodePositionsForComputedIdeation(
+          shouldUseLocalCanvas
+            ? savedLocalCanvasState?.node_positions || {}
+            : Object.keys(saved.node_positions || {}).length > 0
+              ? saved.node_positions || {}
+              : cachedNodePositions || {},
+        );
         const nextImportedState = shouldUseLocalCanvas
           ? savedLocalCanvasState?.imported_state || null
           : saved.imported_state || null;
@@ -3039,7 +3088,7 @@ export default function MeetingCanvasTab({
         custom_groups: serializeCustomGroups(overrides?.customGroups ?? customGroups),
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
-        node_positions: overrides?.nodePositions ?? nodePositions,
+        node_positions: normalizeCanvasNodePositionsForComputedIdeation(overrides?.nodePositions ?? nodePositions),
         imported_state:
           overrides && "importedState" in overrides
             ? (overrides.importedState ?? null)
@@ -3086,7 +3135,7 @@ export default function MeetingCanvasTab({
       if (!workspace || workspace.meeting_id !== meetingId) return;
 
       const nextCanvasItems = hydrateCanvasItems(workspace.canvas_items || []);
-      const nextNodePositions = workspace.node_positions || {};
+      const nextNodePositions = normalizeCanvasNodePositionsForComputedIdeation(workspace.node_positions || {});
       const nextMeetingGoal = typeof workspace.meeting_goal === "string" ? workspace.meeting_goal : meetingGoalDraft;
       const nextMeetingGoalContext =
         typeof workspace.meeting_goal_context === "string" ? workspace.meeting_goal_context : meetingGoalContextDraft;
@@ -3159,7 +3208,7 @@ export default function MeetingCanvasTab({
       if (!workspace || workspace.meeting_id !== meetingId) return;
 
       const nextProblemGroups = hydrateProblemGroups(workspace.problem_groups || [], problemGroups);
-      const nextNodePositions = workspace.node_positions || nodePositions;
+      const nextNodePositions = normalizeCanvasNodePositionsForComputedIdeation(workspace.node_positions || nodePositions);
       (workspace.problem_processed_utterance_ids || []).forEach((id) => {
         if (id) processedProblemUtteranceIdsRef.current.add(id);
       });
@@ -3770,7 +3819,7 @@ export default function MeetingCanvasTab({
       hasChanges = true;
     }
     if (sharedSyncEnabled && nextSignatures.node_positions !== previousSignatures.node_positions) {
-      patch.node_positions = nodePositions;
+      patch.node_positions = normalizeCanvasNodePositionsForComputedIdeation(nodePositions);
       hasChanges = true;
     }
     if (sharedSyncEnabled && nextSignatures.imported_state !== previousSignatures.imported_state) {
@@ -3851,7 +3900,7 @@ export default function MeetingCanvasTab({
             stage,
             problem_groups: serializeSharedProblemGroups(problemGroups),
             solution_topics: serializeSharedSolutionTopics(solutionTopics),
-            node_positions: nodePositions,
+            node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
             imported_state: persistedSharedImportedState,
             import_override_active: importOverrideActive,
           },
@@ -3915,7 +3964,7 @@ export default function MeetingCanvasTab({
       custom_groups: serializeCustomGroups(customGroups),
       problem_groups: serializeSharedProblemGroups(problemGroups),
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
-      node_positions: nodePositions,
+      node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       imported_state: persistedSharedImportedState,
     }),
     [agendaOverrides, canvasItems, customGroups, meetingGoalContextDraft, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
@@ -4187,7 +4236,9 @@ export default function MeetingCanvasTab({
         ? canvasItems.find((item) => item.id === editingCanvasItemId) || null
         : null;
     let nextIncomingCanvasItems = incomingCanvasItems;
-    let nextIncomingNodePositions = incomingSharedCanvasSync.node_positions || {};
+    let nextIncomingNodePositions = normalizeCanvasNodePositionsForComputedIdeation(
+      incomingSharedCanvasSync.node_positions || {},
+    );
 
     if (editingCanvasItem) {
       let foundEditingItem = false;
@@ -4214,17 +4265,7 @@ export default function MeetingCanvasTab({
         ];
       }
 
-      const editingNodeId = `canvas-item-${editingCanvasItem.id}`;
-      const editingNodePosition = nodePositions.ideation?.[editingNodeId];
-      if (editingNodePosition) {
-        nextIncomingNodePositions = {
-          ...nextIncomingNodePositions,
-          ideation: {
-            ...(nextIncomingNodePositions.ideation || {}),
-            [editingNodeId]: editingNodePosition,
-          },
-        };
-      }
+      nextIncomingNodePositions = normalizeCanvasNodePositionsForComputedIdeation(nextIncomingNodePositions);
     }
 
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
@@ -4530,7 +4571,6 @@ export default function MeetingCanvasTab({
                 loading,
                 dropTarget,
                 selectedProblemSourceNodeId,
-                hoveredProblemDropTargetId,
                 (sourceNodeId) => {
                   setSelectedProblemGroupId(group.group_id);
                   setSelectedProblemSourceNodeId(sourceNodeId);
@@ -4765,19 +4805,11 @@ export default function MeetingCanvasTab({
       let nextTopY = agendaPosition.y + agendaHeights[agendaIndex] + CANVAS_AGENDA_TO_ITEMS_GAP_Y;
 
       topLevelItems.forEach((item) => {
-        const nodeId = `canvas-item-${item.id}`;
-        const savedPosition =
-          nodePositions.ideation?.[nodeId] ||
-          pendingNodePlacementsRef.current[nodeId] ||
-          (typeof item.x === "number" && typeof item.y === "number" ? { x: item.x, y: item.y } : undefined);
         const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
-        const topPosition =
-          item.manual_position && savedPosition
-            ? savedPosition
-            : {
-                x: agendaPosition.x + 20,
-                y: nextTopY,
-              };
+        const topPosition = {
+          x: agendaPosition.x + 20,
+          y: nextTopY,
+        };
         computedCanvasPositions.set(item.id, topPosition);
 
         let childChainHeight = 0;
@@ -4787,11 +4819,6 @@ export default function MeetingCanvasTab({
           let childBaseY = topPosition.y;
 
           childItems.forEach((child, childIndex) => {
-            const childNodeId = `canvas-item-${child.id}`;
-            const childSavedPosition =
-              nodePositions.ideation?.[childNodeId] ||
-              pendingNodePlacementsRef.current[childNodeId] ||
-              (typeof child.x === "number" && typeof child.y === "number" ? { x: child.x, y: child.y } : undefined);
             const childHeight = canvasItemHeights.get(child.id) || estimateCanvasItemNodeHeight(child);
             const row = Math.floor(childIndex / CANVAS_TOPIC_CHILDS_PER_ROW);
             const column = childIndex % CANVAS_TOPIC_CHILDS_PER_ROW;
@@ -4802,10 +4829,7 @@ export default function MeetingCanvasTab({
               x: topPosition.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X + column * (CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X),
               y: childBaseY,
             };
-            computedCanvasPositions.set(
-              child.id,
-              child.manual_position && childSavedPosition ? childSavedPosition : computedChildPosition,
-            );
+            computedCanvasPositions.set(child.id, computedChildPosition);
             childRowHeights[row] = Math.max(childRowHeights[row] || 0, childHeight);
             childChainHeight = Math.max(
               childChainHeight,
@@ -4838,6 +4862,7 @@ export default function MeetingCanvasTab({
           const positionSource: CanvasNodeDescriptor["positionSource"] = savedPosition
             ? "persisted"
             : "fallback";
+          const isAgendaDragSource = agendaDragPreview?.agendaId === agenda.id;
 
           return {
             id: nodeId,
@@ -4845,7 +4870,7 @@ export default function MeetingCanvasTab({
             positionSource,
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
-            className: "rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)]",
+            className: `imms-agenda-node rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)] ${isAgendaDragSource ? "z-20" : ""}`,
             style: { width: 300, minHeight: agendaHeights[agendaIndex], borderRadius: 28, padding: 0 },
             data: {
               contentSignature: buildNodeContentSignature([
@@ -4864,6 +4889,46 @@ export default function MeetingCanvasTab({
             },
           };
         }),
+        ...(agendaDragPreview
+          ? agendaModels
+              .filter((agenda) => agenda.id === agendaDragPreview.agendaId)
+              .map((agenda) => {
+                const agendaIndex = agendaModels.findIndex((candidate) => candidate.id === agenda.id);
+                const agendaHeight = agendaHeights[Math.max(0, agendaIndex)] || 160;
+                return {
+                  id: `agenda-drag-placeholder-${agenda.id}`,
+                  position: agendaDragPreview.originPosition,
+                  positionSource: "persisted" as const,
+                  sourcePosition: Position.Bottom,
+                  targetPosition: Position.Top,
+                  className: "imms-agenda-drag-placeholder rounded-[28px] border border-dashed border-blue-300 bg-blue-50/70 shadow-[0_18px_40px_rgba(37,99,235,0.10)]",
+                  style: { width: 300, minHeight: agendaHeight, borderRadius: 28, padding: 0 },
+                  draggable: false,
+                  selectable: false,
+                  zIndex: 0,
+                  data: {
+                    contentSignature: buildNodeContentSignature([
+                      "agenda-placeholder",
+                      agenda.id,
+                      agenda.title,
+                      agendaDragPreview.originPosition.x,
+                      agendaDragPreview.originPosition.y,
+                    ]),
+                    label: (
+                      <div className="p-5">
+                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">
+                          기존 위치
+                        </p>
+                        <p className="mt-2 text-lg font-semibold leading-7 text-slate-800">{agenda.title}</p>
+                        <p className="mt-2 text-sm leading-6 text-slate-500">
+                          드롭하면 아래 콘텐츠와 함께 이동합니다.
+                        </p>
+                      </div>
+                    ),
+                  },
+                };
+              })
+          : []),
         ...visibleCanvasItems.map((item, index) => {
           const nodeId = `canvas-item-${item.id}`;
           const displayItem =
@@ -4875,24 +4940,9 @@ export default function MeetingCanvasTab({
               : item;
           const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
           const computedPosition = computedCanvasPositions.get(item.id);
-          const savedPosition =
-            nodePositions.ideation?.[nodeId] ||
-            pendingNodePlacementsRef.current[nodeId] ||
-            (typeof item.x === "number" && typeof item.y === "number"
-              ? { x: item.x, y: item.y }
-              : undefined);
-          const preferredPosition =
-            item.manual_position && savedPosition
-              ? savedPosition
-              : computedPosition || savedPosition;
+          const preferredPosition = computedPosition;
           const positionSource: CanvasNodeDescriptor["positionSource"] =
-            item.manual_position && savedPosition
-              ? "persisted"
-              : computedPosition
-                ? "computed"
-                : savedPosition
-                  ? "persisted"
-                  : "fallback";
+            computedPosition ? "computed" : "fallback";
           const linkedAgendaTitle =
             agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
           const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
@@ -4943,7 +4993,7 @@ export default function MeetingCanvasTab({
         }),
       ],
     };
-  }, [stage, agendaModels, canvasItems, dropProblemGroupId, getTopicCollapsed, handleToggleTopicCollapsed, hoveredProblemDropTargetId, latestHighlightedTopicId, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedNodeId, selectedProblemGroupId, selectedProblemSourceNodeId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
+  }, [stage, agendaModels, agendaDragPreview, canvasItems, dropProblemGroupId, getTopicCollapsed, handleToggleTopicCollapsed, latestHighlightedTopicId, loadingProblemGroupIds, nodePositions, problemGroups, selectedCanvasItemId, selectedNodeId, selectedProblemGroupId, selectedProblemSourceNodeId, selectedSolutionTopicId, solutionTopics, handleAttachPersonalNoteToProblemGroup]);
 
   useEffect(() => {
     if (!workspaceLoadedRef.current || workspaceHydratingRef.current) {
@@ -4954,16 +5004,18 @@ export default function MeetingCanvasTab({
     setNodePositions((prev) => {
       const currentStagePositions = prev[stageKey] || {};
       const validNodeIds = new Set(graphBlueprint.nodeDescriptors.map((descriptor) => descriptor.id));
-      const nextStageEntries = Object.entries(currentStagePositions).filter(([nodeId]) => validNodeIds.has(nodeId));
+      const nextStageEntries = Object.entries(currentStagePositions).filter(
+        ([nodeId]) => validNodeIds.has(nodeId) && (stageKey !== "ideation" || nodeId.startsWith("agenda-")),
+      );
 
       if (nextStageEntries.length === Object.keys(currentStagePositions).length) {
         return prev;
       }
 
-      return {
+      return normalizeCanvasNodePositionsForComputedIdeation({
         ...prev,
         [stageKey]: Object.fromEntries(nextStageEntries),
-      };
+      });
     });
   }, [graphBlueprint.layoutSignature, graphBlueprint.nodeDescriptors, stage]);
 
@@ -5763,7 +5815,7 @@ export default function MeetingCanvasTab({
         };
         const nextNodeId = `agenda-${nextGroup.id}`;
         const nextCustomGroupsSnapshot = [nextGroup, ...customGroups];
-        const nextNodePositionsSnapshot: CanvasNodePositionsByStage = {
+        const nextNodePositionsSnapshot: CanvasNodePositionsByStage = normalizeCanvasNodePositionsForComputedIdeation({
           ...nodePositions,
           ideation: {
             ...(nodePositions.ideation || {}),
@@ -5772,7 +5824,7 @@ export default function MeetingCanvasTab({
               y: flowPosition.y,
             },
           },
-        };
+        });
 
         pendingNodePlacementsRef.current[nextNodeId] = {
           x: flowPosition.x,
@@ -5875,10 +5927,6 @@ export default function MeetingCanvasTab({
           : tool === "comment"
             ? "코멘트 내용을 입력해 주세요."
             : "메모 내용을 입력해 주세요.";
-      pendingNodePlacementsRef.current[nextNodeId] = {
-        x: flowPosition.x,
-        y: flowPosition.y,
-      };
       const nextItem: CanvasItemViewModel = {
         id: nextItemId,
         agenda_id: nextAgendaId,
@@ -5896,24 +5944,13 @@ export default function MeetingCanvasTab({
         child_item_ids: [],
         topic_collapsed: tool === "topic" ? false : undefined,
         created_by: "user",
-        manual_position: true,
+        manual_position: false,
         ai_generated: false,
         user_edited: true,
-        x: flowPosition.x,
-        y: flowPosition.y,
         body: draftBody,
       };
       const nextCanvasItemsSnapshot: CanvasItemViewModel[] = [nextItem, ...canvasItems];
-      const nextNodePositionsSnapshot: CanvasNodePositionsByStage = {
-        ...nodePositions,
-        ideation: {
-          ...(nodePositions.ideation || {}),
-          [nextNodeId]: {
-            x: flowPosition.x,
-            y: flowPosition.y,
-          },
-        },
-      };
+      const nextNodePositionsSnapshot = normalizeCanvasNodePositionsForComputedIdeation(nodePositions);
       latestSharedWorkspaceRef.current = {
         ...latestSharedWorkspaceRef.current,
         stage,
@@ -5929,7 +5966,6 @@ export default function MeetingCanvasTab({
       setArmedCanvasTool(null);
       setCanvasPlacementPreview(null);
       setCanvasItems(nextCanvasItemsSnapshot);
-      setNodePositions(nextNodePositionsSnapshot);
       setSelectedCanvasItemId(nextItemId);
       setSelectedNodeId(nextNodeId);
       setEditingCanvasItemId(nextItemId);
@@ -5971,13 +6007,11 @@ export default function MeetingCanvasTab({
         );
         forceBroadcastSharedCanvas({
           canvasItems: nextCanvasItemsSnapshot,
-          nodePositions: nextNodePositionsSnapshot,
         });
         if (meetingId) {
           void saveCanvasWorkspacePatch({
             meeting_id: meetingId,
             canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-            node_positions: nextNodePositionsSnapshot,
             imported_state: persistedSharedImportedState,
           }).catch((error) => {
             console.error("Failed to save shared canvas item placement:", error);
@@ -6059,15 +6093,47 @@ export default function MeetingCanvasTab({
     });
   };
 
+  const setProblemDropHighlight = (target: ProblemSourceDropTarget | null) => {
+    const previousElement = hoveredProblemDropTargetElementRef.current;
+    if (previousElement && previousElement !== target?.element) {
+      previousElement.classList.remove("imms-problem-source-drop-active");
+    }
+
+    if (target?.element) {
+      target.element.classList.add("imms-problem-source-drop-active");
+      hoveredProblemDropTargetElementRef.current = target.element;
+      if (typeof document !== "undefined") {
+        document.body.style.cursor = "copy";
+      }
+      return;
+    }
+
+    hoveredProblemDropTargetElementRef.current = null;
+    if (typeof document !== "undefined") {
+      document.body.style.cursor = "";
+    }
+  };
+
   const onNodeDragStop = (event: React.MouseEvent, node: Node) => {
-    setHoveredProblemDropTargetId("");
+    setProblemDropHighlight(null);
+    const activeAgendaDragPreview = agendaDragPreviewRef.current || agendaDragPreview;
+    const agendaDragSession =
+      stage === "ideation" && node.id.startsWith("agenda-") ? activeAgendaDragPreview : null;
 
     if (!workspaceLoadedRef.current || workspaceHydratingRef.current || applyingRemoteSharedSyncRef.current) {
+      if (agendaDragSession) {
+        agendaDragPreviewRef.current = null;
+        setAgendaDragPreview(null);
+      }
       return;
     }
 
     const currentPosition = nodePositions[stage]?.[node.id];
     if (currentPosition && currentPosition.x === node.position.x && currentPosition.y === node.position.y) {
+      if (agendaDragSession) {
+        agendaDragPreviewRef.current = null;
+        setAgendaDragPreview(null);
+      }
       return;
     }
 
@@ -6088,7 +6154,25 @@ export default function MeetingCanvasTab({
 
     let nextCanvasItemsSnapshot: CanvasItemViewModel[] | null = null;
     let nextProblemGroupsSnapshot: ProblemGroupViewModel[] | null = null;
-    let usesComputedTopicBlockPosition = false;
+    if (stage === "ideation" && node.id.startsWith("agenda-")) {
+      const agendaId = node.id.slice("agenda-".length);
+      const nextStagePositions = {
+        ...(nextPositionsSnapshot.ideation || {}),
+        [`agenda-${agendaId}`]: {
+          x: node.position.x,
+          y: node.position.y,
+        },
+      };
+
+      nextPositionsSnapshot = {
+        ...nextPositionsSnapshot,
+        ideation: nextStagePositions,
+      };
+      agendaDragPreviewRef.current = null;
+      setAgendaDragPreview(null);
+      setActivityMessage("그룹 분류와 하위 콘텐츠 위치를 함께 이동했습니다.");
+    }
+
     if (stage === "ideation" && node.id.startsWith("canvas-item-")) {
       const canvasItemId = node.id.slice("canvas-item-".length);
       const draggedItem = canvasItems.find((item) => item.id === canvasItemId) || null;
@@ -6119,17 +6203,15 @@ export default function MeetingCanvasTab({
         item.id === canvasItemId
           ? (() => {
               const nextParentTopicId = snapTopic ? snapTopic.id : item.parent_topic_id || "";
-              const remainsInTopicBlock = Boolean(nextParentTopicId);
-              usesComputedTopicBlockPosition = remainsInTopicBlock;
 
               return {
                 ...item,
                 parent_topic_id: nextParentTopicId,
                 parent_topic_source: snapTopic ? "user" : item.parent_topic_source || "",
                 parent_topic_locked: snapTopic ? true : Boolean(item.parent_topic_locked),
-                manual_position: remainsInTopicBlock ? false : true,
-                x: remainsInTopicBlock ? item.x : node.position.x,
-                y: remainsInTopicBlock ? item.y : node.position.y,
+                manual_position: false,
+                x: undefined,
+                y: undefined,
               };
             })()
           : snapTopic && item.id === snapTopic.id
@@ -6144,16 +6226,14 @@ export default function MeetingCanvasTab({
               }
           : item,
       );
-      if (usesComputedTopicBlockPosition) {
-        const nextStagePositions = {
-          ...(nextPositionsSnapshot.ideation || {}),
-        };
-        delete nextStagePositions[node.id];
-        nextPositionsSnapshot = {
-          ...nextPositionsSnapshot,
-          ideation: nextStagePositions,
-        };
-      }
+      const nextStagePositions = {
+        ...(nextPositionsSnapshot.ideation || {}),
+      };
+      delete nextStagePositions[node.id];
+      nextPositionsSnapshot = {
+        ...nextPositionsSnapshot,
+        ideation: nextStagePositions,
+      };
       setCanvasItems(nextCanvasItemsSnapshot);
       if (snapTopic) {
         setTopicCollapsedOverrides((current) => {
@@ -6171,7 +6251,7 @@ export default function MeetingCanvasTab({
 
     if (stage === "problem-definition" && node.id.startsWith("problem-discussion-")) {
       const discussionId = node.id.slice("problem-discussion-".length);
-      const sourceDropTarget = findProblemSourceDropTarget(event.clientX, event.clientY);
+      const sourceDropTarget = findProblemSourceDropTarget(event.clientX, event.clientY, node.id);
       if (sourceDropTarget?.groupId && sourceDropTarget.nodeId) {
         let movedDiscussion: ProblemDiscussionViewModel | null = null;
         nextProblemGroupsSnapshot = problemGroups.map((group) => {
@@ -6270,6 +6350,7 @@ export default function MeetingCanvasTab({
       }
     }
 
+    nextPositionsSnapshot = normalizeCanvasNodePositionsForComputedIdeation(nextPositionsSnapshot);
     latestSharedWorkspaceRef.current = {
       ...latestSharedWorkspaceRef.current,
       stage,
@@ -6851,10 +6932,10 @@ export default function MeetingCanvasTab({
     const nextCanvasItemsSnapshot = canvasItems.filter((item) => item.id !== selectedCanvasItem.id);
     const ideationPositions = { ...(nodePositions.ideation || {}) };
     delete ideationPositions[nodeId];
-    const nextNodePositionsSnapshot: CanvasNodePositionsByStage = {
+    const nextNodePositionsSnapshot: CanvasNodePositionsByStage = normalizeCanvasNodePositionsForComputedIdeation({
       ...nodePositions,
       ideation: ideationPositions,
-    };
+    });
     latestSharedWorkspaceRef.current = {
       ...latestSharedWorkspaceRef.current,
       canvasItems: nextCanvasItemsSnapshot,
@@ -7288,17 +7369,27 @@ export default function MeetingCanvasTab({
 
   const onNodeDrag = (event: React.MouseEvent, node: Node) => {
     if (stage !== "problem-definition" || !node.id.startsWith("problem-discussion-")) {
-      if (hoveredProblemDropTargetId) {
-        setHoveredProblemDropTargetId("");
-      }
+      setProblemDropHighlight(null);
       return;
     }
 
-    const dropTarget = findProblemSourceDropTarget(event.clientX, event.clientY);
-    const nextTargetId = dropTarget?.nodeId || "";
-    if (nextTargetId !== hoveredProblemDropTargetId) {
-      setHoveredProblemDropTargetId(nextTargetId);
+    setProblemDropHighlight(findProblemSourceDropTarget(event.clientX, event.clientY, node.id));
+  };
+
+  const onNodeDragStart = (_event: React.MouseEvent, node: Node) => {
+    if (stage !== "ideation" || !node.id.startsWith("agenda-")) {
+      agendaDragPreviewRef.current = null;
+      setAgendaDragPreview(null);
+      return;
     }
+
+    const agendaId = node.id.slice("agenda-".length);
+    const nextPreview = {
+      agendaId,
+      originPosition: nodePositions.ideation?.[node.id] || node.position,
+    };
+    agendaDragPreviewRef.current = nextPreview;
+    setAgendaDragPreview(nextPreview);
   };
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
@@ -8695,6 +8786,7 @@ export default function MeetingCanvasTab({
                   );
                 }}
                 onNodesChange={onNodesChange}
+                onNodeDragStart={onNodeDragStart}
                 onNodeDrag={onNodeDrag}
                 onNodeDragStop={onNodeDragStop}
                 onEdgesChange={onEdgesChange}
