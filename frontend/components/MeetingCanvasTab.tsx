@@ -639,6 +639,19 @@ type ProblemIdeaDropPreviewState = {
   insertIndex: number;
 };
 
+type ProblemIdeaDragPointState = {
+  x: number;
+  y: number;
+};
+
+type ProblemIdeaPointerDragState = {
+  groupId: string;
+  card: ProblemGroupDisplayCard;
+  startX: number;
+  startY: number;
+  active: boolean;
+};
+
 type MeetingCanvasTabProps = {
   userId: string;
   meetingId: string;
@@ -1653,6 +1666,8 @@ function makeProblemGroupNodeLabel(
   problemIdeaDropPreview: ProblemIdeaDropPreviewState | null,
   onSourceNodeSelect: (sourceNodeId: string) => void,
   onProblemIdeaDragStart: (event: React.DragEvent<HTMLDivElement>, card: ProblemGroupDisplayCard) => void,
+  onProblemIdeaDragMove: (event: React.DragEvent<HTMLDivElement>) => void,
+  onProblemIdeaPointerDown: (event: React.PointerEvent<HTMLDivElement>, card: ProblemGroupDisplayCard) => void,
   onProblemIdeaDragOver: (event: React.DragEvent<HTMLDivElement>, card?: ProblemGroupDisplayCard) => void,
   onProblemIdeaDrop: (event: React.DragEvent<HTMLDivElement>) => void,
   onProblemIdeaDragEnd: () => void,
@@ -1700,12 +1715,11 @@ function makeProblemGroupNodeLabel(
         (latest, card, cardIndex) => (card.cardKind === "idea" ? cardIndex : latest),
         -1,
       );
-      visualIndex =
-        previewKind === "summary"
-          ? lastSummaryIndex + 1
-          : lastIdeaIndex >= 0
-            ? lastIdeaIndex + 1
-            : lastSummaryIndex + 1;
+      if (previewKind === "summary") {
+        visualIndex = lastSummaryIndex >= 0 ? lastSummaryIndex + 1 : 0;
+      } else {
+        visualIndex = lastIdeaIndex >= 0 ? lastIdeaIndex + 1 : visibleCards.length;
+      }
     }
     renderItems.splice(visualIndex, 0, {
       placeholder: true,
@@ -1715,10 +1729,21 @@ function makeProblemGroupNodeLabel(
 
   return (
     <div
+      data-problem-group-drop-id={group.group_id}
       className={`min-w-0 rounded-[30px] p-2 transition ${selected ? "ring-2 ring-violet-300" : ""} ${dropTarget ? "ring-2 ring-blue-300 ring-offset-2" : ""}`}
-      onDragOver={onDragOver}
+      onDragOver={(event) => {
+        onProblemIdeaDragOver(event);
+        if (!event.defaultPrevented) {
+          onDragOver(event);
+        }
+      }}
       onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      onDrop={(event) => {
+        onProblemIdeaDrop(event);
+        if (!event.defaultPrevented) {
+          onDrop(event);
+        }
+      }}
     >
       <div className={`rounded-[30px] border bg-gradient-to-br p-6 ${palette.shell}`}>
         <div className="flex items-start justify-between gap-3">
@@ -1751,14 +1776,17 @@ function makeProblemGroupNodeLabel(
               ) : (
               <div
                 key={item.id}
-                draggable={item.draggable}
+                draggable={false}
                 data-problem-source-group-id={group.group_id}
                 data-problem-source-node-id={item.attachable ? item.sourceNodeId : undefined}
                 data-problem-source-node-kind={item.attachable ? item.sourceNodeKind : undefined}
                 data-problem-source-node-label={item.attachable ? item.title : undefined}
                 data-problem-card-kind={item.cardKind}
                 data-problem-card-id={item.ideaId || item.id}
+                data-problem-card-source-node-id={item.sourceNodeId}
                 onDragStart={(event) => onProblemIdeaDragStart(event, item)}
+                onDrag={onProblemIdeaDragMove}
+                onPointerDown={(event) => onProblemIdeaPointerDown(event, item)}
                 onDragOver={(event) => onProblemIdeaDragOver(event, item)}
                 onDrop={onProblemIdeaDrop}
                 onDragEnd={onProblemIdeaDragEnd}
@@ -1773,21 +1801,6 @@ function makeProblemGroupNodeLabel(
                   selectedSourceNodeId === item.sourceNodeId ? "ring-2 ring-slate-900 ring-offset-2" : ""
                 } ${palette.note}`}
               >
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">
-                    {item.sourceNodeKind === "topic" ? "Topic" : item.sourceNodeKind === "idea" ? "Idea" : "Summary"}
-                  </span>
-                  {item.attachable ? (
-                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-slate-500">
-                      의견 연결 가능
-                    </span>
-                  ) : null}
-                  {item.draggable ? (
-                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-violet-600">
-                      이동 가능
-                    </span>
-                  ) : null}
-                </div>
                 <p className="text-[19px] font-semibold leading-7 text-slate-900">
                   {item.title || `아이디어${itemIndex + 1}`}
                 </p>
@@ -2492,6 +2505,7 @@ export default function MeetingCanvasTab({
   const [agendaDragPreview, setAgendaDragPreview] = useState<AgendaDragPreviewState | null>(null);
   const [problemIdeaDrag, setProblemIdeaDrag] = useState<ProblemIdeaDragState | null>(null);
   const [problemIdeaDropPreview, setProblemIdeaDropPreview] = useState<ProblemIdeaDropPreviewState | null>(null);
+  const [problemIdeaDragPoint, setProblemIdeaDragPoint] = useState<ProblemIdeaDragPointState | null>(null);
   const [meetingGoalEditorOpen, setMeetingGoalEditorOpen] = useState(false);
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
@@ -2530,6 +2544,8 @@ export default function MeetingCanvasTab({
   const pendingNodePlacementsRef = useRef<Record<string, { x: number; y: number }>>({});
   const hoveredProblemDropTargetElementRef = useRef<HTMLElement | null>(null);
   const agendaDragPreviewRef = useRef<AgendaDragPreviewState | null>(null);
+  const problemIdeaDragRef = useRef<ProblemIdeaDragState | null>(null);
+  const problemIdeaPointerDragRef = useRef<ProblemIdeaPointerDragState | null>(null);
   const analysisSignatureAtImportRef = useRef("");
   const placementFeedbackTimerRef = useRef<number | null>(null);
   const initialLayoutLogDoneRef = useRef(false);
@@ -2757,8 +2773,11 @@ export default function MeetingCanvasTab({
     setShowTranscriptCollection(false);
     agendaDragPreviewRef.current = null;
     setAgendaDragPreview(null);
+    problemIdeaDragRef.current = null;
+    problemIdeaPointerDragRef.current = null;
     setProblemIdeaDrag(null);
     setProblemIdeaDropPreview(null);
+    setProblemIdeaDragPoint(null);
     setPlacementFeedback(null);
     if (workspaceSaveTimerRef.current) {
       window.clearTimeout(workspaceSaveTimerRef.current);
@@ -3966,6 +3985,161 @@ export default function MeetingCanvasTab({
     [problemGroups, problemIdeaDrag],
   );
 
+  const getProblemIdeaDropPreviewFromPoint = useCallback(
+    (clientX: number, clientY: number): ProblemIdeaDropPreviewState | null => {
+      const activeProblemIdeaDrag = problemIdeaDragRef.current || problemIdeaDrag;
+      if (!activeProblemIdeaDrag || typeof document === "undefined") return null;
+
+      const elementAtPoint = document.elementFromPoint(clientX, clientY);
+      const groupElement = elementAtPoint?.closest("[data-problem-group-drop-id]") as HTMLElement | null;
+      const targetGroupId = groupElement?.dataset.problemGroupDropId || "";
+      if (!targetGroupId || !groupElement) return null;
+
+      const targetGroup = problemGroups.find((group) => group.group_id === targetGroupId);
+      if (!targetGroup) return null;
+
+      const cardElement = elementAtPoint?.closest("[data-problem-card-source-node-id]") as HTMLElement | null;
+      const cardGroupElement = cardElement?.closest("[data-problem-group-drop-id]") as HTMLElement | null;
+      const card =
+        cardElement && cardGroupElement === groupElement
+          ? buildProblemGroupDisplayCards(targetGroup).find(
+              (item) => item.sourceNodeId === cardElement.dataset.problemCardSourceNodeId,
+            )
+          : undefined;
+
+      const visibleTargetCards = buildProblemGroupDisplayCards(targetGroup).filter(
+        (item) =>
+          item.cardKind === activeProblemIdeaDrag.cardKind &&
+          !(
+            activeProblemIdeaDrag.sourceGroupId === targetGroupId &&
+            item.sourceNodeId === activeProblemIdeaDrag.sourceNodeId
+          ),
+      );
+      let insertIndex = visibleTargetCards.length;
+      const cardElements = Array.from(
+        groupElement.querySelectorAll<HTMLElement>("[data-problem-card-source-node-id]"),
+      );
+      const targetCardEntries = visibleTargetCards
+        .map((item) => ({
+          item,
+          element: cardElements.find((candidate) => candidate.dataset.problemCardSourceNodeId === item.sourceNodeId),
+        }))
+        .filter((entry): entry is { item: ProblemGroupDisplayCard; element: HTMLElement } => Boolean(entry.element));
+
+      if (targetCardEntries.length > 0) {
+        const nearest = targetCardEntries.reduce((best, entry) => {
+          const rect = entry.element.getBoundingClientRect();
+          const sameRow = clientY >= rect.top - 12 && clientY <= rect.bottom + 12;
+          const rowPenalty = sameRow ? 0 : Math.abs(clientY - (rect.top + rect.height / 2)) * 2;
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const distance = Math.hypot(clientX - centerX, clientY - centerY) + rowPenalty;
+          return !best || distance < best.distance
+            ? {
+                ...entry,
+                rect,
+                distance,
+              }
+            : best;
+        }, null as null | {
+          item: ProblemGroupDisplayCard;
+          element: HTMLElement;
+          rect: DOMRect;
+          distance: number;
+        });
+
+        if (nearest) {
+          const targetIndex = visibleTargetCards.findIndex((item) => item.sourceNodeId === nearest.item.sourceNodeId);
+          const sameRow = clientY >= nearest.rect.top - 12 && clientY <= nearest.rect.bottom + 12;
+          const insertAfter = sameRow
+            ? clientX > nearest.rect.left + nearest.rect.width / 2
+            : clientY > nearest.rect.top + nearest.rect.height / 2;
+          insertIndex = targetIndex + (insertAfter ? 1 : 0);
+        }
+      } else if (card && card.cardKind !== activeProblemIdeaDrag.cardKind) {
+        insertIndex = activeProblemIdeaDrag.cardKind === "idea" && card.cardKind === "summary" ? 0 : visibleTargetCards.length;
+      } else if (card) {
+        const targetIndex = visibleTargetCards.findIndex((item) => item.sourceNodeId === card.sourceNodeId);
+        if (targetIndex >= 0 && cardElement) {
+          const rect = cardElement.getBoundingClientRect();
+          const insertAfter =
+            clientY > rect.top + rect.height / 2 ||
+            clientX > rect.left + rect.width / 2;
+          insertIndex = targetIndex + (insertAfter ? 1 : 0);
+        }
+      }
+
+      return {
+        targetGroupId,
+        cardKind: activeProblemIdeaDrag.cardKind,
+        insertIndex,
+      };
+    },
+    [problemGroups, problemIdeaDrag],
+  );
+
+  const updateProblemIdeaDragPoint = useCallback((clientX: number, clientY: number) => {
+    if (!clientX && !clientY) return;
+    setProblemIdeaDragPoint((current) =>
+      current?.x === clientX && current.y === clientY
+        ? current
+        : {
+            x: clientX,
+            y: clientY,
+          },
+    );
+  }, []);
+
+  const beginProblemCardDrag = useCallback(
+    (groupId: string, card: ProblemGroupDisplayCard, clientX: number, clientY: number) => {
+      const nextDrag = {
+        sourceGroupId: groupId,
+        sourceNodeId: card.sourceNodeId,
+        sourceNodeKind: card.sourceNodeKind,
+        cardKind: card.cardKind,
+        sourceIndex: card.sourceIndex,
+        title: card.title,
+        ideaId: card.ideaId,
+        summaryText: card.summaryText,
+      };
+      problemIdeaDragRef.current = nextDrag;
+      setProblemIdeaDrag(nextDrag);
+      setProblemIdeaDropPreview({
+        targetGroupId: groupId,
+        cardKind: card.cardKind,
+        insertIndex: card.sourceIndex,
+      });
+      updateProblemIdeaDragPoint(clientX, clientY);
+    },
+    [updateProblemIdeaDragPoint],
+  );
+
+  const handleProblemIdeaPointerDown = useCallback(
+    (groupId: string, event: React.PointerEvent<HTMLDivElement>, card: ProblemGroupDisplayCard) => {
+      if (!card.draggable || event.button !== 0 || (card.cardKind === "idea" && !card.ideaId)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      problemIdeaPointerDragRef.current = {
+        groupId,
+        card,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+      };
+    },
+    [],
+  );
+
+  const handleProblemIdeaDragMove = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      updateProblemIdeaDragPoint(event.clientX, event.clientY);
+    },
+    [updateProblemIdeaDragPoint],
+  );
+
   const handleProblemIdeaDragStart = useCallback(
     (groupId: string, event: React.DragEvent<HTMLDivElement>, card: ProblemGroupDisplayCard) => {
       if (!card.draggable || (card.cardKind === "idea" && !card.ideaId)) {
@@ -3979,23 +4153,19 @@ export default function MeetingCanvasTab({
       if (card.ideaId) {
         event.dataTransfer.setData("application/x-imms-problem-idea", card.ideaId);
       }
-      setProblemIdeaDrag({
-        sourceGroupId: groupId,
-        sourceNodeId: card.sourceNodeId,
-        sourceNodeKind: card.sourceNodeKind,
-        cardKind: card.cardKind,
-        sourceIndex: card.sourceIndex,
-        title: card.title,
-        ideaId: card.ideaId,
-        summaryText: card.summaryText,
-      });
-      setProblemIdeaDropPreview({
-        targetGroupId: groupId,
-        cardKind: card.cardKind,
-        insertIndex: card.sourceIndex,
-      });
+      const dragImage = document.createElement("div");
+      dragImage.style.position = "fixed";
+      dragImage.style.left = "-9999px";
+      dragImage.style.top = "-9999px";
+      dragImage.style.width = "1px";
+      dragImage.style.height = "1px";
+      dragImage.style.opacity = "0";
+      document.body.appendChild(dragImage);
+      event.dataTransfer.setDragImage(dragImage, 0, 0);
+      window.setTimeout(() => dragImage.remove(), 0);
+      beginProblemCardDrag(groupId, card, event.clientX, event.clientY);
     },
-    [],
+    [beginProblemCardDrag],
   );
 
   const handleProblemIdeaDragOver = useCallback(
@@ -4013,6 +4183,7 @@ export default function MeetingCanvasTab({
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = "move";
+      updateProblemIdeaDragPoint(event.clientX, event.clientY);
       const insertIndex = getProblemIdeaInsertIndex(groupId, card, event);
       setProblemIdeaDropPreview((current) =>
         current?.targetGroupId === groupId &&
@@ -4026,25 +4197,38 @@ export default function MeetingCanvasTab({
             },
       );
     },
-    [getProblemIdeaInsertIndex, problemIdeaDrag],
+    [getProblemIdeaInsertIndex, problemIdeaDrag, updateProblemIdeaDragPoint],
   );
 
   const handleProblemIdeaDragEnd = useCallback(() => {
+    problemIdeaPointerDragRef.current = null;
     setProblemIdeaDrag(null);
     setProblemIdeaDropPreview(null);
+    setProblemIdeaDragPoint(null);
   }, []);
 
   const handleProblemIdeaDrop = useCallback(
-    (groupId: string, event: React.DragEvent<HTMLDivElement>) => {
+    (
+      groupId: string,
+      event: React.DragEvent<HTMLDivElement>,
+      dropPreviewOverride?: ProblemIdeaDropPreviewState | null,
+    ) => {
+      const activeProblemIdeaDrag = problemIdeaDragRef.current || problemIdeaDrag;
       const draggedSourceNodeId =
-        problemIdeaDrag?.sourceNodeId || event.dataTransfer.getData("application/x-imms-problem-card");
-      if (!draggedSourceNodeId || !problemIdeaDrag) return;
+        activeProblemIdeaDrag?.sourceNodeId || event.dataTransfer.getData("application/x-imms-problem-card");
+      if (!draggedSourceNodeId || !activeProblemIdeaDrag) return;
 
       event.preventDefault();
       event.stopPropagation();
 
-      const targetGroupId = problemIdeaDropPreview?.targetGroupId || groupId;
-      const sourceGroup = problemGroups.find((group) => group.group_id === problemIdeaDrag.sourceGroupId);
+      const targetGroupId = groupId;
+      const effectiveDropPreview = dropPreviewOverride ?? problemIdeaDropPreview;
+      const previewInsertIndex =
+        effectiveDropPreview?.targetGroupId === targetGroupId &&
+        effectiveDropPreview.cardKind === activeProblemIdeaDrag.cardKind
+          ? effectiveDropPreview.insertIndex
+          : undefined;
+      const sourceGroup = problemGroups.find((group) => group.group_id === activeProblemIdeaDrag.sourceGroupId);
       const targetGroup = problemGroups.find((group) => group.group_id === targetGroupId);
       if (!sourceGroup || !targetGroup) {
         handleProblemIdeaDragEnd();
@@ -4056,9 +4240,9 @@ export default function MeetingCanvasTab({
       let nextSelectedSourceNodeId = draggedSourceNodeId;
       let activityMessage = "";
 
-      if (problemIdeaDrag.cardKind === "idea") {
+      if (activeProblemIdeaDrag.cardKind === "idea") {
         const draggedIdeaId =
-          problemIdeaDrag.ideaId || event.dataTransfer.getData("application/x-imms-problem-idea");
+          activeProblemIdeaDrag.ideaId || event.dataTransfer.getData("application/x-imms-problem-idea");
         const movedIdea = sourceGroup.ideas.find((idea) => idea.id === draggedIdeaId);
         if (!draggedIdeaId || !movedIdea) {
           handleProblemIdeaDragEnd();
@@ -4070,7 +4254,7 @@ export default function MeetingCanvasTab({
           : targetGroup.ideas;
         const safeInsertIndex = Math.max(
           0,
-          Math.min(problemIdeaDropPreview?.insertIndex ?? remainingTargetIdeas.length, remainingTargetIdeas.length),
+          Math.min(previewInsertIndex ?? remainingTargetIdeas.length, remainingTargetIdeas.length),
         );
         const nextTargetIdeas = [
           ...remainingTargetIdeas.slice(0, safeInsertIndex),
@@ -4117,17 +4301,17 @@ export default function MeetingCanvasTab({
           : `"${movedIdea.title || "아이디어"}"를 "${targetGroup.topic}" 그룹으로 이동했습니다.`;
       } else {
         const sourceEntries = buildProblemSummaryEntries(sourceGroup);
-        const movedEntry = sourceEntries[problemIdeaDrag.sourceIndex];
+        const movedEntry = sourceEntries[activeProblemIdeaDrag.sourceIndex];
         if (!movedEntry) {
           handleProblemIdeaDragEnd();
           return;
         }
 
         if (sameGroup) {
-          const remainingEntries = sourceEntries.filter((_, index) => index !== problemIdeaDrag.sourceIndex);
+          const remainingEntries = sourceEntries.filter((_, index) => index !== activeProblemIdeaDrag.sourceIndex);
           const safeInsertIndex = Math.max(
             0,
-            Math.min(problemIdeaDropPreview?.insertIndex ?? remainingEntries.length, remainingEntries.length),
+            Math.min(previewInsertIndex ?? remainingEntries.length, remainingEntries.length),
           );
           const nextEntries = [
             ...remainingEntries.slice(0, safeInsertIndex),
@@ -4149,13 +4333,13 @@ export default function MeetingCanvasTab({
               : group,
           );
           nextSelectedSourceNodeId = makeProblemSummarySourceNodeId(targetGroup.group_id, safeInsertIndex);
-          activityMessage = `"${problemIdeaDrag.title || "요약"}" 순서를 변경했습니다.`;
+          activityMessage = `"${activeProblemIdeaDrag.title || "요약"}" 순서를 변경했습니다.`;
         } else {
-          const sourceRemainingEntries = sourceEntries.filter((_, index) => index !== problemIdeaDrag.sourceIndex);
+          const sourceRemainingEntries = sourceEntries.filter((_, index) => index !== activeProblemIdeaDrag.sourceIndex);
           const targetEntries = buildProblemSummaryEntries(targetGroup);
           const safeInsertIndex = Math.max(
             0,
-            Math.min(problemIdeaDropPreview?.insertIndex ?? targetEntries.length, targetEntries.length),
+            Math.min(previewInsertIndex ?? targetEntries.length, targetEntries.length),
           );
           const nextTargetEntries = [
             ...targetEntries.slice(0, safeInsertIndex),
@@ -4209,7 +4393,7 @@ export default function MeetingCanvasTab({
             return group;
           });
           nextSelectedSourceNodeId = movedTargetNodeId;
-          activityMessage = `"${problemIdeaDrag.title || "요약"}"를 "${targetGroup.topic}" 그룹으로 이동했습니다.`;
+          activityMessage = `"${activeProblemIdeaDrag.title || "요약"}"를 "${targetGroup.topic}" 그룹으로 이동했습니다.`;
         }
       }
 
@@ -4665,6 +4849,111 @@ export default function MeetingCanvasTab({
       transcripts,
     ],
   );
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const pointerDrag = problemIdeaPointerDragRef.current;
+      if (!pointerDrag) return;
+
+      const deltaX = event.clientX - pointerDrag.startX;
+      const deltaY = event.clientY - pointerDrag.startY;
+      if (!pointerDrag.active && Math.hypot(deltaX, deltaY) < 4) {
+        return;
+      }
+
+      event.preventDefault();
+      if (!pointerDrag.active) {
+        pointerDrag.active = true;
+        beginProblemCardDrag(pointerDrag.groupId, pointerDrag.card, event.clientX, event.clientY);
+      }
+
+      updateProblemIdeaDragPoint(event.clientX, event.clientY);
+      const preview = getProblemIdeaDropPreviewFromPoint(event.clientX, event.clientY);
+      setProblemIdeaDropPreview((current) =>
+        current?.targetGroupId === preview?.targetGroupId &&
+        current?.cardKind === preview?.cardKind &&
+        current?.insertIndex === preview?.insertIndex
+          ? current
+          : preview,
+      );
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      const pointerDrag = problemIdeaPointerDragRef.current;
+      if (!pointerDrag) return;
+
+      problemIdeaPointerDragRef.current = null;
+      if (!pointerDrag.active) {
+        return;
+      }
+
+      event.preventDefault();
+      const preview = getProblemIdeaDropPreviewFromPoint(event.clientX, event.clientY);
+      if (!preview) {
+        problemIdeaDragRef.current = null;
+        setProblemIdeaDrag(null);
+        setProblemIdeaDropPreview(null);
+        setProblemIdeaDragPoint(null);
+        setActivityMessage("문제정의 그룹 밖에 놓아서 이동을 취소했습니다.");
+        return;
+      }
+
+      setProblemIdeaDropPreview(preview);
+      handleProblemIdeaDrop(preview.targetGroupId, {
+        preventDefault() {},
+        stopPropagation() {},
+        dataTransfer: {
+          getData(type: string) {
+            if (type === "application/x-imms-problem-idea") return pointerDrag.card.ideaId || "";
+            if (type === "application/x-imms-problem-card") return pointerDrag.card.sourceNodeId;
+            return "";
+          },
+        },
+      } as unknown as React.DragEvent<HTMLDivElement>, preview);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove, true);
+    window.addEventListener("pointerup", handlePointerUp, true);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove, true);
+      window.removeEventListener("pointerup", handlePointerUp, true);
+    };
+  }, [
+    beginProblemCardDrag,
+    getProblemIdeaDropPreviewFromPoint,
+    handleProblemIdeaDrop,
+    updateProblemIdeaDragPoint,
+  ]);
+
+  useEffect(() => {
+    if (!problemIdeaDrag) return;
+
+    const handleWindowDragOver = (event: DragEvent) => {
+      updateProblemIdeaDragPoint(event.clientX, event.clientY);
+    };
+    const handleWindowDrop = (event: DragEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("[data-problem-group-drop-id]")) {
+        return;
+      }
+
+      event.preventDefault();
+      problemIdeaDragRef.current = null;
+      setProblemIdeaDrag(null);
+      setProblemIdeaDropPreview(null);
+      setProblemIdeaDragPoint(null);
+      setActivityMessage("문제정의 그룹 밖에 놓아서 이동을 취소했습니다.");
+    };
+
+    window.addEventListener("dragover", handleWindowDragOver);
+    window.addEventListener("drop", handleWindowDrop);
+
+    return () => {
+      window.removeEventListener("dragover", handleWindowDragOver);
+      window.removeEventListener("drop", handleWindowDrop);
+    };
+  }, [problemIdeaDrag, updateProblemIdeaDragPoint]);
 
   useEffect(() => {
     if (stage !== "problem-definition" || problemGroups.length === 0) {
@@ -5136,6 +5425,8 @@ export default function MeetingCanvasTab({
                   setLeftPanelTab("agenda-list");
                 },
                 (event, card) => handleProblemIdeaDragStart(group.group_id, event, card),
+                handleProblemIdeaDragMove,
+                (event, card) => handleProblemIdeaPointerDown(group.group_id, event, card),
                 (event, card) => handleProblemIdeaDragOver(group.group_id, event, card),
                 (event) => handleProblemIdeaDrop(group.group_id, event),
                 handleProblemIdeaDragEnd,
@@ -5566,6 +5857,8 @@ export default function MeetingCanvasTab({
     handleToggleTopicCollapsed,
     handleAttachPersonalNoteToProblemGroup,
     handleProblemIdeaDragEnd,
+    handleProblemIdeaDragMove,
+    handleProblemIdeaPointerDown,
     handleProblemIdeaDragOver,
     handleProblemIdeaDragStart,
     handleProblemIdeaDrop,
@@ -9664,6 +9957,28 @@ export default function MeetingCanvasTab({
                     클릭하면 이 위치에 공용 아이템이 생성됩니다.
                   </p>
                 </div>
+              </div>
+            ) : null}
+
+            {problemIdeaDrag && problemIdeaDragPoint ? (
+              <div
+                className="pointer-events-none fixed z-[80] w-[260px] -translate-x-1/2 -translate-y-1/2 rounded-[16px] border border-violet-200 bg-white/95 px-4 py-3 shadow-[0_18px_42px_rgba(15,23,42,0.20)] backdrop-blur"
+                style={{
+                  left: problemIdeaDragPoint.x,
+                  top: problemIdeaDragPoint.y,
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700">
+                    {problemIdeaDrag.cardKind === "summary" ? "요약/토픽" : "아이디어"}
+                  </span>
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+                    이동 중
+                  </span>
+                </div>
+                <p className="mt-2 line-clamp-2 text-sm font-semibold leading-5 text-slate-900">
+                  {problemIdeaDrag.title || "이동 중인 카드"}
+                </p>
               </div>
             ) : null}
 
