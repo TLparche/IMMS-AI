@@ -70,7 +70,7 @@ export type MeetingAgenda = {
 
 type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
-type CanvasTool = ComposerTool | "group";
+type CanvasTool = ComposerTool | "group" | "problem-idea";
 type LeftPanelTab = "detail" | "agenda-list";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
@@ -699,8 +699,13 @@ function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
 }
 
+function isComposerTool(tool: CanvasTool): tool is ComposerTool {
+  return tool === "note" || tool === "comment" || tool === "topic";
+}
+
 function toolLabel(tool: CanvasTool, stage?: CanvasStage) {
-  if (tool === "note") return "추가";
+  if (tool === "note") return stage === "problem-definition" ? "의견추가" : "추가";
+  if (tool === "problem-idea") return "아이디어 추가";
   if (tool === "comment") return "댓글";
   if (tool === "group") return stage === "problem-definition" ? "문제정의 그룹 추가" : "그룹";
   return "주제";
@@ -709,6 +714,7 @@ function toolLabel(tool: CanvasTool, stage?: CanvasStage) {
 function toolPreviewHint(tool: CanvasTool, stage?: CanvasStage) {
   if (stage === "problem-definition") {
     if (tool === "group") return "새 문제정의 그룹을 만들 위치";
+    if (tool === "problem-idea") return "문제정의 그룹에 아이디어를 추가할 위치";
     if (tool === "comment") return "문제정의 댓글을 남길 위치";
     return "문제 의견을 추가할 위치";
   }
@@ -721,6 +727,7 @@ function toolPreviewHint(tool: CanvasTool, stage?: CanvasStage) {
 function toolPreviewTone(tool: CanvasTool, stage?: CanvasStage) {
   if (stage === "problem-definition") {
     if (tool === "group") return "border-violet-200 bg-violet-50/92 text-violet-700";
+    if (tool === "problem-idea") return "border-fuchsia-200 bg-fuchsia-50/92 text-fuchsia-700";
     if (tool === "comment") return "border-sky-200 bg-sky-50/92 text-sky-700";
     return "border-amber-200 bg-amber-50/92 text-amber-700";
   }
@@ -6612,7 +6619,7 @@ export default function MeetingCanvasTab({
   const visibleCanvasTools = useMemo<CanvasTool[]>(
     () =>
       stage === "problem-definition"
-        ? ["note", "comment", "group"]
+        ? ["note", "problem-idea", "comment", "group"]
         : ["note", "comment", "topic", "group"],
     [stage],
   );
@@ -6622,7 +6629,7 @@ export default function MeetingCanvasTab({
       setActivityMessage("현재 단계에서는 이 도구를 사용할 수 없습니다.");
       return;
     }
-    if (tool !== "group") {
+    if (isComposerTool(tool)) {
       setComposerTool(tool);
     }
     const isDisarming = armedCanvasTool === tool;
@@ -6642,6 +6649,8 @@ export default function MeetingCanvasTab({
         ? "보드 클릭 도구를 해제했습니다."
         : stage === "problem-definition" && tool === "group"
           ? "문제정의 그룹 도구를 선택했습니다. 보드를 클릭하면 새 문제정의 그룹이 생성됩니다."
+          : stage === "problem-definition" && tool === "problem-idea"
+            ? "아이디어 추가 도구를 선택했습니다. 문제정의 그룹을 클릭하면 아이디어 카드가 추가됩니다."
           : stage === "ideation" && tool === "group"
             ? "그룹 도구를 선택했습니다. 보드를 클릭하면 프로젝트 그룹 분류가 생성됩니다."
             : stage === "problem-definition"
@@ -6737,6 +6746,8 @@ export default function MeetingCanvasTab({
           problemGroups[0]?.group_id ||
           "";
         let nextSelectedNodeId = "";
+        let nextSelectedProblemSourceNodeId = "";
+        let nextLeftPanelTab: LeftPanelTab = "detail";
 
         if (tool === "group") {
           const groupId = `user-problem-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
@@ -6759,6 +6770,49 @@ export default function MeetingCanvasTab({
           setProblemGroupDraftInsight("");
           setProblemGroupDraftConclusion(nextGroup.conclusion);
           setActivityMessage("새 문제정의 그룹을 추가했습니다. 다른 의견 노드를 드래그해서 편입할 수 있습니다.");
+        } else if (tool === "problem-idea") {
+          let workingGroups = problemGroups;
+          if (!nextSelectedGroupId) {
+            const groupId = `user-problem-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+            const nextGroup = makeUserProblemGroup(groupId);
+            workingGroups = [nextGroup, ...problemGroups];
+            nextSelectedGroupId = groupId;
+            nextNodePositionsSnapshot = {
+              ...nodePositions,
+              "problem-definition": {
+                ...(nodePositions["problem-definition"] || {}),
+                [`problem-${groupId}`]: {
+                  x: Math.max(80, flowPosition.x - 560),
+                  y: flowPosition.y,
+                },
+              },
+            };
+          }
+
+          const targetGroup = workingGroups.find((group) => group.group_id === nextSelectedGroupId);
+          const ideaId = `user-problem-idea-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+          const nextIdea = {
+            id: ideaId,
+            kind: "idea",
+            title: `아이디어 ${(targetGroup?.ideas.length || 0) + 1}`,
+            body: "문제정의 그룹에 추가할 아이디어를 입력해 주세요.",
+          };
+
+          nextProblemGroupsSnapshot = workingGroups.map((group) =>
+            group.group_id === nextSelectedGroupId
+              ? {
+                  ...group,
+                  ideas: [
+                    ...(group.ideas || []),
+                    nextIdea,
+                  ],
+                }
+              : group,
+          );
+          nextSelectedNodeId = `problem-${nextSelectedGroupId}`;
+          nextSelectedProblemSourceNodeId = ideaId;
+          nextLeftPanelTab = "agenda-list";
+          setActivityMessage("아이디어 카드를 문제정의 그룹에 추가했습니다.");
         } else {
           let workingGroups = problemGroups;
           if (!nextSelectedGroupId) {
@@ -6837,11 +6891,11 @@ export default function MeetingCanvasTab({
         setProblemGroups(nextProblemGroupsSnapshot);
         setNodePositions(nextNodePositionsSnapshot);
         setSelectedProblemGroupId(nextSelectedGroupId);
-        setSelectedProblemSourceNodeId("");
+        setSelectedProblemSourceNodeId(nextSelectedProblemSourceNodeId);
         setSelectedCanvasItemId("");
         setSelectedSolutionTopicId("");
         setSelectedNodeId(nextSelectedNodeId);
-        setLeftPanelTab("detail");
+        setLeftPanelTab(nextLeftPanelTab);
         setPlacementFeedback({
           id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
           x: uiX,
@@ -7004,6 +7058,11 @@ export default function MeetingCanvasTab({
         } catch (error) {
           console.error("Failed to confirm project group placement:", error);
         }
+        return;
+      }
+
+      if (!isComposerTool(tool)) {
+        setActivityMessage("현재 단계에서는 이 도구를 사용할 수 없습니다.");
         return;
       }
 
