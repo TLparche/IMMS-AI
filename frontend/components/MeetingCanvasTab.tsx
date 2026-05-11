@@ -663,21 +663,31 @@ function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
 }
 
-function toolLabel(tool: CanvasTool) {
+function toolLabel(tool: CanvasTool, stage?: CanvasStage) {
   if (tool === "note") return "추가";
   if (tool === "comment") return "댓글";
-  if (tool === "group") return "그룹";
+  if (tool === "group") return stage === "problem-definition" ? "문제정의 그룹 추가" : "그룹";
   return "주제";
 }
 
-function toolPreviewHint(tool: CanvasTool) {
+function toolPreviewHint(tool: CanvasTool, stage?: CanvasStage) {
+  if (stage === "problem-definition") {
+    if (tool === "group") return "새 문제정의 그룹을 만들 위치";
+    if (tool === "comment") return "문제정의 댓글을 남길 위치";
+    return "문제 의견을 추가할 위치";
+  }
   if (tool === "group") return "프로젝트 그룹을 만들 위치";
   if (tool === "topic") return "새 주제를 만들 위치";
   if (tool === "comment") return "코멘트를 남길 위치";
   return "메모를 붙일 위치";
 }
 
-function toolPreviewTone(tool: CanvasTool) {
+function toolPreviewTone(tool: CanvasTool, stage?: CanvasStage) {
+  if (stage === "problem-definition") {
+    if (tool === "group") return "border-violet-200 bg-violet-50/92 text-violet-700";
+    if (tool === "comment") return "border-sky-200 bg-sky-50/92 text-sky-700";
+    return "border-amber-200 bg-amber-50/92 text-amber-700";
+  }
   if (tool === "group") return "border-emerald-200 bg-emerald-50/92 text-emerald-700";
   if (tool === "topic") return "border-fuchsia-200 bg-fuchsia-50/92 text-fuchsia-700";
   if (tool === "comment") return "border-sky-200 bg-sky-50/92 text-sky-700";
@@ -5727,9 +5737,18 @@ export default function MeetingCanvasTab({
     setActivityMessage("개인 메모에 저장했습니다. 이후 그룹 보드로 드래그 편입하는 흐름을 붙일 수 있습니다.");
   };
 
+  const canUseCanvasToolbar = stage === "ideation" || stage === "problem-definition";
+  const visibleCanvasTools = useMemo<CanvasTool[]>(
+    () =>
+      stage === "problem-definition"
+        ? ["note", "comment", "group"]
+        : ["note", "comment", "topic", "group"],
+    [stage],
+  );
+
   const armCanvasTool = (tool: CanvasTool) => {
-    if (stage !== "ideation") {
-      setActivityMessage("도구 아이템은 아이디어 단계에서만 생성할 수 있습니다.");
+    if (!canUseCanvasToolbar || !visibleCanvasTools.includes(tool)) {
+      setActivityMessage("현재 단계에서는 이 도구를 사용할 수 없습니다.");
       return;
     }
     if (tool !== "group") {
@@ -5742,29 +5761,34 @@ export default function MeetingCanvasTab({
         ? null
         : {
             ...prev,
-            label: toolLabel(tool),
-            hint: toolPreviewHint(tool),
-            tone: toolPreviewTone(tool),
+            label: toolLabel(tool, stage),
+            hint: toolPreviewHint(tool, stage),
+            tone: toolPreviewTone(tool, stage),
           },
     );
     setActivityMessage(
       isDisarming
         ? "보드 클릭 도구를 해제했습니다."
-        : tool === "group"
-          ? "그룹 도구를 선택했습니다. 보드를 클릭하면 프로젝트 그룹 분류가 생성됩니다."
-          : `${toolLabel(tool)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
+        : stage === "problem-definition" && tool === "group"
+          ? "문제정의 그룹 도구를 선택했습니다. 보드를 클릭하면 새 문제정의 그룹이 생성됩니다."
+          : stage === "ideation" && tool === "group"
+            ? "그룹 도구를 선택했습니다. 보드를 클릭하면 프로젝트 그룹 분류가 생성됩니다."
+            : stage === "problem-definition"
+              ? `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 문제정의 의견 노드가 생성됩니다.`
+              : `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
     );
   };
 
   useEffect(() => {
-    if (stage !== "ideation" || !armedCanvasTool) {
+    if (!canUseCanvasToolbar || !armedCanvasTool || !visibleCanvasTools.includes(armedCanvasTool)) {
+      setArmedCanvasTool(null);
       setCanvasPlacementPreview(null);
     }
-  }, [armedCanvasTool, stage]);
+  }, [armedCanvasTool, canUseCanvasToolbar, visibleCanvasTools]);
 
   const updateCanvasPlacementPreview = useCallback(
     (clientX: number, clientY: number) => {
-      if (stage !== "ideation" || !armedCanvasTool || !canvasSurfaceRef.current) {
+      if (!canUseCanvasToolbar || !armedCanvasTool || !visibleCanvasTools.includes(armedCanvasTool) || !canvasSurfaceRef.current) {
         setCanvasPlacementPreview(null);
         return;
       }
@@ -5778,12 +5802,12 @@ export default function MeetingCanvasTab({
       setCanvasPlacementPreview({
         x,
         y,
-        label: toolLabel(armedCanvasTool),
-        hint: toolPreviewHint(armedCanvasTool),
-        tone: toolPreviewTone(armedCanvasTool),
+        label: toolLabel(armedCanvasTool, stage),
+        hint: toolPreviewHint(armedCanvasTool, stage),
+        tone: toolPreviewTone(armedCanvasTool, stage),
       });
     },
-    [armedCanvasTool, stage],
+    [armedCanvasTool, canUseCanvasToolbar, stage, visibleCanvasTools],
   );
 
   const clearCanvasPlacementPreview = useCallback(() => {
@@ -5800,6 +5824,201 @@ export default function MeetingCanvasTab({
       const uiX = Math.max(0, Math.min(clientX - canvasRect.left, canvasRect.width));
       const uiY = Math.max(0, Math.min(clientY - canvasRect.top, canvasRect.height));
       const flowPosition = flowRef.current.screenToFlowPosition({ x: clientX, y: clientY });
+
+      if (stage === "problem-definition") {
+        const now = new Date().toISOString();
+        const makeUserProblemGroup = (groupId: string): ProblemGroupViewModel => ({
+          group_id: groupId,
+          topic: `문제정의 그룹 ${problemGroups.length + 1}`,
+          insight_lens: "",
+          insight_user_edited: false,
+          keywords: [],
+          agenda_ids: [],
+          agenda_titles: [],
+          ideas: [],
+          discussion_items: [],
+          source_summary_items: [],
+          conclusion: "직접 추가한 문제정의 그룹입니다. 관련 의견을 드래그해서 편입해 주세요.",
+          conclusion_user_edited: false,
+          status: "draft",
+          source_signature: `user:${groupId}`,
+          source_agenda_signatures: {},
+        });
+
+        let nextProblemGroupsSnapshot: ProblemGroupViewModel[] = problemGroups;
+        let nextNodePositionsSnapshot: CanvasNodePositionsByStage = nodePositions;
+        const clickedProblemGroupId =
+          pointId?.startsWith("problem-") && !pointId.startsWith("problem-discussion-")
+            ? pointId.slice("problem-".length)
+            : "";
+        const clickedDiscussionGroupId =
+          pointId?.startsWith("problem-discussion-")
+            ? problemGroups.find((group) =>
+                (group.discussion_items || []).some(
+                  (item) => `problem-discussion-${item.id}` === pointId,
+                ),
+              )?.group_id || ""
+            : "";
+        let nextSelectedGroupId =
+          clickedProblemGroupId ||
+          clickedDiscussionGroupId ||
+          selectedProblemGroupId ||
+          problemGroups[0]?.group_id ||
+          "";
+        let nextSelectedNodeId = "";
+
+        if (tool === "group") {
+          const groupId = `user-problem-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+          const nextGroup = makeUserProblemGroup(groupId);
+          nextProblemGroupsSnapshot = [nextGroup, ...problemGroups];
+          nextNodePositionsSnapshot = {
+            ...nodePositions,
+            "problem-definition": {
+              ...(nodePositions["problem-definition"] || {}),
+              [`problem-${groupId}`]: {
+                x: flowPosition.x,
+                y: flowPosition.y,
+              },
+            },
+          };
+          nextSelectedGroupId = groupId;
+          nextSelectedNodeId = `problem-${groupId}`;
+          setEditingProblemGroupId(groupId);
+          setProblemGroupDraftTopic(nextGroup.topic);
+          setProblemGroupDraftInsight("");
+          setProblemGroupDraftConclusion(nextGroup.conclusion);
+          setActivityMessage("새 문제정의 그룹을 추가했습니다. 다른 의견 노드를 드래그해서 편입할 수 있습니다.");
+        } else {
+          let workingGroups = problemGroups;
+          if (!nextSelectedGroupId) {
+            const groupId = `user-problem-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+            const nextGroup = makeUserProblemGroup(groupId);
+            workingGroups = [nextGroup, ...problemGroups];
+            nextSelectedGroupId = groupId;
+            nextNodePositionsSnapshot = {
+              ...nodePositions,
+              "problem-definition": {
+                ...(nodePositions["problem-definition"] || {}),
+                [`problem-${groupId}`]: {
+                  x: Math.max(80, flowPosition.x - 560),
+                  y: flowPosition.y,
+                },
+              },
+            };
+          }
+
+          const discussionId = `user-problem-note-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+          const nextDiscussion: ProblemDiscussionViewModel = {
+            id: discussionId,
+            parent_group_id: nextSelectedGroupId,
+            title: tool === "comment" ? "댓글" : "문제 의견",
+            body:
+              tool === "comment"
+                ? "문제정의 단계에서 남길 댓글을 입력해 주세요."
+                : "문제정의에 반영할 의견을 입력해 주세요.",
+            keywords: [],
+            key_evidence: [],
+            refined_utterances: [],
+            evidence_utterance_ids: [],
+            ignored_utterance_ids: [],
+            ai_pending: false,
+            ai_generated: false,
+            user_edited: true,
+            created_by: "user",
+            created_at: now,
+          };
+
+          nextProblemGroupsSnapshot = workingGroups.map((group) =>
+            group.group_id === nextSelectedGroupId
+              ? {
+                  ...group,
+                  discussion_items: [
+                    ...(group.discussion_items || []),
+                    nextDiscussion,
+                  ],
+                }
+              : group,
+          );
+          nextNodePositionsSnapshot = {
+            ...nextNodePositionsSnapshot,
+            "problem-definition": {
+              ...(nextNodePositionsSnapshot["problem-definition"] || {}),
+              [`problem-discussion-${discussionId}`]: {
+                x: flowPosition.x,
+                y: flowPosition.y,
+              },
+            },
+          };
+          nextSelectedNodeId = `problem-discussion-${discussionId}`;
+          setActivityMessage(`${toolLabel(tool, stage)} 노드를 문제정의 단계에 추가했습니다.`);
+        }
+
+        latestSharedWorkspaceRef.current = {
+          ...latestSharedWorkspaceRef.current,
+          stage,
+          problemGroups: nextProblemGroupsSnapshot,
+          nodePositions: nextNodePositionsSnapshot,
+          importedState: persistedSharedImportedState,
+        };
+
+        setArmedCanvasTool(null);
+        setCanvasPlacementPreview(null);
+        setProblemGroups(nextProblemGroupsSnapshot);
+        setNodePositions(nextNodePositionsSnapshot);
+        setSelectedProblemGroupId(nextSelectedGroupId);
+        setSelectedProblemSourceNodeId("");
+        setSelectedCanvasItemId("");
+        setSelectedSolutionTopicId("");
+        setSelectedNodeId(nextSelectedNodeId);
+        setLeftPanelTab("detail");
+        setPlacementFeedback({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          x: uiX,
+          y: uiY,
+          label: toolLabel(tool, stage),
+        });
+        if (placementFeedbackTimerRef.current) {
+          window.clearTimeout(placementFeedbackTimerRef.current);
+        }
+        placementFeedbackTimerRef.current = window.setTimeout(() => {
+          setPlacementFeedback(null);
+          placementFeedbackTimerRef.current = null;
+        }, 1500);
+
+        if (sharedSyncEnabled) {
+          writeSharedWorkspaceSessionCache(
+            meetingId,
+            buildFullWorkspacePatchPayload({
+              meetingId,
+              meetingGoal: meetingGoalDraft,
+              meetingGoalContext: meetingGoalContextDraft,
+              stage,
+              agendaOverrides,
+              canvasItems,
+              customGroups,
+              problemGroups: nextProblemGroupsSnapshot,
+              solutionTopics,
+              nodePositions: nextNodePositionsSnapshot,
+              importedState: persistedSharedImportedState,
+            }),
+          );
+          forceBroadcastSharedCanvas({
+            problemGroups: nextProblemGroupsSnapshot,
+            nodePositions: nextNodePositionsSnapshot,
+          });
+          if (meetingId) {
+            void saveCanvasWorkspacePatch({
+              meeting_id: meetingId,
+              problem_groups: serializeSharedProblemGroups(nextProblemGroupsSnapshot),
+              node_positions: nextNodePositionsSnapshot,
+              imported_state: persistedSharedImportedState,
+            }).catch((error) => {
+              console.error("Failed to save shared problem-definition tool placement:", error);
+            });
+          }
+        }
+        return;
+      }
 
       if (tool === "group") {
         const now = new Date().toISOString();
@@ -6049,6 +6268,7 @@ export default function MeetingCanvasTab({
       persistedSharedImportedState,
       problemGroups,
       selectedAgendaId,
+      selectedProblemGroupId,
       sharedSyncEnabled,
       solutionTopics,
       stage,
@@ -8956,19 +9176,19 @@ export default function MeetingCanvasTab({
 
             <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
               <div className="pointer-events-auto flex min-h-[clamp(52px,7vh,60px)] w-auto max-w-[min(720px,calc(100%-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
-                {(["note", "comment", "topic", "group"] as CanvasTool[]).map((item) => (
+                {visibleCanvasTools.map((item) => (
                   <button
                     key={item}
                     type="button"
                     onClick={() => armCanvasTool(item)}
-                    disabled={stage !== "ideation"}
+                    disabled={!canUseCanvasToolbar}
                     className={`flex h-[clamp(36px,4.4vh,40px)] min-w-[clamp(74px,7vw,92px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(12px,1.2vw,16px)] text-[clamp(13px,1vw,16px)] font-medium transition-all duration-150 ease-out ${
                       armedCanvasTool === item
                         ? "bg-[#1b59f8]/10 text-[#1b59f8]"
                         : "text-[#4d4d4d] hover:bg-black/5"
                     } disabled:cursor-not-allowed disabled:opacity-45`}
                   >
-                    <span>{toolLabel(item)}</span>
+                    <span>{toolLabel(item, stage)}</span>
                   </button>
                 ))}
                 {armedCanvasTool ? (
