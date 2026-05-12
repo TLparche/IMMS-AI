@@ -1038,11 +1038,24 @@ function makeStableSignature(value: unknown) {
   return `${text.length}:${(hash >>> 0).toString(36)}`;
 }
 
-function resolveDirectProblemDefinitionAgendaId(
+function resolveProblemDefinitionAgendaId(
   item: CanvasItemViewModel,
+  itemById: Map<string, CanvasItemViewModel>,
 ) {
-  if (item.agenda_id && !item.parent_topic_id) {
+  if (item.agenda_id) {
     return item.agenda_id;
+  }
+
+  let parentTopicId = item.parent_topic_id || "";
+  const visitedParentIds = new Set<string>();
+  while (parentTopicId && !visitedParentIds.has(parentTopicId)) {
+    visitedParentIds.add(parentTopicId);
+    const parent = itemById.get(parentTopicId);
+    if (!parent) break;
+    if (parent.agenda_id) {
+      return parent.agenda_id;
+    }
+    parentTopicId = parent.parent_topic_id || "";
   }
 
   return "";
@@ -1057,18 +1070,44 @@ function buildProblemDefinitionAgendaInputs(agendaModels: AgendaViewModel[]) {
   }));
 }
 
+function buildProblemDefinitionIdeaBody(
+  item: CanvasItemViewModel,
+  childItems: CanvasItemViewModel[],
+) {
+  const childSummaries = childItems
+    .map((child) => [child.title, child.body].filter(Boolean).join(": ").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  return [
+    item.body || "",
+    childSummaries.length > 0 ? `하위 아이디어: ${childSummaries.join(" / ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildProblemDefinitionIdeaInputs(
   canvasItems: CanvasItemViewModel[],
   personalNotes: PersonalNote[],
 ) {
   const itemById = new Map(canvasItems.map((item) => [item.id, item]));
+  const childItemsByParentId = new Map<string, CanvasItemViewModel[]>();
+  canvasItems.forEach((item) => {
+    if (!item.parent_topic_id) return;
+    const children = childItemsByParentId.get(item.parent_topic_id) || [];
+    children.push(item);
+    childItemsByParentId.set(item.parent_topic_id, children);
+  });
+
   const canvasIdeas = canvasItems
+    .filter((item) => !item.parent_topic_id)
     .map((item) => ({
       id: item.id,
-      agenda_id: resolveDirectProblemDefinitionAgendaId(item),
+      agenda_id: resolveProblemDefinitionAgendaId(item, itemById),
       kind: item.kind || "note",
       title: item.title || "",
-      body: item.body || "",
+      body: buildProblemDefinitionIdeaBody(item, childItemsByParentId.get(item.id) || []),
       ai_pending: Boolean(item.ai_pending),
     }))
     .filter((item) => (
@@ -1076,7 +1115,13 @@ function buildProblemDefinitionIdeaInputs(
       !item.ai_pending &&
       Boolean(item.title.trim() || item.body.trim())
     ))
-    .map(({ ai_pending: _aiPending, ...item }) => item);
+    .map((item) => ({
+      id: item.id,
+      agenda_id: item.agenda_id,
+      kind: item.kind,
+      title: item.title,
+      body: item.body,
+    }));
 
   const personalIdeas = personalNotes
     .map((note) => ({
@@ -1097,12 +1142,13 @@ function buildProblemDefinitionAgendaSignatures(
   personalNotes: PersonalNote[],
 ) {
   const signatures: Record<string, string> = {};
+  const itemById = new Map(canvasItems.map((item) => [item.id, item]));
 
   agendaModels.forEach((agenda) => {
     const linkedCanvasItems = canvasItems
       .map((item) => ({
         id: item.id,
-        agenda_id: resolveDirectProblemDefinitionAgendaId(item),
+        agenda_id: resolveProblemDefinitionAgendaId(item, itemById),
         kind: item.kind || "note",
         title: item.title || "",
         body: item.body || "",
@@ -6313,7 +6359,7 @@ export default function MeetingCanvasTab({
     };
   }, [agendaModels, canvasItems, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
 
-  const handleGenerateProblemDefinition = async () => {
+  const handleGenerateProblemDefinition = useCallback(async () => {
     setProblemDefinitionStagePending(true);
     setBusy(true);
     try {
@@ -6475,7 +6521,17 @@ export default function MeetingCanvasTab({
       setProblemDefinitionStagePending(false);
       setBusy(false);
     }
-  };
+  }, [
+    agendaModels,
+    canvasItems,
+    forceBroadcastSharedCanvas,
+    handleGenerateAllProblemGroupConclusions,
+    meetingId,
+    meetingTopicForAi,
+    personalNotes,
+    problemGroups,
+    sharedSyncEnabled,
+  ]);
 
   const handleGenerateSolutionStage = async () => {
     const finalizedGroups = problemGroups.filter((group) => group.status === "final");
@@ -6570,14 +6626,7 @@ export default function MeetingCanvasTab({
         return;
       }
 
-      if (problemGroups.length === 0) {
-        await handleGenerateProblemDefinition();
-        return;
-      }
-
-      setStage("problem-definition");
-      setSelectedProblemGroupId(problemGroups[0]?.group_id || "");
-      setSelectedNodeId(problemGroups[0] ? `problem-${problemGroups[0].group_id}` : "");
+      await handleGenerateProblemDefinition();
       setLeftPanelTab("detail");
       return;
     },
@@ -6586,8 +6635,8 @@ export default function MeetingCanvasTab({
       conclusionBatchBusy,
       flushIdeaAssimilationBuffer,
       flushProblemDiscussionBuffer,
+      handleGenerateProblemDefinition,
       handleGenerateSolutionStage,
-      problemGroups,
       solutionStagePending,
       solutionTopics,
       stage,
@@ -8449,7 +8498,7 @@ export default function MeetingCanvasTab({
 
     autoProblemDefinitionRef.current = true;
     void handleGenerateProblemDefinition();
-  }, [agendaModels.length, busy, problemGroups.length, stage]);
+  }, [agendaModels.length, busy, handleGenerateProblemDefinition, problemGroups.length, stage]);
 
   const handleStopRecordingClick = async () => {
     await onStopRecording?.();
