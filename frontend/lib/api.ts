@@ -248,6 +248,30 @@ export async function startCanvasIdeaAssimilationWorkspace(payload: {
   });
 }
 
+export async function startCanvasTopicSummaryWorkspace(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  topic_item_id: string;
+}): Promise<{
+  ok: boolean;
+  job_id: string;
+  meeting_id: string;
+  status: "idle" | "processing" | "completed" | "error" | "missing" | string;
+  detail?: string;
+  used_llm?: boolean;
+  warning?: string;
+  pending_item_id?: string;
+  target_count?: number;
+  target_signature?: string;
+  workspace?: CanvasWorkspaceStateResponse;
+}> {
+  return requestJson("/api/canvas/topic-summary-workspace/start", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getCanvasIdeaAssimilationWorkspaceJob(
   meetingId: string,
   jobId: string,

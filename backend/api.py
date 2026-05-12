@@ -1851,6 +1851,12 @@ class CanvasIdeaAssimilationWorkspaceStartInput(BaseModel):
     target_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
 
 
+class CanvasTopicSummaryWorkspaceStartInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    topic_item_id: str = ""
+
+
 class CanvasProblemDiscussionWorkspaceStartInput(BaseModel):
     meeting_id: str = ""
     meeting_topic: str = ""
@@ -7344,6 +7350,199 @@ def _normalize_topic_cluster_body(raw: Any, fallback: str = "") -> str:
     return "\n".join(_dedup_preserve(candidates, limit=2))
 
 
+def _build_canvas_topic_summary_prompt(
+    meeting_topic: str,
+    topic: dict[str, Any],
+    child_items: list[dict[str, Any]],
+) -> str:
+    def child_payload(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": _safe_text(item.get("id")),
+            "kind": _safe_text(item.get("kind"), "note"),
+            "title": _safe_text(item.get("title")),
+            "content": _safe_text(item.get("body")),
+            "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+            "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=8),
+        }
+
+    payload = {
+        "meeting_topic": _safe_text(meeting_topic),
+        "draft_topic": {
+            "id": _safe_text(topic.get("id")),
+            "title": _safe_text(topic.get("title")),
+            "content": _safe_text(topic.get("body")),
+            "keywords": [_safe_text(value) for value in (topic.get("keywords") or []) if _safe_text(value)][:8],
+        },
+        "children": [child_payload(item) for item in child_items],
+    }
+    return (
+        "너는 회의 아이디어 canvas의 topic node 내부를 정리하는 분석기다. JSON 하나만 반환한다.\n"
+        "입력된 children은 사용자가 직접 묶은 아이디어들이다. draft_topic은 참고만 하고 그대로 복사하지 않는다.\n"
+        "규칙:\n"
+        "- title은 children 전체를 대표하는 10~24자 정도의 짧은 명사구로 쓴다.\n"
+        "- title에 '요약', '정리', '논의', '관련', '묶음', '토픽' 같은 메타어를 쓰지 않는다.\n"
+        "- body는 topic node content다. 완성형 문장이 아니라 핵심 대상 + 방향/문제/조건만 남긴 압축 구문이어야 한다.\n"
+        "- body는 최대 2줄, 각 줄 12~36자 정도의 짧은 명사구/핵심 구문으로 쓴다.\n"
+        "- '~합니다', '~됩니다', '~할 수 있습니다', '~로 보입니다' 같은 문장형 어미를 피한다.\n"
+        "- keywords는 children 전체를 대표하는 명사구 3~6개만 쓴다.\n"
+        "- children에 없는 내용을 새로 만들지 않는다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{"
+        "\"title\":\"...\","
+        "\"body\":\"...\","
+        "\"keywords\":[\"...\"]"
+        "}\n\n"
+        f"input={json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _compute_canvas_topic_summary_update(
+    meeting_topic: str,
+    topic: dict[str, Any],
+    child_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    client, llm_ready, _ = _ensure_llm_ready(RT)
+    if not llm_ready or not child_items:
+        return None
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_canvas_topic_summary_prompt(meeting_topic, topic, child_items),
+            stage="canvas_topic_summary",
+            temperature=0.14,
+            max_tokens=700,
+        )
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_topic_summary", payload=str(exc), meta={})
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    title = _normalize_topic_cluster_title(parsed.get("title"), _safe_text(topic.get("title"), "AI 주제"))
+    body = _normalize_topic_cluster_body(parsed.get("body") or parsed.get("summary"), title)
+    keywords = _normalize_idea_keywords(parsed.get("keywords") or [], f"{title} {body}", 6)
+    if not title and not body and not keywords:
+        return None
+    return {
+        "title": title,
+        "body": body,
+        "keywords": keywords,
+    }
+
+
+def _finalize_canvas_topic_summary_workspace_job(
+    meeting_id: str,
+    job_id: str,
+    topic_item_id: str,
+    meeting_topic: str,
+) -> None:
+    try:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        canvas_items = [
+            copy.deepcopy(item)
+            for item in (latest_workspace.get("canvas_items") or [])
+            if isinstance(item, dict)
+        ]
+        topic_id = _safe_text(topic_item_id)
+        topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_id), None)
+        if not topic or not _is_canvas_topic_item(topic):
+            raise RuntimeError("정리할 topic node를 찾을 수 없습니다.")
+
+        child_ids = _canvas_topic_leaf_child_ids({"canvas_items": canvas_items}, topic_id)
+        child_id_set = set(child_ids)
+        child_items = [
+            item
+            for item in canvas_items
+            if _safe_text(item.get("id")) in child_id_set and not _is_canvas_topic_item(item)
+        ]
+        update = _compute_canvas_topic_summary_update(meeting_topic, topic, child_items)
+        if not update:
+            warning = "LLM 응답을 받지 못해 topic 내용을 생성하지 못했습니다."
+            latest_workspace["canvas_items"] = [
+                {
+                    **item,
+                    "ai_pending": False,
+                    "body": _safe_text(item.get("body")) or "AI topic 정리에 실패했습니다.",
+                }
+                if _safe_text(item.get("id")) == topic_id
+                else item
+                for item in canvas_items
+            ]
+            _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+            _mark_canvas_idea_job(
+                meeting_id,
+                job_id,
+                status="error",
+                detail=warning,
+                workspace=copy.deepcopy(latest_workspace),
+                used_llm=False,
+                warning=warning,
+                pending_item_id=topic_id,
+                failed_at_epoch=time.time(),
+            )
+            return
+
+        latest_workspace["canvas_items"] = [
+            {
+                **item,
+                "title": _safe_text(update.get("title")) or _safe_text(item.get("title")),
+                "body": _safe_text(update.get("body")) or _safe_text(item.get("body")),
+                "keywords": [_safe_text(value) for value in (update.get("keywords") or []) if _safe_text(value)][:6],
+                "ai_pending": False,
+                "ai_generated": True,
+                "user_edited": False,
+                "manual_position": False,
+            }
+            if _safe_text(item.get("id")) == topic_id
+            else item
+            for item in canvas_items
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_idea_job(
+            meeting_id,
+            job_id,
+            status="completed",
+            detail="AI topic 정리 완료",
+            workspace=copy.deepcopy(latest_workspace),
+            used_llm=True,
+            warning="",
+            pending_item_id=topic_id,
+        )
+    except Exception as exc:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        latest_workspace["canvas_items"] = [
+            {
+                **item,
+                "ai_pending": False,
+                "body": _safe_text(item.get("body")) or "AI topic 정리에 실패했습니다.",
+            }
+            if isinstance(item, dict) and _safe_text(item.get("id")) == _safe_text(topic_item_id)
+            else item
+            for item in (latest_workspace.get("canvas_items") or [])
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_idea_job(
+            meeting_id,
+            job_id,
+            status="error",
+            detail=f"AI topic 정리 실패: {exc}",
+            workspace=copy.deepcopy(latest_workspace),
+            used_llm=False,
+            warning=_safe_text(exc),
+            pending_item_id=_safe_text(topic_item_id),
+            failed_at_epoch=time.time(),
+        )
+
+
 def _compute_canvas_topic_clustering_result(
     workspace: dict[str, Any],
     agenda_id: str,
@@ -7998,6 +8197,80 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         args=(normalized_meeting_id, job_id, pending_item_id, idea_payload),
         daemon=True,
         name=f"canvas-idea-{job_id[:8]}",
+    ).start()
+    return _canvas_idea_job_response(job, workspace)
+
+
+@app.post("/api/canvas/topic-summary-workspace/start")
+def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspaceStartInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    topic_item_id = _safe_text(payload.topic_item_id)
+    if not normalized_meeting_id or not topic_item_id:
+        raise HTTPException(status_code=400, detail="meeting_id and topic_item_id are required")
+
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        running_job = next(
+            (
+                copy.deepcopy(job)
+                for job in meeting_jobs.values()
+                if isinstance(job, dict)
+                and _safe_text(job.get("status")) == "processing"
+                and _safe_text(job.get("job_type")) == "topic_summary"
+                and _safe_text(job.get("pending_item_id")) == topic_item_id
+            ),
+            None,
+        )
+    if running_job:
+        workspace = running_job.get("workspace") if isinstance(running_job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+        return _canvas_idea_job_response(running_job, workspace)
+
+    workspace = _clone_runtime_workspace_state(
+        normalized_meeting_id,
+        _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        _now_ts(),
+    )
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_item_id), None)
+    if not topic or not _is_canvas_topic_item(topic):
+        raise HTTPException(status_code=404, detail="topic item not found")
+
+    workspace["canvas_items"] = [
+        {
+            **item,
+            "ai_pending": True,
+            "ai_generated": True,
+            "user_edited": False,
+        }
+        if _safe_text(item.get("id")) == topic_item_id
+        else item
+        for item in canvas_items
+    ]
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+    _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
+
+    job_id = uuid4().hex
+    job = _mark_canvas_idea_job(
+        normalized_meeting_id,
+        job_id,
+        job_type="topic_summary",
+        status="processing",
+        detail="AI가 topic 제목과 content를 생성 중",
+        pending_item_id=topic_item_id,
+        target_count=len(_canvas_topic_leaf_child_ids(workspace, topic_item_id)),
+        target_signature=topic_item_id,
+        created_at=_now_ts(),
+        workspace=copy.deepcopy(workspace),
+    )
+    threading.Thread(
+        target=_finalize_canvas_topic_summary_workspace_job,
+        args=(normalized_meeting_id, job_id, topic_item_id, _safe_text(payload.meeting_topic, "회의 주제")),
+        daemon=True,
+        name=f"canvas-topic-{job_id[:8]}",
     ).start()
     return _canvas_idea_job_response(job, workspace)
 
