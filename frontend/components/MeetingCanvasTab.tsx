@@ -1980,58 +1980,39 @@ function makeSolutionNodeLabel(topic: SolutionTopicViewModel, selected: boolean)
   const selectedAiCount = solutionTopicSelectedSuggestions(topic).length;
   const finalCount = solutionTopicFinalNotes(topic).length;
   return (
-    <div className={`min-w-0 rounded-[22px] bg-gradient-to-br from-emerald-50 via-white to-white p-5 transition ${selected ? "ring-2 ring-emerald-300" : ""}`}>
+    <div
+      className={`nopan min-w-0 cursor-pointer border bg-white px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition ${
+        selected
+          ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]"
+          : "border-black/10 shadow-[0_1px_0_rgba(0,0,0,0.04)] hover:border-emerald-300"
+      }`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-700">
-            Solution {topic.topic_no || 0}
+            Insight {topic.topic_no || 0}
           </p>
-          <strong className="mt-2 block text-[17px] leading-7 text-slate-900">{topic.topic}</strong>
+          <strong className="mt-2 block line-clamp-2 text-[17px] font-semibold leading-6 text-slate-950">
+            {topic.topic}
+          </strong>
         </div>
-        <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] ${problemGroupStatusTone(topic.status)}`}>
+        <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${problemGroupStatusTone(topic.status)}`}>
           {problemGroupStatusLabel(topic.status)}
         </span>
       </div>
-      {topic.problem_topic ? (
-        <div className="mt-4 rounded-2xl border border-emerald-100 bg-white px-4 py-3">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Sub Conclusion</p>
-          <p className="mt-1 text-sm leading-6 text-slate-600">
-            {topic.problem_insight || topic.problem_topic}
-          </p>
-        </div>
-      ) : null}
-      <div className="mt-4 rounded-2xl border border-emerald-100 bg-white px-4 py-3">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Conclusion</p>
-        <p className="mt-1 text-sm leading-6 text-slate-600">{topic.conclusion || "해결 방향이 아직 없습니다."}</p>
-      </div>
-      <div className="mt-4">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">AI Draft</p>
-        <div className="mt-2 space-y-1.5">
-          {(topic.ai_suggestions || []).slice(0, 4).map((idea) => (
-            <p
-              key={idea.id}
-              className={`text-sm leading-6 ${
-                idea.status === "selected" ? "text-blue-600" : "text-slate-500"
-              }`}
-            >
-              • {idea.text}
-            </p>
-          ))}
-        </div>
-      </div>
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        {(topic.notes || []).slice(0, 2).map((note) => (
-          <div key={note.id} className="min-h-[120px] rounded-[14px] border border-amber-100 bg-amber-100/80 p-4 shadow-sm">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-amber-700">
-              {note.source === "ai" ? "채택 메모" : "사용자 메모"}
-            </p>
-            <p className="mt-2 text-sm leading-6 text-slate-700">{note.text}</p>
-          </div>
-        ))}
-      </div>
-      <div className="mt-4 flex gap-2 text-[11px] text-slate-500">
-        <span>{selectedAiCount}개 채택</span>
-        <span>{finalCount}개 최종 결론</span>
+      <p className="mt-3 line-clamp-3 text-sm leading-6 text-[#4d4d4d]">
+        {topic.conclusion || topic.problem_conclusion || "해결 방향이 아직 없습니다."}
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2 text-[11px] font-semibold">
+        <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700">
+          AI {topic.ai_suggestions.length}
+        </span>
+        <span className="rounded-full bg-blue-50 px-2.5 py-1 text-blue-700">
+          채택 {selectedAiCount}
+        </span>
+        <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-700">
+          결론 {finalCount}
+        </span>
       </div>
     </div>
   );
@@ -2362,32 +2343,16 @@ function makeProblemDiscussionNodeLabel(item: ProblemDiscussionViewModel, select
 
 function estimateSolutionNodeHeight(topic: SolutionTopicViewModel) {
   const topicLines = estimateWrappedLines(topic.topic, 18);
-  const subConclusionLines = topic.problem_insight
-    ? Math.min(3, estimateWrappedLines(topic.problem_insight, 28))
-    : 0;
-  const conclusionLines = Math.min(4, estimateWrappedLines(topic.conclusion || "해결 방향이 아직 없습니다.", 28));
-  const aiLines = Math.max(
-    1,
-    (topic.ai_suggestions || []).slice(0, 4).reduce((sum, item) => sum + Math.min(2, estimateWrappedLines(item.text, 30)), 0),
+  const conclusionLines = Math.min(
+    3,
+    estimateWrappedLines(topic.conclusion || topic.problem_conclusion || "해결 방향이 아직 없습니다.", 28),
   );
-  const noteCards = (topic.notes || []).slice(0, 2);
-  const noteHeight =
-    noteCards.length > 0
-      ? Math.max(
-          ...noteCards.map((note) => 92 + Math.min(4, estimateWrappedLines(note.text || "메모 없음", 16)) * 16),
-        )
-      : 0;
 
   return (
-    108 +
+    118 +
     Math.max(0, topicLines - 1) * 22 +
-    (subConclusionLines > 0 ? 52 + Math.max(0, subConclusionLines - 1) * 18 : 0) +
-    70 +
     Math.max(0, conclusionLines - 1) * 18 +
-    34 +
-    aiLines * 18 +
-    (noteHeight > 0 ? 36 + noteHeight : 0) +
-    38
+    42
   );
 }
 
@@ -5959,7 +5924,12 @@ export default function MeetingCanvasTab({
 
     if (stage === "solution") {
       const heights = solutionTopics.map((topic) => estimateSolutionNodeHeight(topic));
-      const positions = buildGridPositions(heights, 410, 52, 120, 140);
+      const positions: Array<{ x: number; y: number }> = [];
+      let nextY = 32;
+      heights.forEach((height) => {
+        positions.push({ x: 24, y: nextY });
+        nextY += height + 18;
+      });
 
       return {
         layoutSignature: buildNodeContentSignature([
@@ -5968,19 +5938,16 @@ export default function MeetingCanvasTab({
         ]),
         nodeDescriptors: solutionTopics.map((topic, index) => {
           const nodeId = `solution-${topic.group_id}`;
-          const savedPosition = nodePositions.solution?.[nodeId];
           const selected = selectedSolutionTopicId === topic.group_id;
-          const positionSource: CanvasNodeDescriptor["positionSource"] = savedPosition
-            ? "persisted"
-            : "fallback";
+          const positionSource: CanvasNodeDescriptor["positionSource"] = "computed";
 
           return {
             id: nodeId,
-            position: savedPosition || positions[index],
+            position: positions[index],
             positionSource,
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
-            className: "rounded-3xl border border-emerald-200 bg-emerald-50 shadow-sm",
+            className: "!border-0 !bg-transparent !p-0 !shadow-none",
             style: { width: 360, minHeight: heights[index], borderRadius: 22, padding: 0 },
             data: {
               contentSignature: buildNodeContentSignature([
@@ -5989,6 +5956,7 @@ export default function MeetingCanvasTab({
                 topic.topic,
                 topic.conclusion,
                 topic.status,
+                selected,
                 topic.problem_topic,
                 topic.problem_insight,
                 topic.problem_conclusion,
@@ -10367,6 +10335,15 @@ export default function MeetingCanvasTab({
   const ideationRightSubtitle = selectedRootItemForIdeationCanvas
     ? `${selectedRootItemForIdeationCanvas.title || "선택 그룹"} 하위 노드 전체`
     : "그룹분류를 선택하면 왼쪽 캔버스가 해당 그룹으로 바뀝니다.";
+  const solutionSplitNodes = useMemo(() => {
+    if (stage !== "solution") {
+      return { left: [] as Node[] };
+    }
+
+    return {
+      left: nodes.filter((node) => node.id.startsWith("solution-")),
+    };
+  }, [nodes, stage]);
 
   const handleCanvasNodeClick = (event: React.MouseEvent, node: Node) => {
     setSelectedEdgeId("");
@@ -10434,10 +10411,17 @@ export default function MeetingCanvasTab({
     setSelectedSolutionTopicId("");
   };
 
-  const handleCanvasPaneClick = (event: React.MouseEvent) => {
+  const handleCanvasPaneClick = (
+    event: React.MouseEvent,
+    pane: "default" | "ideation-left" | "ideation-right" = "default",
+  ) => {
+    if (stage === "ideation" && pane === "ideation-right" && !armedCanvasTool) {
+      return;
+    }
+
     setSelectedEdgeId("");
     if (!armedCanvasTool) {
-      if (stage === "ideation") {
+      if (stage === "ideation" && pane === "ideation-left") {
         setSelectedCanvasItemId("");
         setSelectedNodeId("");
         setLeftPanelTab("detail");
@@ -11792,7 +11776,7 @@ export default function MeetingCanvasTab({
                           flowRef.current = instance;
                         }}
                         onNodeClick={handleCanvasNodeClick}
-                        onPaneClick={handleCanvasPaneClick}
+                        onPaneClick={(event) => handleCanvasPaneClick(event, "ideation-left")}
                         onNodesChange={onNodesChange}
                         onNodeDragStart={onNodeDragStart}
                         onNodeDrag={onNodeDrag}
@@ -11862,7 +11846,7 @@ export default function MeetingCanvasTab({
                           flowRef.current = instance;
                         }}
                         onNodeClick={handleCanvasNodeClick}
-                        onPaneClick={handleCanvasPaneClick}
+                        onPaneClick={(event) => handleCanvasPaneClick(event, "ideation-right")}
                         onNodesChange={onNodesChange}
                         onNodeDragStart={onNodeDragStart}
                         onNodeDrag={onNodeDrag}
@@ -11883,6 +11867,272 @@ export default function MeetingCanvasTab({
                         />
                         <Controls />
                       </ReactFlow>
+                    </div>
+                  </div>
+                </div>
+              ) : stage === "solution" ? (
+                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)]">
+                  <div className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
+                    <div className="shrink-0 border-b border-black/10 px-5 py-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Insight Canvas</p>
+                          <h3 className="mt-1 text-lg font-semibold text-slate-950">해결책 인사이트</h3>
+                        </div>
+                        <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                          {solutionSplitNodes.left.length}개
+                        </span>
+                      </div>
+                    </div>
+                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
+                      <ReactFlow<Node, Edge>
+                        nodes={solutionSplitNodes.left}
+                        edges={[] as Edge[]}
+                        onInit={(instance) => {
+                          flowRef.current = instance;
+                        }}
+                        onNodeClick={handleCanvasNodeClick}
+                        onPaneClick={handleCanvasPaneClick}
+                        nodesConnectable={false}
+                        nodesDraggable={false}
+                        panOnDrag
+                        noPanClassName="nopan"
+                        minZoom={0.45}
+                        maxZoom={1.6}
+                        proOptions={{ hideAttribution: true }}
+                      >
+                        <Controls />
+                      </ReactFlow>
+                    </div>
+                  </div>
+
+                  <div className="flex min-h-[420px] flex-col overflow-hidden bg-white">
+                    <div className="shrink-0 border-b border-black/10 px-5 py-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Solution Canvas</p>
+                          <h3 className="mt-1 line-clamp-1 text-lg font-semibold text-slate-950">
+                            {selectedSolutionTopic?.topic || "해결책 토픽을 선택해 주세요"}
+                          </h3>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                          {selectedSolutionTopic ? (
+                            (["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => {
+                              const active = selectedSolutionTopic.status === status;
+                              return (
+                                <button
+                                  key={`solution-header-status-${status}`}
+                                  type="button"
+                                  onClick={() => handleSetSolutionTopicStatus(status)}
+                                  className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                                    active
+                                      ? problemGroupStatusTone(status)
+                                      : "border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
+                                  }`}
+                                >
+                                  {problemGroupStatusLabel(status)}
+                                </button>
+                              );
+                            })
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="imms-overlay-scroll min-h-0 flex-1 overflow-y-auto bg-[#f5f6f8] p-[clamp(16px,2vw,28px)]">
+                      {selectedSolutionTopic ? (
+                        <div className="mx-auto flex max-w-[1120px] flex-col gap-5">
+                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">해결 방향</p>
+                                <h4 className="mt-2 text-xl font-semibold leading-8 text-slate-950">
+                                  {selectedSolutionTopic.topic}
+                                </h4>
+                              </div>
+                              <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${problemGroupStatusTone(selectedSolutionTopic.status)}`}>
+                                {problemGroupStatusLabel(selectedSolutionTopic.status)}
+                              </span>
+                            </div>
+                            <p className="mt-4 text-base leading-7 text-[#4d4d4d]">
+                              {selectedSolutionTopic.conclusion || selectedSolutionTopic.problem_conclusion || "해결 방향이 아직 없습니다."}
+                            </p>
+                          </section>
+
+                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">AI 추천 아이디어</p>
+                                <h4 className="mt-1 text-lg font-semibold text-slate-950">참고용 제안</h4>
+                              </div>
+                              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                                {selectedSolutionTopic.ai_suggestions.length}개
+                              </span>
+                            </div>
+                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                              {selectedSolutionTopic.ai_suggestions.length > 0 ? (
+                                selectedSolutionTopic.ai_suggestions.map((idea, index) => (
+                                  <article
+                                    key={idea.id}
+                                    className={`border px-4 py-4 ${
+                                      idea.status === "selected"
+                                        ? "border-blue-200 bg-blue-50/70"
+                                        : "border-black/10 bg-[#fafafa]"
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#777]">
+                                          AI 제안 {index + 1}
+                                        </p>
+                                        <p className={`mt-2 text-sm leading-6 ${idea.status === "selected" ? "text-blue-700" : "text-[#4d4d4d]"}`}>
+                                          {idea.text}
+                                        </p>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleAdoptAiSuggestion(selectedSolutionTopic.group_id, idea.id)}
+                                        disabled={idea.status === "selected"}
+                                        className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-60"
+                                      >
+                                        {idea.status === "selected" ? "채택됨" : "채택"}
+                                      </button>
+                                    </div>
+                                  </article>
+                                ))
+                              ) : (
+                                <p className="col-span-full border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                                  아직 제안된 AI 추천 아이디어가 없습니다.
+                                </p>
+                              )}
+                            </div>
+                          </section>
+
+                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-700">채택 카드</p>
+                                <h4 className="mt-1 text-lg font-semibold text-slate-950">회의에서 남길 해결책</h4>
+                              </div>
+                              <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+                                {selectedSolutionTopic.notes.length}개
+                              </span>
+                            </div>
+                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                              {selectedSolutionTopic.notes.length > 0 ? (
+                                selectedSolutionTopic.notes.map((note, index) => (
+                                  <article key={note.id} className="border border-amber-100 bg-amber-50/70 px-4 py-4">
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">
+                                          {note.source === "ai" ? `채택 메모 ${index + 1}` : `사용자 메모 ${index + 1}`}
+                                        </p>
+                                        <p className="mt-2 text-sm leading-6 text-slate-700">{note.text}</p>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleToggleFinalSolutionNote(selectedSolutionTopic.group_id, note.id)}
+                                        className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                                          note.is_final_candidate
+                                            ? "bg-slate-900 text-white"
+                                            : "border border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
+                                        }`}
+                                      >
+                                        {note.is_final_candidate ? "최종 결론" : "결론 후보"}
+                                      </button>
+                                    </div>
+                                    {note.is_final_candidate ? (
+                                      <textarea
+                                        value={note.final_comment || ""}
+                                        onChange={(event) =>
+                                          handleUpdateFinalSolutionComment(
+                                            selectedSolutionTopic.group_id,
+                                            note.id,
+                                            event.target.value,
+                                          )
+                                        }
+                                        placeholder="최종 결론에 붙일 설명을 입력합니다."
+                                        className="mt-3 min-h-[78px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
+                                      />
+                                    ) : null}
+                                  </article>
+                                ))
+                              ) : (
+                                <p className="col-span-full border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                                  AI 추천을 채택하거나 사용자 메모를 추가하면 이 영역에 카드로 쌓입니다.
+                                </p>
+                              )}
+                            </div>
+
+                            <div className="mt-4 border border-black/10 bg-[#fafafa] px-4 py-4">
+                              <p className="text-sm font-semibold text-slate-700">사용자 해결책 추가</p>
+                              <textarea
+                                value={solutionNoteDraft}
+                                onChange={(event) => setSolutionNoteDraft(event.target.value)}
+                                placeholder="직접 해결책 메모를 추가합니다."
+                                className="mt-3 min-h-[96px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={handleAddSolutionUserNote}
+                                className="mt-3 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+                              >
+                                카드 추가
+                              </button>
+                            </div>
+                          </section>
+
+                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">최종 결론 모음</p>
+                                <h4 className="mt-1 text-lg font-semibold text-slate-950">표시된 해결책</h4>
+                              </div>
+                              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                                {allSolutionFinalNotes.length}개
+                              </span>
+                            </div>
+                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                              {allSolutionFinalNotes.length > 0 ? (
+                                allSolutionFinalNotes.map((note) => (
+                                  <button
+                                    key={note.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedSolutionTopicId(note.topicId);
+                                      setSelectedNodeId(`solution-${note.topicId}`);
+                                    }}
+                                    className={`border px-4 py-3 text-left transition ${
+                                      note.topicId === selectedSolutionTopic.group_id
+                                        ? "border-slate-900 bg-white"
+                                        : "border-black/10 bg-[#fafafa] hover:bg-white"
+                                    }`}
+                                  >
+                                    <p className="text-sm font-semibold text-slate-700">{note.topicTitle}</p>
+                                    <p className="mt-2 text-sm leading-6 text-slate-700">{note.text}</p>
+                                    {note.final_comment ? (
+                                      <p className="mt-2 text-xs leading-5 text-slate-500">{note.final_comment}</p>
+                                    ) : null}
+                                  </button>
+                                ))
+                              ) : (
+                                <p className="col-span-full border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                                  결론 후보를 최종 결론으로 표시하면 여기에서 전체 모아볼 수 있습니다.
+                                </p>
+                              )}
+                            </div>
+                          </section>
+                        </div>
+                      ) : (
+                        <div className="flex h-full items-center justify-center px-6">
+                          <div className="max-w-[420px] border border-dashed border-black/10 bg-white px-6 py-8 text-center">
+                            <p className="text-base font-semibold text-slate-950">해결책 인사이트를 선택해 주세요</p>
+                            <p className="mt-2 text-sm leading-6 text-[#777]">
+                              왼쪽 인사이트를 클릭하면 AI 추천 아이디어와 채택 카드가 오른쪽에 표시됩니다.
+                            </p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
