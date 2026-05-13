@@ -419,7 +419,10 @@ export async function saveCanvasPersonalNotes(payload: {
   user_id: string;
   personal_notes: Array<{
     id: string;
+    project_id?: string;
     agenda_id: string;
+    linked_canvas_item_id?: string;
+    linked_canvas_item_title?: string;
     kind: string;
     title: string;
     body: string;
@@ -438,7 +441,10 @@ export function flushCanvasPersonalNotes(payload: {
   user_id: string;
   personal_notes: Array<{
     id: string;
+    project_id?: string;
     agenda_id: string;
+    linked_canvas_item_id?: string;
+    linked_canvas_item_title?: string;
     kind: string;
     title: string;
     body: string;

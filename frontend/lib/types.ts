@@ -250,7 +250,10 @@ export interface CanvasProblemDefinitionResponse {
 
 export interface CanvasPersonalNote {
   id: string;
+  project_id?: string;
   agenda_id: string;
+  linked_canvas_item_id?: string;
+  linked_canvas_item_title?: string;
   kind: string;
   title: string;
   body: string;

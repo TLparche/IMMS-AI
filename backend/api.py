@@ -1880,7 +1880,10 @@ class CanvasCustomGroupInput(BaseModel):
 
 class CanvasPersonalNoteInput(BaseModel):
     id: str = ""
+    project_id: str = ""
     agenda_id: str = ""
+    linked_canvas_item_id: str = ""
+    linked_canvas_item_title: str = ""
     kind: str = "note"
     title: str = ""
     body: str = ""
@@ -8937,7 +8940,10 @@ def post_canvas_personal_notes(payload: CanvasPersonalNotesStateInput):
     normalized_notes = [
         {
             "id": _safe_text(note.id),
+            "project_id": _safe_text(note.project_id) or normalized_meeting_id,
             "agenda_id": _safe_text(note.agenda_id),
+            "linked_canvas_item_id": _safe_text(note.linked_canvas_item_id),
+            "linked_canvas_item_title": _safe_text(note.linked_canvas_item_title),
             "kind": _safe_text(note.kind, "note"),
             "title": _safe_text(note.title),
             "body": _safe_text(note.body),

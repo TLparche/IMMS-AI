@@ -88,6 +88,7 @@ const MIN_LEFT_PANEL_RATIO = 0.13;
 const MAX_LEFT_PANEL_RATIO = 0.28;
 const MIN_RIGHT_PANEL_RATIO = 0.14;
 const MAX_RIGHT_PANEL_RATIO = 0.3;
+const COMPOSER_PERSONAL_NOTE_LINK_ID = "__composer_personal_note__";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -95,7 +96,10 @@ function clampNumber(value: number, min: number, max: number) {
 
 type PersonalNote = {
   id: string;
+  projectId: string;
   agendaId: string;
+  linkedCanvasItemId?: string;
+  linkedCanvasItemTitle?: string;
   kind: ComposerTool;
   title: string;
   body: string;
@@ -559,7 +563,10 @@ function buildCanvasPersonalNotesPayload(
     user_id: userId,
     personal_notes: personalNotes.map((note) => ({
       id: note.id,
+      project_id: note.projectId || meetingId,
       agenda_id: note.agendaId,
+      linked_canvas_item_id: note.linkedCanvasItemId || "",
+      linked_canvas_item_title: note.linkedCanvasItemTitle || "",
       kind: note.kind,
       title: note.title,
       body: note.body,
@@ -2791,8 +2798,12 @@ export default function MeetingCanvasTab({
   const [stage, setStage] = useState<CanvasStage>("ideation");
   const [composerTool, setComposerTool] = useState<ComposerTool>("note");
   const [armedCanvasTool, setArmedCanvasTool] = useState<CanvasTool | null>(null);
+  const [composerAgendaId, setComposerAgendaId] = useState("");
   const [composerTitle, setComposerTitle] = useState("");
   const [composerBody, setComposerBody] = useState("");
+  const [composerLinkedCanvasItemId, setComposerLinkedCanvasItemId] = useState("");
+  const [composerLinkedCanvasItemTitle, setComposerLinkedCanvasItemTitle] = useState("");
+  const [pendingPersonalNoteLinkId, setPendingPersonalNoteLinkId] = useState("");
   const [selectedAgendaId, setSelectedAgendaId] = useState("");
   const [activityMessage, setActivityMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2801,6 +2812,7 @@ export default function MeetingCanvasTab({
   const [canvasItems, setCanvasItems] = useState<CanvasItemViewModel[]>([]);
   const [topicCollapsedOverrides, setTopicCollapsedOverrides] = useState<Record<string, boolean>>({});
   const [latestHighlightedTopicId, setLatestHighlightedTopicId] = useState("");
+  const [focusedCanvasItemId, setFocusedCanvasItemId] = useState("");
   const [customGroups, setCustomGroups] = useState<CustomGroupViewModel[]>([]);
   const [customGroupDraftTitle, setCustomGroupDraftTitle] = useState("");
   const [editingAgendaId, setEditingAgendaId] = useState("");
@@ -3313,7 +3325,10 @@ export default function MeetingCanvasTab({
               : "note";
           return {
             id: note.id,
+            projectId: note.project_id || meetingId,
             agendaId: note.agenda_id,
+            linkedCanvasItemId: note.linked_canvas_item_id || "",
+            linkedCanvasItemTitle: note.linked_canvas_item_title || "",
             kind,
             title: note.title,
             body: note.body,
@@ -5092,7 +5107,10 @@ export default function MeetingCanvasTab({
         user_id: userId,
         personal_notes: personalNotes.map((note) => ({
           id: note.id,
+          project_id: note.projectId || meetingId,
           agenda_id: note.agendaId,
+          linked_canvas_item_id: note.linkedCanvasItemId || "",
+          linked_canvas_item_title: note.linkedCanvasItemTitle || "",
           kind: note.kind,
           title: note.title,
           body: note.body,
@@ -6112,7 +6130,9 @@ export default function MeetingCanvasTab({
           .slice(0, 3)
           .map((itemId) => canvasItemById.get(itemId))
           .filter((child): child is CanvasItemViewModel => Boolean(child));
-        const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
+        const highlighted =
+          focusedCanvasItemId === item.id ||
+          (isTopicCanvasItem(item) && latestHighlightedTopicId === item.id);
         const dropTarget =
           Boolean(ideationDropPreview) &&
           ideationDropPreview?.targetId === item.id &&
@@ -6617,7 +6637,9 @@ export default function MeetingCanvasTab({
                   topic_collapsed: getTopicCollapsed(item),
                 }
               : item;
-          const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
+          const highlighted =
+            focusedCanvasItemId === item.id ||
+            (isTopicCanvasItem(item) && latestHighlightedTopicId === item.id);
           const computedPosition = computedCanvasPositions.get(item.id);
           const preferredPosition = computedPosition;
           const positionSource: CanvasNodeDescriptor["positionSource"] =
@@ -6679,6 +6701,7 @@ export default function MeetingCanvasTab({
     agendaDragPreview,
     canvasItems,
     dropProblemGroupId,
+    focusedCanvasItemId,
     getTopicCollapsed,
     handleToggleTopicCollapsed,
     handleAttachPersonalNoteToProblemGroup,
@@ -6798,11 +6821,21 @@ export default function MeetingCanvasTab({
   );
   const allRefinedTranscriptSentences = useMemo(
     () =>
-      splitRefinedUtteranceSentences(
-        canvasItems.flatMap((item) => item.refined_utterances || []),
-        80,
-      ),
+      canvasItems
+        .flatMap((item) =>
+          splitRefinedUtteranceSentences(item.refined_utterances, 80).map((row) => ({
+            ...row,
+            sourceItemId: item.id,
+            sourceItemTitle: item.title,
+            sourceAgendaId: item.agenda_id,
+          })),
+        )
+        .slice(0, 80),
     [canvasItems],
+  );
+  const projectPersonalNotes = useMemo(
+    () => personalNotes.filter((note) => !note.projectId || note.projectId === meetingId),
+    [meetingId, personalNotes],
   );
   const autoLinkEdges = useMemo<Edge[]>(() => {
     return [];
@@ -6914,6 +6947,15 @@ export default function MeetingCanvasTab({
       setSelectedProblemSourceNodeId("");
     }
   }, [selectedProblemGroup, selectedProblemSourceCards, selectedProblemSourceNodeId, stage]);
+
+  useEffect(() => {
+    if (!focusedCanvasItemId) return;
+    const timeoutId = window.setTimeout(() => {
+      setFocusedCanvasItemId("");
+    }, 4200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [focusedCanvasItemId]);
 
   const leftPanelDetail = useMemo(() => {
     if (stage === "problem-definition") {
@@ -7078,6 +7120,8 @@ export default function MeetingCanvasTab({
         ],
         organizeTitle: "연결 정보",
         refinedItems: refinedItems.map((item, index) => ({
+          id: item.utterance_id || `${selectedCanvasItem.id}-refined-${index}`,
+          sourceItemId: selectedCanvasItem.id,
           label: item.speaker || `발화 ${index + 1}`,
           value: item.text,
         })),
@@ -7141,8 +7185,8 @@ export default function MeetingCanvasTab({
     setBusy(true);
     try {
       const agendaInputs = buildProblemDefinitionAgendaInputs(agendaModels);
-      const ideaInputs = buildProblemDefinitionIdeaInputs(canvasItems, personalNotes);
-      const agendaSignatures = buildProblemDefinitionAgendaSignatures(agendaModels, canvasItems, personalNotes);
+      const ideaInputs = buildProblemDefinitionIdeaInputs(canvasItems, projectPersonalNotes);
+      const agendaSignatures = buildProblemDefinitionAgendaSignatures(agendaModels, canvasItems, projectPersonalNotes);
       const agendaById = new Map(agendaInputs.map((agenda) => [agenda.agenda_id, agenda]));
       const agendaIdSet = new Set(agendaInputs.map((agenda) => agenda.agenda_id));
       const ideasForAgendaIds = (agendaIds: string[]) => {
@@ -7305,7 +7349,7 @@ export default function MeetingCanvasTab({
     handleGenerateAllProblemGroupConclusions,
     meetingId,
     meetingTopicForAi,
-    personalNotes,
+    projectPersonalNotes,
     problemGroups,
     sharedSyncEnabled,
   ]);
@@ -7421,24 +7465,26 @@ export default function MeetingCanvasTab({
   );
 
   const handleAddPersonalNote = () => {
-    const agendaId = selectedAgendaId || agendaModels[0]?.id;
-    if (!agendaId) {
-      setActivityMessage("먼저 연결할 그룹을 선택해 주세요.");
-      return;
-    }
-
     const nextNote: PersonalNote = {
       id: `note-${Date.now()}`,
-      agendaId,
+      projectId: meetingId,
+      agendaId: composerAgendaId,
+      linkedCanvasItemId: composerLinkedCanvasItemId,
+      linkedCanvasItemTitle: composerLinkedCanvasItemTitle,
       kind: composerTool,
-      title: composerTitle.trim() || `${toolLabel(composerTool)} ${personalNotes.length + 1}`,
+      title: composerTitle.trim() || `${toolLabel(composerTool)} ${projectPersonalNotes.length + 1}`,
       body: composerBody.trim() || "개인 메모를 입력해 두면 나중에 그룹 보드로 이동시킬 수 있습니다.",
     };
 
     setPersonalNotes((prev) => [nextNote, ...prev]);
     setComposerTitle("");
     setComposerBody("");
-    setActivityMessage("개인 메모에 저장했습니다. 이후 그룹 보드로 드래그 편입하는 흐름을 붙일 수 있습니다.");
+    setComposerLinkedCanvasItemId("");
+    setComposerLinkedCanvasItemTitle("");
+    if (pendingPersonalNoteLinkId === COMPOSER_PERSONAL_NOTE_LINK_ID) {
+      setPendingPersonalNoteLinkId("");
+    }
+    setActivityMessage("개인 메모에 저장했습니다.");
   };
 
   const canUseCanvasToolbar = stage === "ideation" || stage === "problem-definition";
@@ -9314,6 +9360,9 @@ export default function MeetingCanvasTab({
 
   const handleDeletePersonalNote = (noteId: string) => {
     setPersonalNotes((prev) => prev.filter((item) => item.id !== noteId));
+    if (pendingPersonalNoteLinkId === noteId) {
+      setPendingPersonalNoteLinkId("");
+    }
     if (editingPersonalNoteId === noteId) {
       setEditingPersonalNoteId("");
       setPersonalNoteDraftAgendaId("");
@@ -10345,6 +10394,70 @@ export default function MeetingCanvasTab({
     };
   }, [nodes, stage]);
 
+  const focusCanvasItemInIdeation = (itemId: string, reason = "원문 위치로 이동했습니다.") => {
+    const item = canvasItems.find((candidate) => candidate.id === itemId) || null;
+    if (!item) {
+      setActivityMessage("연결된 원문 노드를 찾지 못했습니다.");
+      return;
+    }
+
+    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, item.id);
+    setStage("ideation");
+    setSelectedAgendaId(item.agenda_id || selectedAgendaId || agendaModels[0]?.id || "");
+    setSelectedCanvasItemId(item.id);
+    setSelectedNodeId(`canvas-item-${item.id}`);
+    setSelectedProblemGroupId("");
+    setSelectedProblemSourceNodeId("");
+    setSelectedSolutionTopicId("");
+    setSelectedEdgeId("");
+    setLeftPanelTab("detail");
+    setFocusedCanvasItemId(item.id);
+    if (rootId && rootId !== item.id) {
+      setLatestHighlightedTopicId(rootId);
+    }
+    setActivityMessage(reason);
+  };
+
+  const linkPendingPersonalNoteToCanvasItem = (item: CanvasItemViewModel) => {
+    if (!pendingPersonalNoteLinkId) return false;
+
+    if (isTopicCanvasItem(item)) {
+      setActivityMessage("토픽 내용은 열어두고, 연결할 아이디어 노드를 선택해 주세요.");
+      return false;
+    }
+
+    if (pendingPersonalNoteLinkId === COMPOSER_PERSONAL_NOTE_LINK_ID) {
+      setComposerAgendaId(item.agenda_id || composerAgendaId);
+      setComposerLinkedCanvasItemId(item.id);
+      setComposerLinkedCanvasItemTitle(item.title || "연결 아이디어");
+      setPendingPersonalNoteLinkId("");
+      setFocusedCanvasItemId(item.id);
+      setSelectedCanvasItemId(item.id);
+      setSelectedNodeId(`canvas-item-${item.id}`);
+      setActivityMessage("작성 중인 개인 메모에 연결할 아이디어를 선택했습니다.");
+      return true;
+    }
+
+    setPersonalNotes((prev) =>
+      prev.map((note) =>
+        note.id === pendingPersonalNoteLinkId
+          ? {
+              ...note,
+              agendaId: item.agenda_id || note.agendaId,
+              linkedCanvasItemId: item.id,
+              linkedCanvasItemTitle: item.title || "연결 아이디어",
+            }
+          : note,
+      ),
+    );
+    setPendingPersonalNoteLinkId("");
+    setFocusedCanvasItemId(item.id);
+    setSelectedCanvasItemId(item.id);
+    setSelectedNodeId(`canvas-item-${item.id}`);
+    setActivityMessage("개인 메모를 선택한 아이디어 노드에 연결했습니다.");
+    return true;
+  };
+
   const handleCanvasNodeClick = (event: React.MouseEvent, node: Node) => {
     setSelectedEdgeId("");
     setSelectedNodeId(node.id);
@@ -10353,6 +10466,9 @@ export default function MeetingCanvasTab({
     if (node.id.startsWith("canvas-item-")) {
       const canvasItemId = node.id.slice("canvas-item-".length);
       const canvasItem = canvasItems.find((item) => item.id === canvasItemId) || null;
+      if (canvasItem && linkPendingPersonalNoteToCanvasItem(canvasItem)) {
+        return;
+      }
       setSelectedCanvasItemId(canvasItemId);
       setSelectedProblemGroupId("");
       setSelectedSolutionTopicId("");
@@ -11397,6 +11513,13 @@ export default function MeetingCanvasTab({
                                     {item.sourceCount}개
                                   </span>
                                 ) : null}
+                                <button
+                                  type="button"
+                                  onClick={() => focusCanvasItemInIdeation(item.id, "하위 아이디어 위치로 이동했습니다.")}
+                                  className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                                >
+                                  원문 이동
+                                </button>
                               </div>
                               {item.keywords.length > 0 ? (
                                 <div className="mt-3 flex flex-wrap gap-2">
@@ -11418,7 +11541,16 @@ export default function MeetingCanvasTab({
                         <div className="mt-4 space-y-3">
                           {leftPanelDetail.refinedItems.map((item, index) => (
                             <div key={`${leftPanelDetail.title}-refined-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                              <div className="flex items-start justify-between gap-3">
+                                <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                                <button
+                                  type="button"
+                                  onClick={() => focusCanvasItemInIdeation(item.sourceItemId, "정리된 발화의 원문 노드로 이동했습니다.")}
+                                  className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                                >
+                                  원문 이동
+                                </button>
+                              </div>
                               <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
                             </div>
                           ))}
@@ -11685,7 +11817,21 @@ export default function MeetingCanvasTab({
                         <div className="space-y-2">
                           {allRefinedTranscriptSentences.map((item, index) => (
                             <div key={`all-refined-${item.utterance_id}-${index}`} className="rounded-xl bg-[#fafafa] px-3 py-2">
-                              <p className="text-xs font-semibold text-slate-500">{item.speaker || `발화 ${index + 1}`}</p>
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="text-xs font-semibold text-slate-500">{item.speaker || `발화 ${index + 1}`}</p>
+                                  {item.sourceItemTitle ? (
+                                    <p className="mt-0.5 truncate text-[11px] text-slate-400">{item.sourceItemTitle}</p>
+                                  ) : null}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => focusCanvasItemInIdeation(item.sourceItemId, "전사 내용의 원문 노드로 이동했습니다.")}
+                                  className="shrink-0 rounded-full border border-black/10 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                                >
+                                  원문 이동
+                                </button>
+                              </div>
                               <p className="mt-1 text-sm leading-6 text-slate-700">{stripLeadingTimestamp(item.text)}</p>
                             </div>
                           ))}
@@ -12379,10 +12525,11 @@ export default function MeetingCanvasTab({
                   <p className="text-xs font-medium text-black/50">개인 노트</p>
                   <h3 className="mt-1 text-xl font-semibold text-black">개인 노트</h3>
                 </div>
-                <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-medium text-[#4d4d4d]">{personalNotes.length}개</span>
+                <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-medium text-[#4d4d4d]">{projectPersonalNotes.length}개</span>
               </div>
               <div className="mt-4 space-y-3">
-                <select value={selectedAgendaId} onChange={(event) => setSelectedAgendaId(event.target.value)} className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none">
+                <select value={composerAgendaId} onChange={(event) => setComposerAgendaId(event.target.value)} className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none">
+                  <option value="">프로젝트 전체 메모</option>
                   {agendaModels.map((agenda) => (
                     <option key={agenda.id} value={agenda.id}>
                       {agenda.title}
@@ -12391,6 +12538,60 @@ export default function MeetingCanvasTab({
                 </select>
                 <input value={composerTitle} onChange={(event) => setComposerTitle(event.target.value)} placeholder="메모 제목" className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none" />
                 <textarea ref={composerBodyRef} value={composerBody} onChange={(event) => setComposerBody(event.target.value)} placeholder="메모 내용" className="min-h-[118px] w-full rounded-2xl border border-black/10 bg-white px-4 py-3.5 text-base leading-7 text-[#4d4d4d] focus:border-black/30 focus:outline-none" />
+                <div className="rounded-xl border border-black/10 bg-white px-3 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-[#4d4d4d]">연결 아이디어</p>
+                      <p className="mt-1 truncate text-xs leading-5 text-black/45">
+                        {composerLinkedCanvasItemId
+                          ? composerLinkedCanvasItemTitle || "선택된 아이디어"
+                          : "선택하지 않아도 메모를 저장할 수 있습니다."}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPendingPersonalNoteLinkId(COMPOSER_PERSONAL_NOTE_LINK_ID);
+                          setStage("ideation");
+                          setLeftPanelTab("detail");
+                          setActivityMessage("캔버스에서 이 메모에 미리 연결할 아이디어 노드를 클릭해 주세요.");
+                        }}
+                        className="rounded-full border border-black/10 bg-[#fafafa] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                      >
+                        {composerLinkedCanvasItemId ? "다시 선택" : "아이디어 선택"}
+                      </button>
+                      {composerLinkedCanvasItemId ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setComposerLinkedCanvasItemId("");
+                            setComposerLinkedCanvasItemTitle("");
+                          }}
+                          className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                        >
+                          해제
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+                {pendingPersonalNoteLinkId ? (
+                  <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3 text-sm leading-6 text-blue-700">
+                    {pendingPersonalNoteLinkId === COMPOSER_PERSONAL_NOTE_LINK_ID
+                      ? "작성 중인 메모에 연결할 아이디어 노드를 캔버스에서 선택해 주세요."
+                      : "연결할 아이디어 노드를 캔버스에서 선택해 주세요."}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPendingPersonalNoteLinkId("");
+                      }}
+                      className="ml-2 font-semibold underline underline-offset-2"
+                    >
+                      취소
+                    </button>
+                  </div>
+                ) : null}
                 <button type="button" onClick={handleAddPersonalNote} className="ml-auto block rounded-full bg-[#eff0f6] px-5 py-2 text-sm font-medium text-[#4d4d4d] hover:bg-[#e3e5ee]">
                   개인 메모 저장
                 </button>
@@ -12403,10 +12604,10 @@ export default function MeetingCanvasTab({
                 <p className="mt-2 text-sm leading-6 text-slate-500">메모 카드를 문제 정의 그룹으로 드래그해서 편입할 수 있습니다.</p>
               ) : null}
               <div className="mt-4 space-y-3">
-                {personalNotes.length === 0 ? (
-                  <p className="text-base leading-7 text-slate-500">아직 저장한 개인 메모가 없습니다.</p>
+                {projectPersonalNotes.length === 0 ? (
+                  <p className="text-base leading-7 text-slate-500">이 프로젝트에 저장한 개인 메모가 없습니다.</p>
                 ) : (
-                  personalNotes.map((note) => {
+                  projectPersonalNotes.map((note) => {
                     const isEditing = editingPersonalNoteId === note.id;
 
                     return (
@@ -12468,6 +12669,7 @@ export default function MeetingCanvasTab({
                               onChange={(event) => setPersonalNoteDraftAgendaId(event.target.value)}
                               className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
                             >
+                              <option value="">프로젝트 전체 메모</option>
                               {agendaModels.map((agenda) => (
                                 <option key={agenda.id} value={agenda.id}>
                                   {agenda.title}
@@ -12483,7 +12685,64 @@ export default function MeetingCanvasTab({
                         ) : (
                           <p className="mt-2 text-base leading-7 text-slate-600">{note.body}</p>
                         )}
-                        <p className="mt-3 text-sm text-slate-400">연결 그룹: {agendaModels.find((agenda) => agenda.id === (isEditing ? personalNoteDraftAgendaId : note.agendaId))?.title || "미지정"}</p>
+                        {!isEditing ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {note.linkedCanvasItemId ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => focusCanvasItemInIdeation(note.linkedCanvasItemId || "", "개인 메모와 연결된 아이디어로 이동했습니다.")}
+                                  className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                                >
+                                  연결 아이디어: {note.linkedCanvasItemTitle || "아이디어"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setPendingPersonalNoteLinkId(note.id);
+                                    setStage("ideation");
+                                    setActivityMessage("캔버스에서 새로 연결할 아이디어 노드를 클릭해 주세요.");
+                                  }}
+                                  className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                                >
+                                  다른 아이디어 연결
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setPersonalNotes((prev) =>
+                                      prev.map((item) =>
+                                        item.id === note.id
+                                          ? {
+                                              ...item,
+                                              linkedCanvasItemId: "",
+                                              linkedCanvasItemTitle: "",
+                                            }
+                                          : item,
+                                      ),
+                                    )
+                                  }
+                                  className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                                >
+                                  연결 해제
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPendingPersonalNoteLinkId(note.id);
+                                  setStage("ideation");
+                                  setActivityMessage("캔버스에서 연결할 아이디어 노드를 클릭해 주세요.");
+                                }}
+                                className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                              >
+                                아이디어 연결
+                              </button>
+                            )}
+                          </div>
+                        ) : null}
+                        <p className="mt-3 text-sm text-slate-400">연결 그룹: {agendaModels.find((agenda) => agenda.id === (isEditing ? personalNoteDraftAgendaId : note.agendaId))?.title || "프로젝트 전체"}</p>
                       </article>
                     );
                   })
