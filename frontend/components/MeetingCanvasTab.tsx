@@ -3231,8 +3231,10 @@ export default function MeetingCanvasTab({
       return;
     }
 
+    const latestChangedItem = [...changedItems].reverse().find((item) => item.agenda_id);
     const changedTopic = [...changedItems].reverse().find(isTopicCanvasItem);
-    setLatestHighlightedTopicId(changedTopic?.id || "");
+    const latestTopicId = changedTopic?.id || (latestChangedItem ? getCanvasItemTopLevelAncestorId(canvasItems, latestChangedItem.id) : "");
+    setLatestHighlightedTopicId(latestTopicId);
   }, [canvasItems]);
 
   useEffect(() => {
@@ -10343,6 +10345,13 @@ export default function MeetingCanvasTab({
     const rootItem = canvasItems.find((item) => item.id === rootId) || null;
     return rootItem?.agenda_id === selectedAgendaForIdeationCanvas ? rootItem : null;
   }, [canvasItems, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
+  const latestDiscussionRootItem = useMemo(() => {
+    if (!latestHighlightedTopicId) return null;
+    const latestItem = canvasItems.find((item) => item.id === latestHighlightedTopicId) || null;
+    if (!latestItem) return null;
+    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, latestItem.id);
+    return canvasItems.find((item) => item.id === rootId) || latestItem;
+  }, [canvasItems, latestHighlightedTopicId]);
   const ideationSplitNodes = useMemo(() => {
     if (stage !== "ideation") {
       return { left: [] as Node[], right: [] as Node[] };
@@ -10456,6 +10465,26 @@ export default function MeetingCanvasTab({
     setSelectedNodeId(`canvas-item-${item.id}`);
     setActivityMessage("개인 메모를 선택한 아이디어 노드에 연결했습니다.");
     return true;
+  };
+
+  const handleMoveToCurrentDiscussionGroup = () => {
+    if (!latestDiscussionRootItem) {
+      setActivityMessage("아직 AI가 업데이트한 논의 그룹이 없습니다.");
+      return;
+    }
+
+    setStage("ideation");
+    setSelectedAgendaId(latestDiscussionRootItem.agenda_id || selectedAgendaId || agendaModels[0]?.id || "");
+    setSelectedCanvasItemId(latestDiscussionRootItem.id);
+    setSelectedNodeId(`canvas-item-${latestDiscussionRootItem.id}`);
+    setSelectedProblemGroupId("");
+    setSelectedProblemSourceNodeId("");
+    setSelectedSolutionTopicId("");
+    setSelectedEdgeId("");
+    setFocusedCanvasItemId(latestDiscussionRootItem.id);
+    setLatestHighlightedTopicId(latestDiscussionRootItem.id);
+    setLeftPanelTab("detail");
+    setActivityMessage("현재 논의 중인 그룹으로 이동했습니다.");
   };
 
   const handleCanvasNodeClick = (event: React.MouseEvent, node: Node) => {
@@ -10597,6 +10626,17 @@ export default function MeetingCanvasTab({
                 className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee]"
               >
                 {syncModeLabel(sharedSyncEnabled)}
+              </button>
+              <button
+                type="button"
+                onClick={handleMoveToCurrentDiscussionGroup}
+                className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
+                  latestDiscussionRootItem
+                    ? "bg-[#eef4ff] text-[#1b59f8] hover:bg-[#e0ebff]"
+                    : "bg-[#eff0f6] text-[#8b8f9a]"
+                }`}
+              >
+                논의 그룹
               </button>
               <button
                 type="button"
