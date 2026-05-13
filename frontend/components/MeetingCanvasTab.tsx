@@ -1422,6 +1422,15 @@ const CANVAS_TOPIC_CHILD_GAP_X = 24;
 const CANVAS_TOPIC_CHILD_GAP_Y = 14;
 const CANVAS_TOPIC_CHILDS_PER_ROW = 999;
 const CANVAS_IDEATION_DROP_ZONE_VERTICAL_PADDING = 28;
+const CANVAS_IDEATION_LEFT_X = 0;
+const CANVAS_IDEATION_RIGHT_X = 0;
+const CANVAS_IDEATION_FRAME_Y = 0;
+const CANVAS_IDEATION_LEFT_WIDTH = 360;
+const CANVAS_IDEATION_RIGHT_WIDTH = 820;
+const CANVAS_IDEATION_HEADER_HEIGHT = 92;
+const CANVAS_IDEATION_GROUP_GAP_Y = 18;
+const CANVAS_IDEATION_DETAIL_GAP_X = 28;
+const CANVAS_IDEATION_DETAIL_GAP_Y = 24;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
@@ -1614,6 +1623,68 @@ function getTopicDescendantTopicIds(
   return [...new Set(topicIds)];
 }
 
+function getCanvasItemTopLevelAncestorId(
+  items: CanvasItemViewModel[],
+  itemId: string,
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  let current = itemById.get(itemId) || null;
+  const visited = new Set<string>();
+
+  while (current?.parent_topic_id && !visited.has(current.id)) {
+    visited.add(current.id);
+    const parent = itemById.get(current.parent_topic_id);
+    if (!parent) break;
+    current = parent;
+  }
+
+  return current?.id || itemId;
+}
+
+function getCanvasItemDescendantIds(
+  items: CanvasItemViewModel[],
+  itemId: string,
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const descendantIds: string[] = [];
+  const visited = new Set<string>();
+
+  const visit = (parentId: string) => {
+    if (visited.has(parentId)) return;
+    visited.add(parentId);
+
+    getTopicDirectChildIds(items, parentId).forEach((childId) => {
+      const child = itemById.get(childId);
+      if (!child || descendantIds.includes(child.id)) return;
+      descendantIds.push(child.id);
+      visit(child.id);
+    });
+  };
+
+  visit(itemId);
+  return descendantIds;
+}
+
+function getCanvasItemDepth(
+  items: CanvasItemViewModel[],
+  itemId: string,
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  let current = itemById.get(itemId) || null;
+  let depth = 0;
+  const visited = new Set<string>();
+
+  while (current?.parent_topic_id && !visited.has(current.id)) {
+    visited.add(current.id);
+    const parent = itemById.get(current.parent_topic_id);
+    if (!parent) break;
+    depth += 1;
+    current = parent;
+  }
+
+  return depth;
+}
+
 function buildUserMergedTopicTitle(
   left: CanvasItemViewModel,
   right: CanvasItemViewModel,
@@ -1731,6 +1802,86 @@ function makeCanvasItemNodeLabel(
           </p>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function makeIdeationFrameLabel(title: string, subtitle: string, countLabel: string) {
+  return (
+    <div className="h-full min-h-full rounded-[28px] border border-black/10 bg-white/70 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">{title}</p>
+          <p className="mt-1 text-sm leading-6 text-[#4d4d4d]">{subtitle}</p>
+        </div>
+        <span className="shrink-0 rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
+          {countLabel}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function makeIdeationGroupNodeLabel(
+  item: CanvasItemViewModel,
+  selected: boolean,
+  childItems: CanvasItemViewModel[],
+  descendantCount: number,
+  highlighted = false,
+) {
+  const tone = canvasItemTone((item.kind as ComposerTool) || "topic");
+  const title = item.ai_pending ? "AI 정리 중" : item.title || "그룹";
+  const body = item.ai_pending ? "하위 내용을 정리하는 중" : cleanCanvasNodeBodyText(item.body);
+  const childPreview = childItems.slice(0, 3);
+  const borderClass = selected ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]" : "border-black/10";
+  const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
+
+  return (
+    <div className="min-w-0">
+      <div className={`rounded-[20px] border px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition ${backgroundClass} ${borderClass}`}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="rounded-full bg-white/85 px-3 py-1 text-[11px] font-semibold text-[#4d4d4d]">
+            그룹
+          </span>
+          <span className="rounded-full bg-black/5 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d]">
+            하위 {descendantCount}
+          </span>
+        </div>
+        <strong className="mt-3 block line-clamp-2 text-[17px] font-semibold leading-6 text-black">
+          {title}
+        </strong>
+        {body ? (
+          <p className="mt-2 line-clamp-2 text-sm leading-6 text-[#4d4d4d]">
+            {body}
+          </p>
+        ) : null}
+        {childPreview.length > 0 ? (
+          <div className="mt-4 space-y-1.5 border-l border-black/15 pl-3">
+            {childPreview.map((child) => (
+              <div key={`${item.id}-child-preview-${child.id}`} className="flex items-center gap-2 text-xs text-[#4d4d4d]">
+                <span className="h-1.5 w-1.5 rounded-full bg-[#1b59f8]/60" />
+                <span className="truncate">{child.title || toolLabel((child.kind as ComposerTool) || "note")}</span>
+              </div>
+            ))}
+            {descendantCount > childPreview.length ? (
+              <p className="text-xs font-medium text-[#1b59f8]">+{descendantCount - childPreview.length}개 더 있음</p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mt-4 rounded-xl border border-dashed border-black/10 bg-white/60 px-3 py-2 text-xs leading-5 text-[#777]">
+            아직 오른쪽 캔버스에 하위 내용이 없습니다.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function makeIdeationEmptyDetailLabel(title: string, body: string) {
+  return (
+    <div className="flex min-h-[180px] flex-col items-center justify-center rounded-[24px] border border-dashed border-black/10 bg-white/75 px-6 py-8 text-center">
+      <p className="text-base font-semibold text-slate-900">{title}</p>
+      <p className="mt-2 max-w-[320px] text-sm leading-6 text-slate-500">{body}</p>
     </div>
   );
 }
@@ -2677,6 +2828,8 @@ export default function MeetingCanvasTab({
   const composerBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const canvasSurfaceRef = useRef<HTMLDivElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
+  const ideationLeftFlowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
+  const ideationRightFlowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
   const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startRatio: number } | null>(null);
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
@@ -5768,6 +5921,352 @@ export default function MeetingCanvasTab({
       };
     }
 
+    if (stage === "ideation") {
+      const selectedAgendaForIdeation = selectedAgendaId || agendaModels[0]?.id || "";
+      const canvasItemById = new Map(canvasItems.map((item) => [item.id, item]));
+      const canvasItemHeights = new Map(canvasItems.map((item) => [item.id, estimateCanvasItemNodeHeight(item)]));
+      const originalOrder = new Map(canvasItems.map((item, index) => [item.id, index]));
+      const sortByCanvasOrder = (items: CanvasItemViewModel[]) =>
+        [...items].sort((left, right) => (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0));
+      const selectedRootId = selectedCanvasItemId
+        ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
+        : "";
+      const selectedRootCandidate = selectedRootId ? canvasItemById.get(selectedRootId) || null : null;
+      const activeRootItem =
+        selectedRootCandidate?.agenda_id === selectedAgendaForIdeation
+          ? selectedRootCandidate
+          : null;
+      const topLevelItems = sortByCanvasOrder(
+        canvasItems.filter(
+          (item) => item.agenda_id === selectedAgendaForIdeation && !item.parent_topic_id,
+        ),
+      );
+      const descendantIdsByItem = new Map(
+        topLevelItems.map((item) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
+      );
+      const activeDescendantItems = activeRootItem
+        ? (descendantIdsByItem.get(activeRootItem.id) || getCanvasItemDescendantIds(canvasItems, activeRootItem.id))
+            .map((itemId) => canvasItemById.get(itemId))
+            .filter((item): item is CanvasItemViewModel => Boolean(item))
+        : [];
+      const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
+      const leftHeights = topLevelItems.map((item) => {
+        const descendantCount = descendantIdsByItem.get(item.id)?.length || 0;
+        return Math.max(190, 156 + Math.min(descendantCount, 3) * 24 + (descendantCount > 3 ? 18 : 0));
+      });
+      const leftPositions: Array<{ x: number; y: number }> = [];
+      let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
+      leftHeights.forEach((height) => {
+        leftPositions.push({
+          x: CANVAS_IDEATION_LEFT_X + 24,
+          y: nextLeftY,
+        });
+        nextLeftY += height + CANVAS_IDEATION_GROUP_GAP_Y;
+      });
+
+      const rightUsesGroupSelector = !activeRootItem;
+      const agendaHeights = agendaModels.map((agenda) =>
+        estimateAgendaNodeHeight(
+          agenda.title,
+          stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
+          agenda.keywords.length,
+        ),
+      );
+      const rightItemHeights = rightUsesGroupSelector
+        ? agendaHeights
+        : activeDescendantItems.map((item) => canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
+      const rightPositions = buildGridPositions(
+        rightItemHeights,
+        CANVAS_ITEM_NODE_WIDTH + CANVAS_IDEATION_DETAIL_GAP_X,
+        CANVAS_IDEATION_DETAIL_GAP_Y,
+        CANVAS_IDEATION_RIGHT_X + 28,
+        CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT,
+      );
+      const leftBottom = leftPositions.reduce(
+        (maxBottom, position, index) => Math.max(maxBottom, position.y + (leftHeights[index] || 0)),
+        CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 180,
+      );
+      const rightBottom = rightPositions.reduce(
+        (maxBottom, position, index) => Math.max(maxBottom, position.y + (rightItemHeights[index] || 0)),
+        CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 220,
+      );
+      const frameHeight = Math.max(640, leftBottom, rightBottom) - CANVAS_IDEATION_FRAME_Y + 56;
+      const frameDescriptors: CanvasNodeDescriptor[] = [
+        {
+          id: "ideation-left-frame",
+          position: { x: CANVAS_IDEATION_LEFT_X, y: CANVAS_IDEATION_FRAME_Y },
+          positionSource: "computed",
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+          className: "pointer-events-none !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: CANVAS_IDEATION_LEFT_WIDTH, height: frameHeight, padding: 0 },
+          draggable: false,
+          selectable: false,
+          zIndex: 0,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "ideation-left-frame",
+              selectedAgendaForIdeation,
+              topLevelItems.length,
+              frameHeight,
+            ]),
+            label: makeIdeationFrameLabel(
+              "Group Canvas",
+              selectedAgendaModel
+                ? `${selectedAgendaModel.title}의 1차 그룹`
+                : "그룹분류를 선택해 주세요.",
+              `${topLevelItems.length}개`,
+            ),
+          },
+        },
+        {
+          id: "ideation-right-frame",
+          position: { x: CANVAS_IDEATION_RIGHT_X, y: CANVAS_IDEATION_FRAME_Y },
+          positionSource: "computed",
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+          className: "pointer-events-none !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: CANVAS_IDEATION_RIGHT_WIDTH, height: frameHeight, padding: 0 },
+          draggable: false,
+          selectable: false,
+          zIndex: 0,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "ideation-right-frame",
+              activeRootItem?.id || "agenda-selector",
+              rightUsesGroupSelector,
+              activeDescendantItems.length,
+              frameHeight,
+            ]),
+            label: makeIdeationFrameLabel(
+              rightUsesGroupSelector ? "Group Selector" : "Detail Canvas",
+              rightUsesGroupSelector
+                ? "빈공간에서는 그룹분류를 선택합니다."
+                : `${activeRootItem?.title || "선택 그룹"} 하위 내용을 전체 펼침으로 표시합니다.`,
+              rightUsesGroupSelector ? `${agendaModels.length}개 분류` : `${activeDescendantItems.length}개`,
+            ),
+          },
+        },
+      ];
+      const leftGroupDescriptors: CanvasNodeDescriptor[] = topLevelItems.map((item, index) => {
+        const descendantIds = descendantIdsByItem.get(item.id) || [];
+        const childItems = descendantIds
+          .slice(0, 3)
+          .map((itemId) => canvasItemById.get(itemId))
+          .filter((child): child is CanvasItemViewModel => Boolean(child));
+        const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
+
+        return {
+          id: `canvas-item-${item.id}`,
+          position: leftPositions[index],
+          positionSource: "computed",
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+          className: "!border-0 !bg-transparent !p-0 !shadow-none",
+          style: {
+            width: CANVAS_IDEATION_LEFT_WIDTH - 48,
+            height: leftHeights[index],
+            background: "transparent",
+            border: "none",
+            boxShadow: "none",
+            padding: 0,
+          },
+          zIndex: 2,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "ideation-left-group",
+              item.id,
+              item.kind,
+              item.title,
+              item.body,
+              item.ai_pending,
+              activeRootItem?.id === item.id,
+              highlighted,
+              ...descendantIds,
+              ...childItems.map((child) => child.title),
+            ]),
+            label: makeIdeationGroupNodeLabel(
+              item,
+              activeRootItem?.id === item.id,
+              childItems,
+              descendantIds.length,
+              highlighted,
+            ),
+          },
+        };
+      });
+      const rightDetailDescriptors: CanvasNodeDescriptor[] = rightUsesGroupSelector
+        ? agendaModels.map((agenda, index) => ({
+            id: `agenda-${agenda.id}`,
+            position: rightPositions[index],
+            positionSource: "computed" as const,
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)]",
+            style: { width: 300, minHeight: agendaHeights[index], borderRadius: 28, padding: 0 },
+            draggable: false,
+            zIndex: 2,
+            data: {
+              contentSignature: buildNodeContentSignature([
+                "ideation-agenda-selector",
+                agenda.id,
+                agenda.title,
+                agenda.status,
+                selectedAgendaForIdeation === agenda.id,
+                ...(agenda.keywords || []),
+                ...(agenda.summaryBullets || []),
+              ]),
+              label: makeAgendaNodeLabel(
+                agenda.title,
+                stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
+                selectedAgendaForIdeation === agenda.id ? "SELECTED" : agenda.status,
+                agenda.keywords || [],
+              ),
+            },
+          }))
+        : activeDescendantItems.length > 0
+          ? activeDescendantItems.map((item, index) => {
+              const nodeId = `canvas-item-${item.id}`;
+              const linkedAgendaTitle =
+                agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
+              const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
+              const depth = getCanvasItemDepth(canvasItems, item.id);
+
+              return {
+                id: nodeId,
+                position: {
+                  x: rightPositions[index].x + Math.min(depth, 3) * 18,
+                  y: rightPositions[index].y,
+                },
+                positionSource: "computed" as const,
+                sourcePosition: Position.Bottom,
+                targetPosition: Position.Top,
+                className: "!border-0 !bg-transparent !p-0 !shadow-none",
+                style: {
+                  width: CANVAS_ITEM_NODE_WIDTH,
+                  height: itemHeight,
+                  background: "transparent",
+                  border: "none",
+                  boxShadow: "none",
+                  padding: 0,
+                },
+                zIndex: 2,
+                data: {
+                  contentSignature: buildNodeContentSignature([
+                    "ideation-detail-item",
+                    item.id,
+                    item.kind,
+                    item.title,
+                    item.body,
+                    ...(item.keywords || []),
+                    item.agenda_id,
+                    item.point_id,
+                    item.parent_topic_id || "",
+                    depth,
+                    selectedCanvasItemId === item.id,
+                    ...(item.child_item_ids || []),
+                  ]),
+                  label: makeCanvasItemNodeLabel(
+                    item,
+                    selectedCanvasItemId === item.id,
+                    linkedAgendaTitle,
+                    handleToggleTopicCollapsed,
+                    isTopicCanvasItem(item) && latestHighlightedTopicId === item.id,
+                  ),
+                },
+              };
+            })
+          : [
+              {
+                id: "ideation-empty-detail",
+                position: {
+                  x: CANVAS_IDEATION_RIGHT_X + 110,
+                  y: CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 60,
+                },
+                positionSource: "computed" as const,
+                sourcePosition: Position.Bottom,
+                targetPosition: Position.Top,
+                className: "!border-0 !bg-transparent !p-0 !shadow-none",
+                style: { width: 420, minHeight: 180, padding: 0 },
+                draggable: false,
+                selectable: false,
+                zIndex: 2,
+                data: {
+                  contentSignature: buildNodeContentSignature([
+                    "ideation-empty-detail",
+                    activeRootItem?.id || "",
+                    activeRootItem?.title || "",
+                  ]),
+                  label: makeIdeationEmptyDetailLabel(
+                    "아직 하위 내용이 없습니다.",
+                    "오른쪽 캔버스에 메모/댓글을 추가하거나 STT로 생성된 아이디어가 병합되면 이 영역에 표시됩니다.",
+                  ),
+                },
+              },
+            ];
+
+      return {
+        layoutSignature: buildNodeContentSignature([
+          stage,
+          selectedAgendaForIdeation,
+          activeRootItem?.id || "",
+          ...agendaModels.map((agenda) => agenda.id),
+          ...canvasItems.flatMap((item) => [
+            item.id,
+            item.kind,
+            item.parent_topic_id || "",
+            item.agenda_id || "",
+            ...(item.child_item_ids || []),
+          ]),
+        ]),
+        nodeDescriptors: [
+          ...frameDescriptors,
+          ...leftGroupDescriptors,
+          ...rightDetailDescriptors,
+          ...(ideationDropPreview
+            ? [
+                {
+                  id: "ideation-drop-placeholder",
+                  position: ideationDropPreview.position,
+                  positionSource: "computed" as const,
+                  sourcePosition: Position.Right,
+                  targetPosition: Position.Left,
+                  className: "imms-ideation-drop-placeholder pointer-events-none !border-0 !bg-transparent !p-0 !shadow-none",
+                  style: {
+                    width: CANVAS_ITEM_NODE_WIDTH,
+                    height: 158,
+                    background: "transparent",
+                    border: "none",
+                    boxShadow: "none",
+                    padding: 0,
+                  },
+                  draggable: false,
+                  selectable: false,
+                  zIndex: 3,
+                  data: {
+                    contentSignature: buildNodeContentSignature([
+                      "ideation-drop-placeholder",
+                      ideationDropPreview.draggedItemId,
+                      ideationDropPreview.targetId,
+                      ideationDropPreview.mode,
+                      ideationDropPreview.agendaId,
+                      ideationDropPreview.position.x,
+                      ideationDropPreview.position.y,
+                    ]),
+                    label: (
+                      <div className="flex h-full min-h-[158px] flex-col items-center justify-center rounded-[18px] border-2 border-dashed border-[#1b59f8]/55 bg-[#eef4ff]/80 px-5 py-4 text-center shadow-[inset_0_0_0_5px_rgba(27,89,248,0.08),0_16px_34px_rgba(27,89,248,0.12)]">
+                        <p className="text-[15px] font-semibold text-[#1b59f8]">{ideationDropPreview.label}</p>
+                        <p className="mt-2 text-[13px] leading-5 text-[#4d4d4d]">{ideationDropPreview.hint}</p>
+                      </div>
+                    ),
+                  },
+                },
+              ]
+            : []),
+        ],
+      };
+    }
+
     const agendaHeights = agendaModels.map((agenda) =>
       estimateAgendaNodeHeight(
         agenda.title,
@@ -6123,6 +6622,7 @@ export default function MeetingCanvasTab({
     problemGroups,
     problemIdeaDrag,
     problemIdeaDropPreview,
+    selectedAgendaId,
     selectedCanvasItemId,
     selectedNodeId,
     selectedProblemGroupId,
@@ -7317,7 +7817,35 @@ export default function MeetingCanvasTab({
         return;
       }
 
-      const nextAgendaId = agendaId || selectedAgendaId || agendaModels[0]?.id || "";
+      const clickedCanvasItemId = extractCanvasItemIdFromNodeId(pointId || "");
+      const clickedCanvasItem = clickedCanvasItemId
+        ? canvasItems.find((item) => item.id === clickedCanvasItemId) || null
+        : null;
+      const selectedRootItemId = selectedCanvasItemId
+        ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
+        : "";
+      const selectedRootItem = selectedRootItemId
+        ? canvasItems.find((item) => item.id === selectedRootItemId) || null
+        : null;
+      const parentItemForPlacement =
+        stage === "ideation" && tool !== "topic"
+          ? clickedCanvasItem || selectedRootItem
+          : null;
+
+      if (stage === "ideation" && tool !== "topic" && !parentItemForPlacement) {
+        setActivityMessage("먼저 왼쪽 그룹을 선택한 뒤 오른쪽 캔버스에 메모나 댓글을 추가해 주세요.");
+        setArmedCanvasTool(null);
+        setCanvasPlacementPreview(null);
+        return;
+      }
+
+      const nextAgendaId =
+        agendaId ||
+        parentItemForPlacement?.agenda_id ||
+        selectedAgendaId ||
+        agendaModels[0]?.id ||
+        "";
+      const nextParentItemId = parentItemForPlacement?.id || "";
       const draftTitle = `${toolLabel(tool)} ${canvasItems.filter((item) => item.kind === tool).length + 1}`;
       const nextItemId = `item-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
       const nextNodeId = `canvas-item-${nextItemId}`;
@@ -7338,9 +7866,9 @@ export default function MeetingCanvasTab({
         refined_utterances: [],
         evidence_utterance_ids: [],
         ignored_utterance_ids: [],
-        parent_topic_id: "",
-        parent_topic_source: "",
-        parent_topic_locked: false,
+        parent_topic_id: nextParentItemId,
+        parent_topic_source: nextParentItemId ? "user" : "",
+        parent_topic_locked: Boolean(nextParentItemId),
         child_item_ids: [],
         topic_collapsed: tool === "topic" ? false : undefined,
         created_by: "user",
@@ -7349,7 +7877,17 @@ export default function MeetingCanvasTab({
         user_edited: true,
         body: draftBody,
       };
-      const nextCanvasItemsSnapshot: CanvasItemViewModel[] = [nextItem, ...canvasItems];
+      const nextCanvasItemsSnapshot: CanvasItemViewModel[] = [
+        nextItem,
+        ...canvasItems.map((item) =>
+          item.id === nextParentItemId
+            ? {
+                ...item,
+                child_item_ids: [...new Set([...(item.child_item_ids || []), nextItemId])],
+              }
+            : item,
+        ),
+      ];
       const nextNodePositionsSnapshot = normalizeCanvasNodePositionsForComputedIdeation(nodePositions);
       latestSharedWorkspaceRef.current = {
         ...latestSharedWorkspaceRef.current,
@@ -7449,6 +7987,7 @@ export default function MeetingCanvasTab({
       persistedSharedImportedState,
       problemGroups,
       selectedAgendaId,
+      selectedCanvasItemId,
       selectedProblemGroupId,
       sharedSyncEnabled,
       solutionTopics,
@@ -9423,6 +9962,132 @@ export default function MeetingCanvasTab({
   const workspaceGridColumns = `clamp(200px, ${(leftPanelRatio * 100).toFixed(
     2,
   )}vw, 360px) minmax(0, 1fr) clamp(220px, ${(rightPanelRatio * 100).toFixed(2)}vw, 400px)`;
+  const selectedAgendaForIdeationCanvas = selectedAgendaId || agendaModels[0]?.id || "";
+  const selectedRootItemForIdeationCanvas = useMemo(() => {
+    if (stage !== "ideation" || !selectedCanvasItemId) return null;
+    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId);
+    const rootItem = canvasItems.find((item) => item.id === rootId) || null;
+    return rootItem?.agenda_id === selectedAgendaForIdeationCanvas ? rootItem : null;
+  }, [canvasItems, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
+  const ideationSplitNodes = useMemo(() => {
+    if (stage !== "ideation") {
+      return { left: [] as Node[], right: [] as Node[] };
+    }
+
+    const topLevelIds = new Set(
+      canvasItems
+        .filter((item) => item.agenda_id === selectedAgendaForIdeationCanvas && !item.parent_topic_id)
+        .map((item) => item.id),
+    );
+    const descendantIds = new Set(
+      selectedRootItemForIdeationCanvas
+        ? getCanvasItemDescendantIds(canvasItems, selectedRootItemForIdeationCanvas.id)
+        : [],
+    );
+
+    const leftNodes = nodes.filter((node) => {
+      const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
+      return canvasItemId ? topLevelIds.has(canvasItemId) : false;
+    });
+    const rightNodes = nodes.filter((node) => {
+      const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
+      if (selectedRootItemForIdeationCanvas) {
+        return canvasItemId ? descendantIds.has(canvasItemId) : node.id === "ideation-empty-detail";
+      }
+      return node.id.startsWith("agenda-");
+    });
+
+    return { left: leftNodes, right: rightNodes };
+  }, [canvasItems, nodes, selectedAgendaForIdeationCanvas, selectedRootItemForIdeationCanvas, stage]);
+  const ideationRightTitle = selectedRootItemForIdeationCanvas ? "Detail Canvas" : "Group Selector";
+  const ideationRightSubtitle = selectedRootItemForIdeationCanvas
+    ? `${selectedRootItemForIdeationCanvas.title || "선택 그룹"} 하위 노드 전체`
+    : "그룹분류를 선택하면 왼쪽 캔버스가 해당 그룹으로 바뀝니다.";
+
+  const handleCanvasNodeClick = (event: React.MouseEvent, node: Node) => {
+    setSelectedEdgeId("");
+    setSelectedNodeId(node.id);
+    setLeftPanelTab("detail");
+    const agendaId = extractAgendaIdFromNodeId(node.id);
+    if (node.id.startsWith("canvas-item-")) {
+      const canvasItemId = node.id.slice("canvas-item-".length);
+      const canvasItem = canvasItems.find((item) => item.id === canvasItemId) || null;
+      setSelectedCanvasItemId(canvasItemId);
+      setSelectedProblemGroupId("");
+      setSelectedSolutionTopicId("");
+      setEditingProblemGroupId("");
+      setEditingSolutionTopicId("");
+      if (canvasItem?.agenda_id) {
+        setSelectedAgendaId(canvasItem.agenda_id);
+      }
+    } else {
+      setSelectedCanvasItemId("");
+    }
+    if (node.id.startsWith("problem-discussion-")) {
+      const discussionId = node.id.slice("problem-discussion-".length);
+      const parentGroup = problemGroups.find((group) =>
+        (group.discussion_items || []).some((item) => item.id === discussionId),
+      );
+      setSelectedProblemGroupId(parentGroup?.group_id || "");
+      const discussion = parentGroup?.discussion_items?.find((item) => item.id === discussionId);
+      setSelectedProblemSourceNodeId(discussion?.target_node_id || "");
+      setSelectedSolutionTopicId("");
+      setSelectedCanvasItemId("");
+      setEditingProblemGroupId("");
+    } else if (node.id.startsWith("problem-")) {
+      setSelectedProblemGroupId(node.id.slice("problem-".length));
+      setSelectedProblemSourceNodeId("");
+      setSelectedSolutionTopicId("");
+      setSelectedCanvasItemId("");
+      setEditingProblemGroupId("");
+    }
+    if (node.id.startsWith("solution-")) {
+      setSelectedSolutionTopicId(node.id.slice("solution-".length));
+      setSelectedProblemGroupId("");
+      setSelectedCanvasItemId("");
+      setEditingSolutionTopicId("");
+    }
+    if (agendaId) {
+      setSelectedAgendaId(agendaId);
+    }
+    if (armedCanvasTool) {
+      void handleCanvasPlacementStart(
+        armedCanvasTool,
+        event.clientX,
+        event.clientY,
+        agendaId || selectedAgendaId || agendaModels[0]?.id,
+        node.id,
+      );
+    }
+  };
+
+  const handleCanvasEdgeClick = (event: React.MouseEvent, edge: Edge) => {
+    event.stopPropagation();
+    setSelectedEdgeId(edge.id);
+    setSelectedNodeId("");
+    setSelectedCanvasItemId("");
+    setSelectedProblemGroupId("");
+    setSelectedSolutionTopicId("");
+  };
+
+  const handleCanvasPaneClick = (event: React.MouseEvent) => {
+    setSelectedEdgeId("");
+    if (!armedCanvasTool) {
+      if (stage === "ideation") {
+        setSelectedCanvasItemId("");
+        setSelectedNodeId("");
+        setLeftPanelTab("detail");
+      }
+      return;
+    }
+    setSelectedCanvasItemId("");
+    void handleCanvasPlacementStart(
+      armedCanvasTool,
+      event.clientX,
+      event.clientY,
+      selectedAgendaId || agendaModels[0]?.id,
+    );
+  };
 
   return (
     <div className="h-full min-h-0 bg-[#f9f9f9] text-black">
@@ -10729,117 +11394,139 @@ export default function MeetingCanvasTab({
                 clearCanvasPlacementPreview();
               }}
             >
-              <ReactFlow
-                nodes={nodes}
-                edges={renderedEdges}
-                onInit={(instance) => {
-                  flowRef.current = instance;
-                }}
-                onNodeClick={(event, node) => {
-                  setSelectedEdgeId("");
-                  setSelectedNodeId(node.id);
-                  setLeftPanelTab("detail");
-                  const agendaId = extractAgendaIdFromNodeId(node.id);
-                  if (node.id.startsWith("canvas-item-")) {
-                    const canvasItemId = node.id.slice("canvas-item-".length);
-                    const canvasItem = canvasItems.find((item) => item.id === canvasItemId) || null;
-                    setSelectedCanvasItemId(canvasItemId);
-                    setSelectedProblemGroupId("");
-                    setSelectedSolutionTopicId("");
-                    setEditingProblemGroupId("");
-                    setEditingSolutionTopicId("");
-                    if (canvasItem?.agenda_id) {
-                      setSelectedAgendaId(canvasItem.agenda_id);
-                    }
-                  } else {
-                    setSelectedCanvasItemId("");
-                  }
-                  if (node.id.startsWith("problem-discussion-")) {
-                    const discussionId = node.id.slice("problem-discussion-".length);
-                    const parentGroup = problemGroups.find((group) =>
-                      (group.discussion_items || []).some((item) => item.id === discussionId),
-                    );
-                    setSelectedProblemGroupId(parentGroup?.group_id || "");
-                    const discussion = parentGroup?.discussion_items?.find((item) => item.id === discussionId);
-                    setSelectedProblemSourceNodeId(discussion?.target_node_id || "");
-                    setSelectedSolutionTopicId("");
-                    setSelectedCanvasItemId("");
-                    setEditingProblemGroupId("");
-                  } else if (node.id.startsWith("problem-")) {
-                    setSelectedProblemGroupId(node.id.slice("problem-".length));
-                    setSelectedProblemSourceNodeId("");
-                    setSelectedSolutionTopicId("");
-                    setSelectedCanvasItemId("");
-                    setEditingProblemGroupId("");
-                  }
-                  if (node.id.startsWith("solution-")) {
-                    setSelectedSolutionTopicId(node.id.slice("solution-".length));
-                    setSelectedProblemGroupId("");
-                    setSelectedCanvasItemId("");
-                    setEditingSolutionTopicId("");
-                  }
-                  if (agendaId) {
-                    setSelectedAgendaId(agendaId);
-                  }
-                  if (armedCanvasTool) {
-                    void handleCanvasPlacementStart(
-                      armedCanvasTool,
-                      event.clientX,
-                      event.clientY,
-                      agendaId || selectedAgendaId || agendaModels[0]?.id,
-                      node.id,
-                    );
-                  }
-                }}
-                onEdgeClick={(event, edge) => {
-                  event.stopPropagation();
-                  setSelectedEdgeId(edge.id);
-                  setSelectedNodeId("");
-                  setSelectedCanvasItemId("");
-                  setSelectedProblemGroupId("");
-                  setSelectedSolutionTopicId("");
-                }}
-                onPaneClick={(event) => {
-                  setSelectedEdgeId("");
-                  if (!armedCanvasTool) {
-                    return;
-                  }
-                  setSelectedCanvasItemId("");
-                  void handleCanvasPlacementStart(
-                    armedCanvasTool,
-                    event.clientX,
-                    event.clientY,
-                    selectedAgendaId || agendaModels[0]?.id,
-                  );
-                }}
-                onNodesChange={onNodesChange}
-                onNodeDragStart={onNodeDragStart}
-                onNodeDrag={onNodeDrag}
-                onNodeDragStop={onNodeDragStop}
-                onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
-                nodesConnectable={false}
-                elevateEdgesOnSelect
-                connectionLineStyle={{ stroke: "#0f172a", strokeOpacity: 0.9, strokeWidth: 2 }}
-                minZoom={0.45}
-                maxZoom={1.6}
-                defaultEdgeOptions={{
-                  type: "smoothstep",
-                  markerEnd: { type: MarkerType.ArrowClosed, color: "#475569" },
-                  interactionWidth: 28,
-                  zIndex: 10,
-                  style: { stroke: "#475569", strokeOpacity: 0.95, strokeWidth: 2 },
-                }}
-                proOptions={{ hideAttribution: true }}
-              >
-                <MiniMap
-                  zoomable
-                  pannable
-                  maskColor="rgba(15, 23, 42, 0.08)"
-                  nodeColor="#0f766e"
-                />
-                <Controls />
-              </ReactFlow>
+              {stage === "ideation" ? (
+                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(280px,0.38fr)_minmax(0,1fr)]">
+                  <div
+                    className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r"
+                    onMouseEnter={() => {
+                      flowRef.current = ideationLeftFlowRef.current;
+                    }}
+                  >
+                    <div className="shrink-0 border-b border-black/10 px-5 py-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">Group Canvas</p>
+                          <h3 className="mt-1 text-lg font-semibold text-slate-950">
+                            {selectedAgenda?.title || "그룹분류"}
+                          </h3>
+                        </div>
+                        <span className="rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
+                          {ideationSplitNodes.left.length}개
+                        </span>
+                      </div>
+                    </div>
+                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
+                      <ReactFlow<Node, Edge>
+                        nodes={ideationSplitNodes.left}
+                        edges={[] as Edge[]}
+                        onInit={(instance) => {
+                          ideationLeftFlowRef.current = instance;
+                          flowRef.current = instance;
+                        }}
+                        onNodeClick={handleCanvasNodeClick}
+                        onPaneClick={handleCanvasPaneClick}
+                        onNodesChange={onNodesChange}
+                        onNodeDragStart={onNodeDragStart}
+                        onNodeDrag={onNodeDrag}
+                        onNodeDragStop={onNodeDragStop}
+                        nodesConnectable={false}
+                        nodesDraggable={false}
+                        minZoom={0.45}
+                        maxZoom={1.6}
+                        proOptions={{ hideAttribution: true }}
+                      >
+                        <Controls />
+                      </ReactFlow>
+                    </div>
+                  </div>
+
+                  <div
+                    className="flex min-h-[420px] flex-col overflow-hidden bg-white"
+                    onMouseEnter={() => {
+                      flowRef.current = ideationRightFlowRef.current;
+                    }}
+                  >
+                    <div className="shrink-0 border-b border-black/10 px-5 py-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">{ideationRightTitle}</p>
+                          <h3 className="mt-1 text-lg font-semibold text-slate-950">{ideationRightSubtitle}</h3>
+                        </div>
+                        <span className="rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
+                          {ideationSplitNodes.right.length}개
+                        </span>
+                      </div>
+                    </div>
+                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
+                      <ReactFlow<Node, Edge>
+                        nodes={ideationSplitNodes.right}
+                        edges={[] as Edge[]}
+                        onInit={(instance) => {
+                          ideationRightFlowRef.current = instance;
+                          flowRef.current = instance;
+                        }}
+                        onNodeClick={handleCanvasNodeClick}
+                        onPaneClick={handleCanvasPaneClick}
+                        onNodesChange={onNodesChange}
+                        onNodeDragStart={onNodeDragStart}
+                        onNodeDrag={onNodeDrag}
+                        onNodeDragStop={onNodeDragStop}
+                        nodesConnectable={false}
+                        nodesDraggable={false}
+                        minZoom={0.45}
+                        maxZoom={1.6}
+                        proOptions={{ hideAttribution: true }}
+                      >
+                        <MiniMap
+                          zoomable
+                          pannable
+                          maskColor="rgba(15, 23, 42, 0.08)"
+                          nodeColor="#0f766e"
+                        />
+                        <Controls />
+                      </ReactFlow>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <ReactFlow
+                  nodes={nodes}
+                  edges={renderedEdges}
+                  onInit={(instance) => {
+                    flowRef.current = instance;
+                  }}
+                  onNodeClick={handleCanvasNodeClick}
+                  onEdgeClick={handleCanvasEdgeClick}
+                  onPaneClick={handleCanvasPaneClick}
+                  onNodesChange={onNodesChange}
+                  onNodeDragStart={onNodeDragStart}
+                  onNodeDrag={onNodeDrag}
+                  onNodeDragStop={onNodeDragStop}
+                  onEdgesChange={onEdgesChange}
+                  onConnect={onConnect}
+                  nodesConnectable={false}
+                  elevateEdgesOnSelect
+                  connectionLineStyle={{ stroke: "#0f172a", strokeOpacity: 0.9, strokeWidth: 2 }}
+                  minZoom={0.45}
+                  maxZoom={1.6}
+                  defaultEdgeOptions={{
+                    type: "smoothstep",
+                    markerEnd: { type: MarkerType.ArrowClosed, color: "#475569" },
+                    interactionWidth: 28,
+                    zIndex: 10,
+                    style: { stroke: "#475569", strokeOpacity: 0.95, strokeWidth: 2 },
+                  }}
+                  proOptions={{ hideAttribution: true }}
+                >
+                  <MiniMap
+                    zoomable
+                    pannable
+                    maskColor="rgba(15, 23, 42, 0.08)"
+                    nodeColor="#0f766e"
+                  />
+                  <Controls />
+                </ReactFlow>
+              )}
             </div>
 
             {selectedEdge ? (
