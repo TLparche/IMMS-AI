@@ -271,6 +271,7 @@ export interface CanvasWorkspaceItem {
   agenda_id: string;
   point_id?: string;
   kind: string;
+  status?: "discussion" | "confirmed" | "closed" | string;
   title: string;
   body: string;
   keywords?: string[];

@@ -653,6 +653,7 @@ def _normalize_canvas_merged_children(raw_children: Any, limit: int = 80, depth:
             "agenda_id": _safe_text(raw.get("agenda_id")),
             "point_id": _safe_text(raw.get("point_id")),
             "kind": _safe_text(raw.get("kind"), "note"),
+            "status": _safe_text(raw.get("status"), "discussion"),
             "title": title,
             "body": body,
             "keywords": [_safe_text(keyword) for keyword in (raw.get("keywords") or []) if _safe_text(keyword)][:8],
@@ -694,6 +695,7 @@ def _normalize_canvas_workspace_items(
             "agenda_id": _safe_text(item.agenda_id),
             "point_id": _safe_text(item.point_id),
             "kind": _safe_text(item.kind, "note"),
+            "status": _safe_text(item.status, "discussion"),
             "title": _safe_text(item.title),
             "body": _safe_text(item.body),
             "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
@@ -1819,6 +1821,7 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     agenda_id: str = ""
     point_id: str = ""
     kind: str = "note"
+    status: str = "discussion"
     title: str = ""
     body: str = ""
     keywords: list[str] = Field(default_factory=list)

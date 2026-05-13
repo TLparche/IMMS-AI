@@ -74,9 +74,11 @@ type ComposerTool = "note" | "comment" | "topic";
 type CanvasTool = ComposerTool | "group" | "problem-idea";
 type LeftPanelTab = "detail" | "agenda-list";
 type ProblemGroupStatus = "draft" | "review" | "final";
+type CanvasItemStatus = "discussion" | "confirmed" | "closed";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
+const CANVAS_ITEM_STATUSES: CanvasItemStatus[] = ["discussion", "confirmed", "closed"];
 const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
 const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
 const IDEA_ASSIMILATION_SILENCE_FLUSH_MS = 8_000;
@@ -327,6 +329,7 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasW
     agenda_id: item.agenda_id,
     point_id: item.point_id || "",
     kind: item.kind,
+    status: normalizeCanvasItemStatus(item.status),
     title: item.title,
     body: item.body,
     keywords: (item.keywords || []).map((keyword) => keyword.trim()).filter(Boolean),
@@ -819,6 +822,24 @@ function problemGroupStatusTone(status: ProblemGroupStatus) {
   if (status === "review") return "bg-blue-100 text-blue-700";
   if (status === "final") return "bg-emerald-100 text-emerald-700";
   return "bg-slate-100 text-slate-600";
+}
+
+function normalizeCanvasItemStatus(raw: string | undefined): CanvasItemStatus {
+  if (raw === "confirmed" || raw === "final") return "confirmed";
+  if (raw === "closed") return "closed";
+  return "discussion";
+}
+
+function canvasItemStatusLabel(status: CanvasItemStatus) {
+  if (status === "confirmed") return "확정";
+  if (status === "closed") return "종료";
+  return "논의";
+}
+
+function canvasItemStatusTone(status: CanvasItemStatus) {
+  if (status === "confirmed") return "bg-emerald-100 text-emerald-700 border-emerald-200";
+  if (status === "closed") return "bg-zinc-900 text-white border-zinc-900";
+  return "bg-blue-100 text-blue-700 border-blue-200";
 }
 
 function normalizeSolutionAiSuggestionStatus(raw: string | undefined): SolutionAiSuggestionStatus {
@@ -1702,10 +1723,65 @@ function buildUserMergedTopicTitle(
   return titleSource ? `${titleSource.slice(0, 12)} 묶음` : "새 주제 묶음";
 }
 
+function makeIdeationMergeDropPreview(
+  draggedItem: CanvasItemViewModel,
+  targetItem: CanvasItemViewModel,
+  position: { x: number; y: number },
+): IdeationDropPreviewState | null {
+  if (draggedItem.id === targetItem.id) return null;
+
+  if (isTopicCanvasItem(targetItem)) {
+    if (isTopicCanvasItem(draggedItem)) {
+      return {
+        draggedItemId: draggedItem.id,
+        targetId: targetItem.id,
+        mode: "topic-merge",
+        agendaId: targetItem.agenda_id || draggedItem.agenda_id,
+        position,
+        label: "토픽 통합",
+        hint: `"${targetItem.title || "토픽"}"과 합쳐 새 토픽으로 재구성합니다.`,
+      };
+    }
+
+    return {
+      draggedItemId: draggedItem.id,
+      targetId: targetItem.id,
+      mode: "topic",
+      agendaId: targetItem.agenda_id || draggedItem.agenda_id,
+      position,
+      label: "이 토픽에 병합",
+      hint: `"${targetItem.title || "토픽"}" 하위로 넣고 토픽 내용을 다시 정리합니다.`,
+    };
+  }
+
+  if (isTopicCanvasItem(draggedItem)) {
+    return {
+      draggedItemId: draggedItem.id,
+      targetId: targetItem.id,
+      mode: "topic-idea-merge",
+      agendaId: targetItem.agenda_id || draggedItem.agenda_id,
+      position,
+      label: "새 토픽으로 통합",
+      hint: `"${targetItem.title || "대상 노드"}"와 토픽을 새 주제로 묶습니다.`,
+    };
+  }
+
+  return {
+    draggedItemId: draggedItem.id,
+    targetId: targetItem.id,
+    mode: "merge",
+    agendaId: targetItem.agenda_id || draggedItem.agenda_id,
+    position,
+    label: "새 토픽으로 묶기",
+    hint: `"${targetItem.title || "대상 노드"}"와 함께 새 토픽을 만듭니다.`,
+  };
+}
+
 function getCanvasItemChangeSignature(item: CanvasItemViewModel) {
   return makeStableSignature({
     id: item.id,
     kind: item.kind,
+    status: normalizeCanvasItemStatus(item.status),
     title: item.title,
     body: item.body,
     keywords: item.keywords || [],
@@ -1748,7 +1824,7 @@ function makeCanvasItemNodeLabel(
   return (
     <div className="min-w-0">
       <div
-        className={`relative flex h-full min-h-[252px] w-full flex-col rounded-[18px] border px-5 py-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] transition-colors ${backgroundClass} ${borderClass}`}
+        className={`nopan imms-canvas-node-drag-handle relative flex h-full min-h-[252px] w-full cursor-grab flex-col rounded-[18px] border px-5 py-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] transition-colors active:cursor-grabbing ${backgroundClass} ${borderClass}`}
       >
         <div className="flex min-h-[28px] w-full items-start justify-between gap-2">
           <span />
@@ -1759,7 +1835,7 @@ function makeCanvasItemNodeLabel(
                 event.stopPropagation();
                 onToggleTopicCollapsed?.(item.id);
               }}
-              className="shrink-0 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)] hover:bg-white"
+              className="nodrag shrink-0 rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] shadow-[0_1px_2px_rgba(0,0,0,0.08)] hover:bg-white"
             >
               {item.topic_collapsed ? "펼치기" : "접기"} {topicChildCount}
             </button>
@@ -1828,20 +1904,26 @@ function makeIdeationGroupNodeLabel(
   childItems: CanvasItemViewModel[],
   descendantCount: number,
   highlighted = false,
+  dropTarget = false,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "topic");
   const title = item.ai_pending ? "AI 정리 중" : item.title || "그룹";
   const body = item.ai_pending ? "하위 내용을 정리하는 중" : cleanCanvasNodeBodyText(item.body);
   const childPreview = childItems.slice(0, 3);
-  const borderClass = selected ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]" : "border-black/10";
+  const status = normalizeCanvasItemStatus(item.status);
+  const borderClass = dropTarget
+    ? "border-[#1b59f8] shadow-[0_0_0_4px_rgba(27,89,248,0.14),0_14px_30px_rgba(15,23,42,0.16)]"
+    : selected
+      ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]"
+      : "border-black/10";
   const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
 
   return (
     <div className="min-w-0">
-      <div className={`rounded-[20px] border px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition ${backgroundClass} ${borderClass}`}>
+      <div className={`nopan imms-canvas-node-drag-handle cursor-grab rounded-[20px] border px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition active:cursor-grabbing ${backgroundClass} ${borderClass}`}>
         <div className="flex items-center justify-between gap-2">
-          <span className="rounded-full bg-white/85 px-3 py-1 text-[11px] font-semibold text-[#4d4d4d]">
-            그룹
+          <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${canvasItemStatusTone(status)}`}>
+            {dropTarget ? "여기로 이동" : canvasItemStatusLabel(status)}
           </span>
           <span className="rounded-full bg-black/5 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d]">
             하위 {descendantCount}
@@ -2382,6 +2464,7 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       parent_topic_source: item.parent_topic_source || "",
       parent_topic_locked: Boolean(item.parent_topic_locked),
       child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean).slice(0, 400),
+      status: normalizeCanvasItemStatus(item.status),
       topic_collapsed: Boolean(item.topic_collapsed),
       created_by: item.created_by || "",
       manual_position: false,
@@ -2555,6 +2638,7 @@ type CanvasNodeDescriptor = {
   style: React.CSSProperties;
   data: CanvasNodeData;
   draggable?: boolean;
+  dragHandle?: string;
   selectable?: boolean;
   zIndex?: number;
 };
@@ -2658,6 +2742,7 @@ function styleSignature(style?: React.CSSProperties) {
 function reconcileNodes(
   currentNodes: Node[],
   descriptors: CanvasNodeDescriptor[],
+  preserveNodeIds = new Set<string>(),
 ) {
   const currentNodeMap = new Map(currentNodes.map((node) => [node.id, node]));
   let changed = currentNodes.length !== descriptors.length;
@@ -2665,7 +2750,9 @@ function reconcileNodes(
   const nextNodes = descriptors.map((descriptor, index) => {
     const existingNode = currentNodeMap.get(descriptor.id);
     const nextPosition =
-      existingNode && descriptor.positionSource === "fallback"
+      existingNode && preserveNodeIds.has(descriptor.id)
+        ? existingNode.position
+        : existingNode && descriptor.positionSource === "fallback"
         ? existingNode.position
         : descriptor.position;
     const nextContentSignature =
@@ -2682,6 +2769,7 @@ function reconcileNodes(
       existingNode.sourcePosition !== descriptor.sourcePosition ||
       existingNode.targetPosition !== descriptor.targetPosition ||
       existingNode.draggable !== descriptor.draggable ||
+      existingNode.dragHandle !== descriptor.dragHandle ||
       existingNode.selectable !== descriptor.selectable ||
       existingNode.zIndex !== descriptor.zIndex ||
       existingContentSignature !== nextContentSignature;
@@ -2830,6 +2918,8 @@ export default function MeetingCanvasTab({
   const flowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
   const ideationLeftFlowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
   const ideationRightFlowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
+  const ideationLeftPaneRef = useRef<HTMLDivElement | null>(null);
+  const ideationRightPaneRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startRatio: number } | null>(null);
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
@@ -6055,6 +6145,10 @@ export default function MeetingCanvasTab({
           .map((itemId) => canvasItemById.get(itemId))
           .filter((child): child is CanvasItemViewModel => Boolean(child));
         const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
+        const dropTarget =
+          Boolean(ideationDropPreview) &&
+          ideationDropPreview?.targetId === item.id &&
+          ideationDropPreview.mode !== "detach";
 
         return {
           id: `canvas-item-${item.id}`,
@@ -6062,7 +6156,7 @@ export default function MeetingCanvasTab({
           positionSource: "computed",
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
-          className: "!border-0 !bg-transparent !p-0 !shadow-none",
+          className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
             width: CANVAS_IDEATION_LEFT_WIDTH - 48,
             height: leftHeights[index],
@@ -6071,17 +6165,21 @@ export default function MeetingCanvasTab({
             boxShadow: "none",
             padding: 0,
           },
+          draggable: true,
+          dragHandle: ".imms-canvas-node-drag-handle",
           zIndex: 2,
           data: {
             contentSignature: buildNodeContentSignature([
               "ideation-left-group",
               item.id,
               item.kind,
+              item.status || "",
               item.title,
               item.body,
               item.ai_pending,
               activeRootItem?.id === item.id,
               highlighted,
+              dropTarget,
               ...descendantIds,
               ...childItems.map((child) => child.title),
             ]),
@@ -6091,6 +6189,7 @@ export default function MeetingCanvasTab({
               childItems,
               descendantIds.length,
               highlighted,
+              dropTarget,
             ),
           },
         };
@@ -6141,7 +6240,7 @@ export default function MeetingCanvasTab({
                 positionSource: "computed" as const,
                 sourcePosition: Position.Bottom,
                 targetPosition: Position.Top,
-                className: "!border-0 !bg-transparent !p-0 !shadow-none",
+                className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
                 style: {
                   width: CANVAS_ITEM_NODE_WIDTH,
                   height: itemHeight,
@@ -6150,12 +6249,15 @@ export default function MeetingCanvasTab({
                   boxShadow: "none",
                   padding: 0,
                 },
+                draggable: true,
+                dragHandle: ".imms-canvas-node-drag-handle",
                 zIndex: 2,
                 data: {
                   contentSignature: buildNodeContentSignature([
                     "ideation-detail-item",
                     item.id,
                     item.kind,
+                    item.status || "",
                     item.title,
                     item.body,
                     ...(item.keywords || []),
@@ -6214,6 +6316,7 @@ export default function MeetingCanvasTab({
           ...canvasItems.flatMap((item) => [
             item.id,
             item.kind,
+            item.status || "",
             item.parent_topic_id || "",
             item.agenda_id || "",
             ...(item.child_item_ids || []),
@@ -6417,6 +6520,7 @@ export default function MeetingCanvasTab({
         ...canvasItems.flatMap((item) => [
           item.id,
           item.kind,
+          item.status || "",
           item.parent_topic_id || "",
           isTopicCanvasItem(item) && getTopicCollapsed(item) ? "collapsed" : "expanded",
           ...(item.child_item_ids || []),
@@ -6564,7 +6668,7 @@ export default function MeetingCanvasTab({
             positionSource,
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
-            className: "!border-0 !bg-transparent !p-0 !shadow-none",
+            className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
             style: {
               width: CANVAS_ITEM_NODE_WIDTH,
               height: itemHeight,
@@ -6577,6 +6681,7 @@ export default function MeetingCanvasTab({
               contentSignature: buildNodeContentSignature([
                 item.id,
                 item.kind,
+                item.status || "",
                 item.title,
                 item.body,
                 ...(item.keywords || []),
@@ -6664,8 +6769,10 @@ export default function MeetingCanvasTab({
   }, [nodePositions]);
 
   useEffect(() => {
+    const activeDragNodeId = stableIdeationDragRef.current?.nodeId || "";
+    const preserveNodeIds = activeDragNodeId ? new Set([activeDragNodeId]) : new Set<string>();
     setNodes((current) =>
-      reconcileNodes(current, graphBlueprint.nodeDescriptors),
+      reconcileNodes(current, graphBlueprint.nodeDescriptors, preserveNodeIds),
     );
     setEdges((current) => {
       const validNodeIds = new Set(graphBlueprint.nodeDescriptors.map((node) => node.id));
@@ -7860,6 +7967,7 @@ export default function MeetingCanvasTab({
         agenda_id: nextAgendaId,
         point_id: pointId || "",
         kind: tool,
+        status: "discussion",
         title: draftTitle,
         keywords: [],
         key_evidence: [],
@@ -8074,6 +8182,65 @@ export default function MeetingCanvasTab({
     [],
   );
 
+  const findIdeationLeftGroupDropTarget = useCallback(
+    (clientX: number, clientY: number, draggedItem: CanvasItemViewModel) => {
+      if (stage !== "ideation") {
+        return null;
+      }
+
+      const leftPane = ideationLeftPaneRef.current;
+      if (!leftPane) {
+        return null;
+      }
+
+      const selectedAgendaForDrop = selectedAgendaId || agendaModels[0]?.id || "";
+      const draggedRootId = getCanvasItemTopLevelAncestorId(canvasItems, draggedItem.id);
+      const draggedDescendantIds = new Set(getCanvasItemDescendantIds(canvasItems, draggedItem.id));
+
+      return Array.from(leftPane.querySelectorAll<HTMLElement>(".react-flow__node"))
+        .map((element) => {
+          const nodeId = element.getAttribute("data-id") || "";
+          const targetItemId = extractCanvasItemIdFromNodeId(nodeId);
+          const targetItem = targetItemId
+            ? canvasItems.find((item) => item.id === targetItemId) || null
+            : null;
+          if (!targetItem) {
+            return null;
+          }
+
+          const rect = element.getBoundingClientRect();
+          const inside =
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom;
+          if (!inside) {
+            return null;
+          }
+
+          if (
+            targetItem.parent_topic_id ||
+            targetItem.agenda_id !== selectedAgendaForDrop ||
+            targetItem.id === draggedItem.id ||
+            draggedDescendantIds.has(targetItem.id)
+          ) {
+            return null;
+          }
+
+          return {
+            nodeId,
+            targetItem,
+            targetNode: nodes.find((candidate) => candidate.id === nodeId) || null,
+            isCurrentRoot: targetItem.id === draggedRootId,
+            distance: Math.hypot(clientX - (rect.left + rect.width / 2), clientY - (rect.top + rect.height / 2)),
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+        .sort((left, right) => left.distance - right.distance)[0] || null;
+    },
+    [agendaModels, canvasItems, nodes, selectedAgendaId, stage],
+  );
+
   const resolveIdeationDropPreview = useCallback(
     (clientX: number, clientY: number, node: Node): IdeationDropPreviewState | null => {
       if (stage !== "ideation" || !node.id.startsWith("canvas-item-")) {
@@ -8083,6 +8250,63 @@ export default function MeetingCanvasTab({
       const draggedItemId = node.id.slice("canvas-item-".length);
       const draggedItem = canvasItems.find((item) => item.id === draggedItemId) || null;
       if (!draggedItem) {
+        return null;
+      }
+
+      const selectedAgendaForDrop = selectedAgendaId || agendaModels[0]?.id || "";
+      const draggedRootId = getCanvasItemTopLevelAncestorId(canvasItems, draggedItem.id);
+      const draggedDescendantIds = getCanvasItemDescendantIds(canvasItems, draggedItem.id);
+      const splitLeftDropTarget = findIdeationLeftGroupDropTarget(clientX, clientY, draggedItem);
+      const leftPaneRect = ideationLeftPaneRef.current?.getBoundingClientRect() || null;
+      const rightPaneRect = ideationRightPaneRef.current?.getBoundingClientRect() || null;
+      const pointerInsideLeftPane =
+        Boolean(leftPaneRect) &&
+        clientX >= leftPaneRect!.left &&
+        clientX <= leftPaneRect!.right &&
+        clientY >= leftPaneRect!.top &&
+        clientY <= leftPaneRect!.bottom;
+      const pointerInsideRightPane =
+        Boolean(rightPaneRect) &&
+        clientX >= rightPaneRect!.left &&
+        clientX <= rightPaneRect!.right &&
+        clientY >= rightPaneRect!.top &&
+        clientY <= rightPaneRect!.bottom;
+
+      if (draggedItem.parent_topic_id && pointerInsideLeftPane) {
+        if (splitLeftDropTarget && splitLeftDropTarget.targetNode && !splitLeftDropTarget.isCurrentRoot) {
+          return {
+            draggedItemId,
+            targetId: splitLeftDropTarget.targetItem.id,
+            mode: "topic",
+            agendaId: splitLeftDropTarget.targetItem.agenda_id || draggedItem.agenda_id,
+            position: splitLeftDropTarget.targetNode.position,
+            label: "이 그룹으로 이동",
+            hint: `"${splitLeftDropTarget.targetItem.title || "그룹"}" 상세 캔버스로 이동합니다.`,
+          };
+        }
+
+        return {
+          draggedItemId,
+          targetId: draggedItem.agenda_id,
+          mode: "detach",
+          agendaId: draggedItem.agenda_id,
+          position: node.position,
+          label: "왼쪽 그룹으로 분리",
+          hint: "현재 상세 그룹에서 빼내 왼쪽 캔버스의 1차 그룹으로 이동합니다.",
+        };
+      }
+
+      if (splitLeftDropTarget && splitLeftDropTarget.targetNode) {
+        if (!draggedItem.parent_topic_id && !splitLeftDropTarget.isCurrentRoot) {
+          return makeIdeationMergeDropPreview(
+            draggedItem,
+            splitLeftDropTarget.targetItem,
+            splitLeftDropTarget.targetNode.position,
+          );
+        }
+      }
+
+      if (pointerInsideLeftPane || (!draggedItem.parent_topic_id && !pointerInsideRightPane)) {
         return null;
       }
 
@@ -8108,6 +8332,46 @@ export default function MeetingCanvasTab({
           }
 
           const rect = element.getBoundingClientRect();
+          const insideNodeRect =
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom;
+          const canDropOnSplitGroup =
+            insideNodeRect &&
+            Boolean(draggedItem.parent_topic_id) &&
+            !targetItem.parent_topic_id &&
+            targetItem.agenda_id === selectedAgendaForDrop &&
+            targetItem.id !== draggedRootId &&
+            !draggedDescendantIds.includes(targetItem.id);
+          if (canDropOnSplitGroup) {
+            return {
+              nodeId,
+              targetItem,
+              targetNode,
+              childCount: 0,
+              directAction: "group-move" as const,
+              distance: Math.hypot(clientX - (rect.left + rect.width / 2), clientY - (rect.top + rect.height / 2)),
+            };
+          }
+          const canMergeSplitGroups =
+            insideNodeRect &&
+            !draggedItem.parent_topic_id &&
+            !targetItem.parent_topic_id &&
+            targetItem.agenda_id === selectedAgendaForDrop &&
+            targetItem.id !== draggedItem.id &&
+            !draggedDescendantIds.includes(targetItem.id);
+          if (canMergeSplitGroups) {
+            return {
+              nodeId,
+              targetItem,
+              targetNode,
+              childCount: 0,
+              directAction: "group-merge" as const,
+              distance: Math.hypot(clientX - (rect.left + rect.width / 2), clientY - (rect.top + rect.height / 2)),
+            };
+          }
+
           const screenGap = Math.max(10, rect.width * 0.045);
           const childCount =
             isTopicCanvasItem(targetItem) && !isTopicCanvasItem(draggedItem)
@@ -8131,6 +8395,7 @@ export default function MeetingCanvasTab({
             targetItem,
             targetNode,
             childCount,
+            directAction: "" as const,
             distance: Math.hypot(clientX - dropLeft, clientY - (rect.top + rect.height / 2)),
           };
         })
@@ -8150,6 +8415,22 @@ export default function MeetingCanvasTab({
           x: targetNode.position.x + CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X + (candidateDropTarget?.childCount || 0) * (CANVAS_ITEM_NODE_WIDTH + CANVAS_TOPIC_CHILD_GAP_X),
           y: targetNode.position.y,
         };
+
+        if (candidateDropTarget?.directAction === "group-merge") {
+          return makeIdeationMergeDropPreview(draggedItem, targetItem, targetNode.position);
+        }
+
+        if (candidateDropTarget?.directAction === "group-move") {
+          return {
+            draggedItemId,
+            targetId: targetItem.id,
+            mode: "topic",
+            agendaId: targetItem.agenda_id || draggedItem.agenda_id,
+            position: targetNode.position,
+            label: "이 그룹으로 이동",
+            hint: `"${targetItem.title || "그룹"}" 상세 캔버스로 이동합니다.`,
+          };
+        }
 
         if (isTopicCanvasItem(targetItem)) {
           if (isTopicCanvasItem(draggedItem)) {
@@ -8227,7 +8508,7 @@ export default function MeetingCanvasTab({
 
       return null;
     },
-    [canvasItems, nodes, stage],
+    [agendaModels, canvasItems, findIdeationLeftGroupDropTarget, nodes, selectedAgendaId, stage],
   );
 
   const onNodeDragStop = (event: React.MouseEvent, node: Node) => {
@@ -8304,13 +8585,42 @@ export default function MeetingCanvasTab({
     if (stage === "ideation" && node.id.startsWith("canvas-item-")) {
       const canvasItemId = node.id.slice("canvas-item-".length);
       const draggedItem = canvasItems.find((item) => item.id === canvasItemId) || null;
-      const dropPreview =
+      const rightPaneRect = ideationRightPaneRef.current?.getBoundingClientRect() || null;
+      const droppedOnRightPane =
+        Boolean(rightPaneRect) &&
+        event.clientX >= rightPaneRect!.left &&
+        event.clientX <= rightPaneRect!.right &&
+        event.clientY >= rightPaneRect!.top &&
+        event.clientY <= rightPaneRect!.bottom;
+      let dropPreview =
         activeIdeationDropPreview?.draggedItemId === canvasItemId
           ? activeIdeationDropPreview
           : resolveIdeationDropPreview(event.clientX, event.clientY, dragNode);
       let topicToExpandId = "";
       let ideationMoveMessage = "";
       let nextSelectedIdeationItemId = canvasItemId;
+
+      if (draggedItem && !draggedItem.parent_topic_id && droppedOnRightPane) {
+        const selectedRootIdForDrop = selectedCanvasItemId
+          ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
+          : "";
+        const selectedRootItemForDrop = selectedRootIdForDrop
+          ? canvasItems.find((item) => item.id === selectedRootIdForDrop) || null
+          : null;
+
+        if (selectedRootItemForDrop && selectedRootItemForDrop.id !== draggedItem.id) {
+          dropPreview = makeIdeationMergeDropPreview(
+            draggedItem,
+            selectedRootItemForDrop,
+            dragNode.position,
+          );
+        } else {
+          if (draggedItem.agenda_id) {
+            setSelectedAgendaId(draggedItem.agenda_id);
+          }
+          ideationMoveMessage = `"${draggedItem.title || "그룹"}" 상세 캔버스를 열었습니다.`;
+        }
+      }
 
       if (draggedItem && dropPreview?.mode === "topic-merge") {
         const draggedTopic = isTopicCanvasItem(draggedItem) ? draggedItem : null;
@@ -8329,6 +8639,7 @@ export default function MeetingCanvasTab({
             agenda_id: nextAgendaId,
             point_id: "",
             kind: "topic",
+            status: "discussion",
             title: buildUserMergedTopicTitle(targetTopic, draggedTopic),
             body: [targetTopic.body, draggedTopic.body].filter(Boolean).join("\n") || "통합한 토픽의 내용을 정리해 주세요.",
             keywords: [...new Set([...(targetTopic.keywords || []), ...(draggedTopic.keywords || [])])].slice(0, 5),
@@ -8458,6 +8769,7 @@ export default function MeetingCanvasTab({
             agenda_id: nextAgendaId,
             point_id: "",
             kind: "topic",
+            status: "discussion",
             title: buildUserMergedTopicTitle(draggedTopic, targetItem),
             body: [draggedTopic.body, targetItem.body].filter(Boolean).join("\n") || "통합한 토픽의 내용을 정리해 주세요.",
             keywords: [...new Set([...(draggedTopic.keywords || []), ...(targetItem.keywords || [])])].slice(0, 5),
@@ -8563,26 +8875,26 @@ export default function MeetingCanvasTab({
           ideationMoveMessage = `"${draggedTopic.title || "토픽"}"과 "${targetItem.title || "대상 노드"}"를 새 토픽으로 통합했습니다.`;
         }
       } else if (draggedItem && dropPreview?.mode === "topic") {
-        const targetTopic = canvasItems.find((item) => item.id === dropPreview.targetId && isTopicCanvasItem(item));
-        if (targetTopic) {
-          const nextAgendaId = targetTopic.agenda_id || draggedItem.agenda_id;
+        const targetGroup = canvasItems.find((item) => item.id === dropPreview.targetId) || null;
+        if (targetGroup && targetGroup.id !== draggedItem.id) {
+          const nextAgendaId = targetGroup.agenda_id || draggedItem.agenda_id;
           nextCanvasItemsSnapshot = canvasItems.map((item) =>
             item.id === canvasItemId
               ? {
                   ...item,
                   agenda_id: nextAgendaId,
-                  parent_topic_id: targetTopic.id,
+                  parent_topic_id: targetGroup.id,
                   parent_topic_source: "user",
                   parent_topic_locked: true,
                   manual_position: false,
                   x: undefined,
                   y: undefined,
                 }
-              : item.id === targetTopic.id
+              : item.id === targetGroup.id
                 ? {
                     ...item,
                     child_item_ids: [...new Set([...(item.child_item_ids || []), canvasItemId])],
-                    ...(sharedSyncEnabled
+                    ...(isTopicCanvasItem(item) && sharedSyncEnabled
                       ? {
                           ai_pending: true,
                           ai_generated: true,
@@ -8590,16 +8902,16 @@ export default function MeetingCanvasTab({
                         }
                       : {}),
                   }
-              : isTopicCanvasItem(item)
+              : item.child_item_ids?.includes(canvasItemId)
                 ? {
                     ...item,
                     child_item_ids: (item.child_item_ids || []).filter((id) => id !== canvasItemId),
                   }
                 : item,
           );
-          topicToExpandId = targetTopic.id;
-          topicSummaryRefreshItemIds = [targetTopic.id];
-          ideationMoveMessage = `"${draggedItem.title || "노드"}"를 "${targetTopic.title || "토픽"}"에 추가했습니다.`;
+          topicToExpandId = targetGroup.id;
+          topicSummaryRefreshItemIds = isTopicCanvasItem(targetGroup) ? [targetGroup.id] : [];
+          ideationMoveMessage = `"${draggedItem.title || "노드"}"를 "${targetGroup.title || "그룹"}"에 추가했습니다.`;
         }
       } else if (draggedItem && dropPreview?.mode === "merge") {
         const targetItem = canvasItems.find((item) => item.id === dropPreview.targetId && !isTopicCanvasItem(item));
@@ -8612,6 +8924,7 @@ export default function MeetingCanvasTab({
             agenda_id: nextAgendaId,
             point_id: "",
             kind: "topic",
+            status: "discussion",
             title: buildUserMergedTopicTitle(targetItem, draggedItem),
             body: "사용자가 직접 묶은 토픽입니다. 필요하면 제목과 내용을 수정해 주세요.",
             keywords: [...new Set([...(targetItem.keywords || []), ...(draggedItem.keywords || [])])].slice(0, 5),
@@ -8695,7 +9008,7 @@ export default function MeetingCanvasTab({
                 x: undefined,
                 y: undefined,
               }
-            : isTopicCanvasItem(item)
+            : item.child_item_ids?.includes(canvasItemId)
               ? {
                   ...item,
                   child_item_ids: (item.child_item_ids || []).filter((id) => id !== canvasItemId),
@@ -9195,6 +9508,50 @@ export default function MeetingCanvasTab({
           canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
         }).catch((error) => {
           console.error("Failed to save shared canvas items:", error);
+        });
+      }
+    }
+  };
+
+  const handleSetCanvasItemStatus = (
+    status: CanvasItemStatus,
+    targetItemId = selectedCanvasItem?.id || "",
+    selectAfterChange = true,
+  ) => {
+    const targetItem = canvasItems.find((item) => item.id === targetItemId) || null;
+    if (!targetItem || targetItem.parent_topic_id) return;
+
+    const nextStatus = normalizeCanvasItemStatus(status);
+    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+      item.id === targetItem.id
+        ? {
+            ...item,
+            status: nextStatus,
+            user_edited: true,
+          }
+        : item,
+    );
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    if (selectAfterChange) {
+      setSelectedCanvasItemId(targetItem.id);
+      setSelectedNodeId(`canvas-item-${targetItem.id}`);
+    }
+    setActivityMessage(`공용 canvas 아이템 상태를 "${canvasItemStatusLabel(nextStatus)}"로 변경했습니다.`);
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared canvas item status:", error);
         });
       }
     }
@@ -9990,6 +10347,13 @@ export default function MeetingCanvasTab({
       return canvasItemId ? topLevelIds.has(canvasItemId) : false;
     });
     const rightNodes = nodes.filter((node) => {
+      if (node.id === "ideation-drop-placeholder") {
+        const targetItem = ideationDropPreview
+          ? canvasItems.find((item) => item.id === ideationDropPreview.targetId) || null
+          : null;
+        return Boolean(targetItem?.parent_topic_id);
+      }
+
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
       if (selectedRootItemForIdeationCanvas) {
         return canvasItemId ? descendantIds.has(canvasItemId) : node.id === "ideation-empty-detail";
@@ -9998,7 +10362,7 @@ export default function MeetingCanvasTab({
     });
 
     return { left: leftNodes, right: rightNodes };
-  }, [canvasItems, nodes, selectedAgendaForIdeationCanvas, selectedRootItemForIdeationCanvas, stage]);
+  }, [canvasItems, ideationDropPreview, nodes, selectedAgendaForIdeationCanvas, selectedRootItemForIdeationCanvas, stage]);
   const ideationRightTitle = selectedRootItemForIdeationCanvas ? "Detail Canvas" : "Group Selector";
   const ideationRightSubtitle = selectedRootItemForIdeationCanvas
     ? `${selectedRootItemForIdeationCanvas.title || "선택 그룹"} 하위 노드 전체`
@@ -11397,8 +11761,12 @@ export default function MeetingCanvasTab({
               {stage === "ideation" ? (
                 <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(280px,0.38fr)_minmax(0,1fr)]">
                   <div
+                    ref={ideationLeftPaneRef}
                     className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r"
                     onMouseEnter={() => {
+                      if (stableIdeationDragRef.current) {
+                        return;
+                      }
                       flowRef.current = ideationLeftFlowRef.current;
                     }}
                   >
@@ -11430,7 +11798,9 @@ export default function MeetingCanvasTab({
                         onNodeDrag={onNodeDrag}
                         onNodeDragStop={onNodeDragStop}
                         nodesConnectable={false}
-                        nodesDraggable={false}
+                        panOnDrag
+                        noPanClassName="nopan"
+                        nodesDraggable
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -11441,8 +11811,12 @@ export default function MeetingCanvasTab({
                   </div>
 
                   <div
+                    ref={ideationRightPaneRef}
                     className="flex min-h-[420px] flex-col overflow-hidden bg-white"
                     onMouseEnter={() => {
+                      if (stableIdeationDragRef.current) {
+                        return;
+                      }
                       flowRef.current = ideationRightFlowRef.current;
                     }}
                   >
@@ -11452,9 +11826,31 @@ export default function MeetingCanvasTab({
                           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">{ideationRightTitle}</p>
                           <h3 className="mt-1 text-lg font-semibold text-slate-950">{ideationRightSubtitle}</h3>
                         </div>
-                        <span className="rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
-                          {ideationSplitNodes.right.length}개
-                        </span>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                          {selectedRootItemForIdeationCanvas ? (
+                            CANVAS_ITEM_STATUSES.map((status) => {
+                              const selectedStatus = normalizeCanvasItemStatus(selectedRootItemForIdeationCanvas.status);
+                              const active = selectedStatus === status;
+                              return (
+                                <button
+                                  key={`ideation-root-status-${status}`}
+                                  type="button"
+                                  onClick={() => handleSetCanvasItemStatus(status, selectedRootItemForIdeationCanvas.id, false)}
+                                  className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                                    active
+                                      ? canvasItemStatusTone(status)
+                                      : "border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
+                                  }`}
+                                >
+                                  {canvasItemStatusLabel(status)}
+                                </button>
+                              );
+                            })
+                          ) : null}
+                          <span className="rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
+                            {ideationSplitNodes.right.length}개
+                          </span>
+                        </div>
                       </div>
                     </div>
                     <div className="min-h-0 flex-1 bg-[#f5f6f8]">
@@ -11472,7 +11868,9 @@ export default function MeetingCanvasTab({
                         onNodeDrag={onNodeDrag}
                         onNodeDragStop={onNodeDragStop}
                         nodesConnectable={false}
-                        nodesDraggable={false}
+                        panOnDrag
+                        noPanClassName="nopan"
+                        nodesDraggable={true}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
