@@ -74,7 +74,7 @@ export type MeetingAgenda = {
 type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
 type CanvasTool = ComposerTool | "group" | "problem-idea";
-type LeftPanelTab = "detail" | "agenda-list";
+type LeftPanelTab = "detail";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type CanvasItemStatus = "discussion" | "confirmed" | "closed";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
@@ -296,37 +296,6 @@ function normalizeRefinedUtterances(
   });
 
   return normalized.slice(0, limit);
-}
-
-function splitRefinedUtteranceSentences(
-  rows: CanvasRefinedUtterance[] | undefined,
-  limit = 6,
-): CanvasRefinedUtterance[] {
-  const sentenceRows: CanvasRefinedUtterance[] = [];
-
-  normalizeRefinedUtterances(rows).forEach((row) => {
-    const normalizedText = stripLeadingTimestamp(row.text || "")
-      .replace(/\s+/g, " ")
-      .replace(/([.!?。！？])\s+/g, "$1\n")
-      .replace(/(습니다|합니다|됩니다|입니다|니다|어요|예요|이에요|네요|죠|까요|다|요)\s+(?=[가-힣A-Za-z0-9])/g, "$1\n")
-      .trim();
-
-    const sentences = normalizedText
-      .split(/\n+/)
-      .map((sentence) => sentence.trim())
-      .filter(Boolean);
-
-    (sentences.length > 0 ? sentences : [row.text]).forEach((sentence, sentenceIndex) => {
-      if (sentenceRows.length >= limit) return;
-      sentenceRows.push({
-        ...row,
-        utterance_id: `${row.utterance_id || "refined"}-sentence-${sentenceIndex}`,
-        text: sentence,
-      });
-    });
-  });
-
-  return sentenceRows.slice(0, limit);
 }
 
 function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasWorkspaceItem[] {
@@ -2882,7 +2851,7 @@ export default function MeetingCanvasTab({
   const [problemGroupDraftConclusion, setProblemGroupDraftConclusion] = useState("");
   const [draggingPersonalNoteId, setDraggingPersonalNoteId] = useState("");
   const [dropProblemGroupId, setDropProblemGroupId] = useState("");
-  const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>("detail");
+  const [, setLeftPanelTab] = useState<LeftPanelTab>("detail");
   const [meetingGoalDraft, setMeetingGoalDraft] = useState(meetingGoal);
   const [meetingGoalContextDraft, setMeetingGoalContextDraft] = useState(meetingGoalContext);
   const [meetingGoalEditorDraft, setMeetingGoalEditorDraft] = useState(meetingGoal);
@@ -2900,7 +2869,6 @@ export default function MeetingCanvasTab({
   const [ideationSuggestionBusyRootId, setIdeationSuggestionBusyRootId] = useState("");
   const [ideationSuggestionCollapsedByRootId, setIdeationSuggestionCollapsedByRootId] = useState<Record<string, boolean>>({});
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(false);
-  const [showTranscriptCollection, setShowTranscriptCollection] = useState(false);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
   const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
@@ -3184,7 +3152,6 @@ export default function MeetingCanvasTab({
     setProblemDiscussionStatus("");
     setIdeationSuggestionBusyRootId("");
     setIdeationSuggestionCollapsedByRootId({});
-    setShowTranscriptCollection(false);
     agendaDragPreviewRef.current = null;
     setAgendaDragPreview(null);
     problemIdeaDragRef.current = null;
@@ -4894,7 +4861,7 @@ export default function MeetingCanvasTab({
       setSelectedProblemGroupId(targetGroup.group_id);
       setSelectedProblemSourceNodeId(nextSelectedSourceNodeId);
       setSelectedNodeId(`problem-${targetGroup.group_id}`);
-      setLeftPanelTab("agenda-list");
+      setLeftPanelTab("detail");
       setActivityMessage(activityMessage);
       handleProblemIdeaDragEnd();
 
@@ -5906,7 +5873,7 @@ export default function MeetingCanvasTab({
                 (sourceNodeId) => {
                   setSelectedProblemGroupId(group.group_id);
                   setSelectedProblemSourceNodeId(sourceNodeId);
-                  setLeftPanelTab("agenda-list");
+                  setLeftPanelTab("detail");
                 },
                 (event, card) => handleProblemIdeaDragStart(group.group_id, event, card),
                 handleProblemIdeaDragMove,
@@ -6863,20 +6830,6 @@ export default function MeetingCanvasTab({
     () => canvasItems.find((item) => item.id === selectedCanvasItemId) || null,
     [canvasItems, selectedCanvasItemId],
   );
-  const allRefinedTranscriptSentences = useMemo(
-    () =>
-      canvasItems
-        .flatMap((item) =>
-          splitRefinedUtteranceSentences(item.refined_utterances, 80).map((row) => ({
-            ...row,
-            sourceItemId: item.id,
-            sourceItemTitle: item.title,
-            sourceAgendaId: item.agenda_id,
-          })),
-        )
-        .slice(0, 80),
-    [canvasItems],
-  );
   const projectPersonalNotes = useMemo(
     () => personalNotes.filter((note) => !note.projectId || note.projectId === meetingId),
     [meetingId, personalNotes],
@@ -7123,8 +7076,6 @@ export default function MeetingCanvasTab({
     }
 
     if (stage === "ideation" && selectedCanvasItem) {
-      const linkedAgenda =
-        agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id) || null;
       const refinedItems = normalizeRefinedUtterances(selectedCanvasItem.refined_utterances);
       const topicChildIds = new Set([
         ...(selectedCanvasItem.child_item_ids || []),
@@ -7141,7 +7092,6 @@ export default function MeetingCanvasTab({
         subtitle: `${toolLabel((selectedCanvasItem.kind as ComposerTool) || "note")} · 공용 캔버스 아이템`,
         badges: [
           toolLabel((selectedCanvasItem.kind as ComposerTool) || "note"),
-          linkedAgenda?.title || "",
           topicChildren.length > 0 ? `하위 아이디어 ${topicChildren.length}개` : "",
         ].filter(Boolean),
         insightLens: "",
@@ -7152,17 +7102,8 @@ export default function MeetingCanvasTab({
             value: selectedCanvasItem.body || "내용이 아직 없습니다.",
           },
         ],
-        organizeItems: [
-          {
-            label: "연결 안건",
-            value: linkedAgenda?.title || "연결된 안건이 아직 없습니다.",
-          },
-          {
-            label: "연결 위치",
-            value: selectedCanvasItem.point_id || "보드 빈 영역",
-          },
-        ],
-        organizeTitle: "연결 정보",
+        organizeItems: [],
+        organizeTitle: "",
         refinedItems: refinedItems.map((item, index) => ({
           id: item.utterance_id || `${selectedCanvasItem.id}-refined-${index}`,
           sourceItemId: selectedCanvasItem.id,
@@ -7189,7 +7130,7 @@ export default function MeetingCanvasTab({
       summaryIndex >= 0 ? resolvedAgenda.summaryBullets[summaryIndex] || resolvedAgenda.summaryBullets[0] : "";
 
     return {
-      title: summaryIndex >= 0 ? `핵심 포인트 ${summaryIndex + 1}` : resolvedAgenda.title,
+      title: summaryIndex >= 0 ? `맥락 ${summaryIndex + 1}` : resolvedAgenda.title,
       subtitle: summaryIndex >= 0 ? resolvedAgenda.title : "그룹 디테일",
       badges: [
         summaryIndex >= 0 ? `POINT ${summaryIndex + 1}` : resolvedAgenda.status,
@@ -7210,17 +7151,17 @@ export default function MeetingCanvasTab({
       organizeItems: [
         ...(resolvedAgenda.summaryBullets.length > 0
           ? resolvedAgenda.summaryBullets.slice(0, 3).map((value, index) => ({
-              label: `포인트 ${index + 1}`,
+              label: `맥락 ${index + 1}`,
               value: stripLeadingTimestamp(value),
             }))
           : [
               {
-                label: "포인트 1",
-                value: "핵심 포인트가 아직 없습니다.",
+                label: "맥락 1",
+                value: "맥락이 아직 없습니다.",
               },
             ]),
       ],
-      organizeTitle: "핵심 포인트",
+      organizeTitle: "맥락",
     };
   }, [agendaModels, canvasItems, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
 
@@ -7760,7 +7701,7 @@ export default function MeetingCanvasTab({
           );
           nextSelectedNodeId = `problem-${nextSelectedGroupId}`;
           nextSelectedProblemSourceNodeId = ideaId;
-          nextLeftPanelTab = "agenda-list";
+          nextLeftPanelTab = "detail";
           setActivityMessage("아이디어 카드를 문제정의 그룹에 추가했습니다.");
         } else {
           let workingGroups = problemGroups;
@@ -9185,7 +9126,7 @@ export default function MeetingCanvasTab({
         setSelectedProblemGroupId(sourceDropTarget.groupId);
         setSelectedProblemSourceNodeId(sourceDropTarget.nodeId);
         setSelectedNodeId(`problem-${sourceDropTarget.groupId}`);
-        setLeftPanelTab("agenda-list");
+        setLeftPanelTab("detail");
         setActivityMessage(`의견 노드를 "${sourceDropTarget.nodeLabel || "선택한 노드"}"의 속한 의견으로 추가했습니다.`);
       } else {
       const nearestGroup = problemGroups
@@ -9699,175 +9640,6 @@ export default function MeetingCanvasTab({
           canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
         }).catch((error) => {
           console.error("Failed to save shared canvas item keywords:", error);
-        });
-      }
-    }
-  };
-
-  const handleClearCanvasItemLink = (targetItemId: string, field: "agenda_id" | "point_id") => {
-    if (!targetItemId) return;
-
-    const targetItem = canvasItems.find((item) => item.id === targetItemId);
-    if (!targetItem || !targetItem[field]) {
-      setActivityMessage(field === "agenda_id" ? "해제할 연결 안건이 없습니다." : "해제할 연결 위치가 없습니다.");
-      return;
-    }
-
-    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
-      item.id === targetItemId
-        ? {
-            ...item,
-            [field]: "",
-          }
-        : item,
-    );
-
-    setCanvasItems(nextCanvasItemsSnapshot);
-    setSelectedCanvasItemId(targetItemId);
-    setSelectedNodeId(`canvas-item-${targetItemId}`);
-    if (field === "agenda_id") {
-      setActivityMessage("공용 canvas 아이템의 연결 안건을 해제했습니다.");
-    } else {
-      setActivityMessage("공용 canvas 아이템의 연결 위치를 해제했습니다.");
-    }
-
-    if (sharedSyncEnabled) {
-      latestSharedWorkspaceRef.current = {
-        ...latestSharedWorkspaceRef.current,
-        canvasItems: nextCanvasItemsSnapshot,
-        importedState: persistedSharedImportedState,
-      };
-      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
-      if (meetingId) {
-        void saveCanvasWorkspacePatch({
-          meeting_id: meetingId,
-          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-        }).catch((error) => {
-          console.error("Failed to save shared canvas item link removal:", error);
-        });
-      }
-    }
-  };
-
-  const handleSetCanvasItemAgendaLink = (targetItemId: string, agendaId: string) => {
-    if (!targetItemId || !agendaId) return;
-
-    const targetAgenda = agendaModels.find((agenda) => agenda.id === agendaId);
-    if (!targetAgenda) {
-      setActivityMessage("연결할 안건을 찾을 수 없습니다.");
-      return;
-    }
-
-    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
-      item.id === targetItemId
-        ? {
-            ...item,
-            agenda_id: agendaId,
-            point_id: "",
-          }
-        : item,
-    );
-
-    setCanvasItems(nextCanvasItemsSnapshot);
-    setSelectedCanvasItemId(targetItemId);
-    setSelectedNodeId(`canvas-item-${targetItemId}`);
-    setSelectedAgendaId(agendaId);
-    setActivityMessage(`공용 canvas 아이템을 "${targetAgenda.title}" 안건에 연결했습니다.`);
-
-    if (sharedSyncEnabled) {
-      latestSharedWorkspaceRef.current = {
-        ...latestSharedWorkspaceRef.current,
-        canvasItems: nextCanvasItemsSnapshot,
-        importedState: persistedSharedImportedState,
-      };
-      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
-      if (meetingId) {
-        void saveCanvasWorkspacePatch({
-          meeting_id: meetingId,
-          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-        }).catch((error) => {
-          console.error("Failed to save shared canvas item agenda link:", error);
-        });
-      }
-    }
-  };
-
-  const handleAddProjectGroupCategory = (connectCanvasItemId?: string) => {
-    const title = customGroupDraftTitle.trim();
-    if (!title) {
-      setActivityMessage("추가할 프로젝트 그룹 분류명을 입력해 주세요.");
-      return;
-    }
-
-    const existingGroup = customGroups.find(
-      (group) => group.title.trim().toLowerCase() === title.toLowerCase(),
-    );
-    if (existingGroup) {
-      setCustomGroupDraftTitle("");
-      setSelectedAgendaId(existingGroup.id);
-      if (connectCanvasItemId) {
-        handleSetCanvasItemAgendaLink(connectCanvasItemId, existingGroup.id);
-      } else {
-        setActivityMessage(`이미 있는 프로젝트 그룹 분류 "${existingGroup.title}"을 선택했습니다.`);
-      }
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const nextGroup: CustomGroupViewModel = {
-      id: `project-group-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
-      title,
-      description: "사용자가 프로젝트에 직접 추가한 그룹 분류입니다.",
-      keywords: [],
-      color: "",
-      created_by: userId,
-      created_at: now,
-    };
-    const nextCustomGroupsSnapshot = [nextGroup, ...customGroups];
-    const nextCanvasItemsSnapshot = connectCanvasItemId
-      ? canvasItems.map((item) =>
-          item.id === connectCanvasItemId
-            ? {
-                ...item,
-                agenda_id: nextGroup.id,
-                point_id: "",
-              }
-            : item,
-        )
-      : canvasItems;
-
-    setCustomGroups(nextCustomGroupsSnapshot);
-    setCustomGroupDraftTitle("");
-    setSelectedAgendaId(nextGroup.id);
-    if (connectCanvasItemId) {
-      setCanvasItems(nextCanvasItemsSnapshot);
-      setSelectedCanvasItemId(connectCanvasItemId);
-      setSelectedNodeId(`canvas-item-${connectCanvasItemId}`);
-    }
-    setActivityMessage(
-      connectCanvasItemId
-        ? `프로젝트 그룹 분류 "${title}"을 추가하고 선택한 아이템에 연결했습니다.`
-        : `프로젝트 그룹 분류 "${title}"을 추가했습니다.`,
-    );
-
-    if (sharedSyncEnabled) {
-      latestSharedWorkspaceRef.current = {
-        ...latestSharedWorkspaceRef.current,
-        customGroups: nextCustomGroupsSnapshot,
-        canvasItems: nextCanvasItemsSnapshot,
-        importedState: persistedSharedImportedState,
-      };
-      forceBroadcastSharedCanvas({
-        customGroups: nextCustomGroupsSnapshot,
-        canvasItems: connectCanvasItemId ? nextCanvasItemsSnapshot : undefined,
-      });
-      if (meetingId) {
-        void saveCanvasWorkspacePatch({
-          meeting_id: meetingId,
-          custom_groups: serializeCustomGroups(nextCustomGroupsSnapshot),
-          canvas_items: connectCanvasItemId ? serializeSharedCanvasItems(nextCanvasItemsSnapshot) : undefined,
-        }).catch((error) => {
-          console.error("Failed to save project group categories:", error);
         });
       }
     }
@@ -11122,12 +10894,12 @@ export default function MeetingCanvasTab({
           className="grid flex-1 min-h-0 grid-cols-1 overflow-y-auto bg-black/10 xl:grid-rows-[minmax(0,1fr)_minmax(0,1fr)] xl:overflow-hidden xl:gap-px xl:border-x xl:border-b xl:border-black/10"
           style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
-          <aside className={`imms-side-panel imms-left-panel relative order-2 min-h-[min(34vh,420px)] border-b border-black/10 bg-[#f9f9f9] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-start-1 xl:min-h-0 ${rightDrawerCollapsed ? "overflow-hidden" : "xl:border-b"}`}>
+          <aside className={`imms-side-panel imms-left-panel relative order-2 min-h-[min(34vh,420px)] border-b border-black/10 bg-white shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-start-1 xl:min-h-0 ${rightDrawerCollapsed ? "overflow-hidden" : "xl:border-b"}`}>
             <button
               type="button"
               aria-label={rightDrawerCollapsed ? "오른쪽 패널 열기" : "오른쪽 패널 접기"}
               onClick={() => setRightDrawerCollapsed((prev) => !prev)}
-              className={`absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center border border-black/10 bg-white text-sm font-bold text-[#4d4d4d] shadow-sm transition hover:bg-[#f5f6f8] ${rightDrawerCollapsed ? "left-2 right-auto" : ""}`}
+              className={`absolute right-[clamp(0.5rem,0.8vw,0.75rem)] top-[clamp(0.5rem,0.8vw,0.75rem)] z-20 flex h-[clamp(1.75rem,2.2vw,2rem)] w-[clamp(1.75rem,2.2vw,2rem)] items-center justify-center border border-black/10 bg-white text-sm font-bold text-[#4d4d4d] shadow-sm transition hover:bg-[#f5f6f8] ${rightDrawerCollapsed ? "left-1/2 right-auto -translate-x-1/2" : ""}`}
             >
               {rightDrawerCollapsed ? "‹" : "›"}
             </button>
@@ -11139,42 +10911,20 @@ export default function MeetingCanvasTab({
             >
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
-            <div className={`${rightDrawerCollapsed ? "hidden" : "imms-overlay-scroll h-full max-h-[min(48vh,500px)] overflow-y-auto px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] xl:max-h-none xl:overflow-y-auto"}`}>
-            <div className="imms-side-panel-surface p-4">
+            <div className={`${rightDrawerCollapsed ? "hidden" : "imms-overlay-scroll h-full max-h-[min(48vh,500px)] overflow-y-auto px-[clamp(0.875rem,1.5vw,1.25rem)] py-[clamp(1rem,2vh,1.5rem)] xl:max-h-none xl:overflow-y-auto"}`}>
+            <div className="border-b border-black/10 pb-[clamp(0.875rem,1.4vw,1rem)] pr-[clamp(2rem,3vw,2.5rem)]">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-black">내용 상세보기</h3>
-                <p className="mt-[18px] text-base font-normal text-[#4d4d4d]">내용</p>
+                <p className="text-xs font-medium text-black/50">선택 정보</p>
+                <h3 className="mt-1 text-lg font-semibold text-black">내용 상세보기</h3>
               </div>
               <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm text-[#4d4d4d]">
-                {leftPanelTab === "detail"
-                  ? "선택 정보"
-                  : stage === "problem-definition"
-                    ? `${selectedProblemSourceOpinions.length}개 의견`
-                    : `${agendaModels.length}개 그룹`}
+                선택 정보
               </span>
             </div>
-
-            <div className="mt-5 grid grid-cols-2 rounded-2xl border border-black/10 bg-[#f9f9f9] p-1">
-              <button
-                type="button"
-                onClick={() => setLeftPanelTab("detail")}
-                className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${leftPanelTab === "detail" ? "bg-[#1b59f8] text-white" : "text-[#4d4d4d] hover:bg-white hover:text-black"}`}
-              >
-                디테일
-              </button>
-              <button
-                type="button"
-                onClick={() => setLeftPanelTab("agenda-list")}
-                className={`rounded-xl px-4 py-2.5 text-sm font-semibold transition ${leftPanelTab === "agenda-list" ? "bg-[#1b59f8] text-white" : "text-[#4d4d4d] hover:bg-white hover:text-black"}`}
-              >
-                {stage === "problem-definition" ? "속한 의견" : "안건 목록"}
-              </button>
-            </div>
             </div>
 
-            {leftPanelTab === "detail" ? (
-              <div className="imms-left-panel-detail mt-4">
+            <div className="imms-left-panel-detail mt-[clamp(0.875rem,1.5vw,1rem)]">
                 {leftPanelDetail ? (
                   <>
                     <section className="border-b border-slate-200/80 pb-6">
@@ -11477,10 +11227,10 @@ export default function MeetingCanvasTab({
                             value={agendaDraftSummary}
                             onChange={(event) => setAgendaDraftSummary(event.target.value)}
                             className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                            placeholder="한 줄에 하나씩 핵심 요약 또는 포인트를 입력합니다."
+                            placeholder="한 줄에 하나씩 요약 또는 맥락을 입력합니다."
                           />
                           <p className="mt-3 text-sm leading-6 text-slate-500">
-                            줄 단위로 저장되며, ideation 안건 노드와 상세 포인트에 함께 반영됩니다.
+                            줄 단위로 저장되며, ideation 안건 노드와 상세 맥락에 함께 반영됩니다.
                           </p>
                         </>
                       ) : stage === "ideation" && isEditingSelectedCanvasItem ? (
@@ -11724,95 +11474,7 @@ export default function MeetingCanvasTab({
                           </div>
                         </section>
                       </>
-                    ) : (
-                    stage === "ideation" && selectedCanvasItem && leftPanelDetail.organizeTitle === "연결 정보" ? (
-                      <section className="pt-6">
-                        <div className="flex items-center justify-between gap-3">
-                          <h4 className="text-lg font-semibold text-slate-900">연결</h4>
-                          <span className="rounded-full border border-black/10 bg-[#e9efff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
-                            공용 아이템
-                          </span>
-                        </div>
-                        <div className="mt-4 space-y-3">
-                          <div className="rounded-2xl border border-black/10 bg-white p-4 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="text-sm font-semibold text-[#4d4d4d]">그룹 분류</p>
-                                <p className="mt-1 truncate text-base font-semibold leading-7 text-slate-900">
-                                  {agendaModels.find((agenda) => agenda.id === selectedCanvasItem.agenda_id)?.title || "아직 연결된 그룹이 없습니다."}
-                                </p>
-                              </div>
-                              {selectedCanvasItem.agenda_id ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleClearCanvasItemLink(selectedCanvasItem.id, "agenda_id")}
-                                  className="shrink-0 rounded-full border border-black/10 bg-[#fafafa] px-3 py-1.5 text-xs font-medium text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  해제
-                                </button>
-                              ) : null}
-                            </div>
-                            <select
-                              value={selectedCanvasItem.agenda_id || ""}
-                              onChange={(event) => {
-                                const nextAgendaId = event.target.value;
-                                if (nextAgendaId) {
-                                  handleSetCanvasItemAgendaLink(selectedCanvasItem.id, nextAgendaId);
-                                }
-                              }}
-                              className="mt-3 w-full rounded-xl border border-black/10 bg-[#fafafa] px-3 py-2.5 text-sm text-[#4d4d4d] focus:outline-none"
-                            >
-                              <option value="">그룹 분류 선택</option>
-                              {agendaModels.map((agenda) => (
-                                <option key={`${selectedCanvasItem.id}-agenda-link-${agenda.id}`} value={agenda.id}>
-                                  {agenda.title}
-                                </option>
-                              ))}
-                            </select>
-                            <details className="mt-3 rounded-xl border border-dashed border-black/10 bg-[#fafafa] p-3">
-                              <summary className="cursor-pointer text-xs font-semibold text-[#4d4d4d]">
-                                새 그룹 분류 추가
-                              </summary>
-                              <div className="mt-3 flex gap-2">
-                                <input
-                                  value={customGroupDraftTitle}
-                                  onChange={(event) => setCustomGroupDraftTitle(event.target.value)}
-                                  placeholder="예: 고객 경험"
-                                  className="min-w-0 flex-1 rounded-lg border border-black/10 bg-white px-3 py-2 text-sm text-[#4d4d4d]"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => handleAddProjectGroupCategory(selectedCanvasItem.id)}
-                                  className="shrink-0 rounded-lg bg-[#1b59f8] px-3 py-2 text-xs font-semibold text-white hover:bg-[#164be0]"
-                                >
-                                  추가
-                                </button>
-                              </div>
-                            </details>
-                          </div>
-
-                          <div className="rounded-2xl border border-black/10 bg-[#fafafa] p-4">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="text-sm font-semibold text-[#4d4d4d]">보드 위치</p>
-                                <p className="mt-1 break-all text-sm leading-6 text-slate-700">
-                                  {selectedCanvasItem.point_id ? selectedCanvasItem.point_id : "보드 빈 영역에 배치됨"}
-                                </p>
-                              </div>
-                              {selectedCanvasItem.point_id ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleClearCanvasItemLink(selectedCanvasItem.id, "point_id")}
-                                  className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-medium text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  해제
-                                </button>
-                              ) : null}
-                            </div>
-                          </div>
-                        </div>
-                      </section>
-                    ) : (
+                    ) : leftPanelDetail.organizeItems.length > 0 ? (
                       <section className="pt-6">
                         <h4 className="text-lg font-semibold text-slate-900">{leftPanelDetail.organizeTitle || "안건 정리"}</h4>
                         <div className="mt-4 space-y-3">
@@ -11824,8 +11486,7 @@ export default function MeetingCanvasTab({
                           ))}
                         </div>
                       </section>
-                    )
-                    )}
+                    ) : null}
                     {stage === "ideation" && selectedCanvasItem && leftPanelDetail.mergedItems?.length ? (
                       <section className="pt-6">
                         <div className="flex items-center justify-between gap-3">
@@ -11933,255 +11594,6 @@ export default function MeetingCanvasTab({
                   </p>
                 )}
               </div>
-            ) : stage === "problem-definition" && selectedProblemGroup ? (
-              <div className="imms-left-panel-detail mt-4 space-y-4">
-                <section className="border-b border-slate-200/80 pb-6">
-                  <div className="flex items-center justify-between gap-3">
-                    <h4 className="text-lg font-semibold text-slate-900">속한 의견</h4>
-                    <span className="text-sm text-slate-500">
-                      {selectedProblemSourceOpinions.length}개
-                    </span>
-                  </div>
-                  <p className="mt-2 text-sm leading-6 text-slate-500">
-                    Problem Note를 문제정의 카드 안의 topic/idea 위로 드래그하면 캔버스에서 사라지고 여기에 들어갑니다.
-                  </p>
-                </section>
-
-                <section className="border-b border-slate-200/80 pb-6">
-                  {selectedProblemSourceCard ? (
-                    <div className="flex items-center justify-between gap-3">
-                      <h4 className="text-lg font-semibold text-slate-900">
-                        {selectedProblemSourceCard.title}
-                      </h4>
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
-                        {selectedProblemSourceCard.sourceNodeKind === "topic" ? "Topic" : "Idea"}
-                      </span>
-                    </div>
-                  ) : null}
-                  {selectedProblemSourceCard?.body ? (
-                    <p className="mt-3 text-sm leading-6 text-slate-600">
-                      {stripLeadingTimestamp(selectedProblemSourceCard.body)}
-                    </p>
-                  ) : null}
-                  <div className="mt-4 space-y-3">
-                    {!selectedProblemSourceCard ? (
-                      <p className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm leading-6 text-slate-500">
-                        아직 선택된 topic/idea가 없습니다. 캔버스에서 topic/idea를 클릭하거나 problem note를 드래그해 연결하면 의견이 표시됩니다.
-                      </p>
-                    ) : selectedProblemSourceOpinions.length > 0 ? (
-                      selectedProblemSourceOpinions.map((opinion) => (
-                        <div key={opinion.id} className="rounded-2xl border border-violet-100 bg-white px-4 py-4 shadow-sm">
-                          <p className="text-sm font-semibold text-violet-700">{opinion.title || "의견"}</p>
-                          <p className="mt-2 whitespace-pre-wrap text-base leading-7 text-slate-700">
-                            {stripLeadingTimestamp(opinion.body || "의견 내용이 없습니다.")}
-                          </p>
-                          {(opinion.keywords || []).length > 0 ? (
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              {(opinion.keywords || []).slice(0, 5).map((keyword) => (
-                                <span key={`${opinion.id}-${keyword}`} className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700">
-                                  #{keyword}
-                                </span>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm leading-6 text-slate-500">
-                        아직 이 노드에 속한 의견이 없습니다.
-                      </p>
-                    )}
-                  </div>
-                </section>
-
-                {(leftPanelDetail?.floatingOpinions || []).length > 0 ? (
-                  <section>
-                    <div className="flex items-center justify-between gap-3">
-                      <h4 className="text-lg font-semibold text-slate-900">아직 배치되지 않은 의견</h4>
-                      <span className="text-sm text-slate-500">{leftPanelDetail?.floatingOpinions?.length || 0}개</span>
-                    </div>
-                    <div className="mt-4 space-y-3">
-                      {(leftPanelDetail?.floatingOpinions || []).map((opinion) => (
-                        <div key={opinion.id} className="rounded-xl border border-slate-200 bg-[#fafafa] px-4 py-3">
-                          <p className="text-sm font-semibold text-slate-700">{opinion.label}</p>
-                          <p className="mt-1 text-sm leading-6 text-slate-500">{stripLeadingTimestamp(opinion.value)}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-              </div>
-            ) : (
-              <div className="imms-left-panel-detail mt-4 space-y-3">
-                <section className="border-b border-slate-200/80 pb-6">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-lg font-semibold text-slate-900">안건 목록</h4>
-                    <span className="text-sm text-slate-500">{agendaModels.length}개 그룹</span>
-                  </div>
-                  <div className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-white/70 p-4">
-                    <p className="text-sm font-semibold text-slate-800">프로젝트 그룹 분류 추가</p>
-                    <p className="mt-1 text-xs leading-5 text-slate-500">
-                      회의에서 자동 생성된 안건과 별개로, 이 프로젝트에서 함께 쓸 분류를 추가합니다.
-                    </p>
-                    <div className="mt-3 flex gap-2">
-                      <input
-                        value={customGroupDraftTitle}
-                        onChange={(event) => setCustomGroupDraftTitle(event.target.value)}
-                        placeholder="예: 고객 경험, 기술 리스크"
-                        className="min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handleAddProjectGroupCategory()}
-                        className="shrink-0 rounded-xl bg-[#1b59f8] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_1px_0_rgba(0,0,0,0.04)] hover:bg-[#164be0]"
-                      >
-                        추가
-                      </button>
-                    </div>
-                    {!sharedSyncEnabled ? (
-                      <p className="mt-2 text-xs leading-5 text-amber-700">
-                        공유 OFF 상태라 지금 추가한 분류는 내 화면에만 저장됩니다.
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="mt-4 space-y-3">
-                    {agendaModels.map((agenda) => (
-                        <button
-                          key={agenda.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedAgendaId(agenda.id);
-                            setSelectedNodeId("");
-                            setLeftPanelTab("detail");
-                          }}
-                          className={`w-full rounded-xl border px-4 py-4 text-left transition ${selectedAgendaId === agenda.id ? "border-slate-300 bg-white" : "border-slate-200 bg-[#fafafa] hover:bg-white"}`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <strong className="text-base text-slate-900">{agenda.title}</strong>
-                            {agenda.isCustom ? (
-                              <span className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
-                                프로젝트 분류
-                              </span>
-                            ) : null}
-                          </div>
-                          <p className="mt-2 text-sm leading-6 text-slate-500">{agenda.summaryBullets[0] || "요약이 아직 없습니다."}</p>
-                        </button>
-                    ))}
-                  </div>
-                </section>
-
-                <section className="border-b border-slate-200/80 pb-6">
-                  <h4 className="text-lg font-semibold text-slate-900">단계 결과</h4>
-                  <div className="mt-4 space-y-3">
-                    {problemGroups.length === 0 && solutionTopics.length === 0 ? (
-                      <p className="text-base leading-7 text-slate-500">개인 메모를 모은 뒤 문제 정의와 해결책 생성을 진행하면 결과가 이 패널에 정리됩니다.</p>
-                    ) : null}
-                    {problemGroups.map((group) => (
-                      <button
-                        key={group.group_id}
-                        type="button"
-                        onClick={() => {
-                          setStage("problem-definition");
-                          setSelectedProblemGroupId(group.group_id);
-                          setSelectedNodeId(`problem-${group.group_id}`);
-                          setLeftPanelTab("detail");
-                        }}
-                        className={`w-full rounded-xl border p-4 text-left ${selectedProblemGroupId === group.group_id ? "border-violet-200 bg-violet-50/70" : "border-slate-200 bg-[#fafafa]"}`}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-600">문제 정의</p>
-                          <span className={`rounded-full px-2.5 py-1 text-xs ${problemGroupStatusTone(group.status)}`}>{problemGroupStatusLabel(group.status)}</span>
-                        </div>
-                        <h4 className="mt-1 text-base font-semibold text-slate-900">{group.topic}</h4>
-                        <p className="mt-2 text-sm leading-6 text-slate-600">{group.conclusion}</p>
-                      </button>
-                    ))}
-                    {solutionTopics.map((topic) => (
-                      <button
-                        key={topic.group_id}
-                        type="button"
-                        onClick={() => {
-                          setStage("solution");
-                          setSelectedSolutionTopicId(topic.group_id);
-                          setSelectedProblemGroupId("");
-                          setSelectedNodeId(`solution-${topic.group_id}`);
-                          setLeftPanelTab("detail");
-                        }}
-                        className={`w-full rounded-xl border p-4 text-left ${
-                          selectedSolutionTopicId === topic.group_id
-                            ? "border-emerald-200 bg-emerald-50/80"
-                            : "border-emerald-200 bg-emerald-50/60"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">해결책</p>
-                          <span className={`rounded-full px-2.5 py-1 text-xs ${problemGroupStatusTone(topic.status || "draft")}`}>
-                            {problemGroupStatusLabel((topic.status as ProblemGroupStatus) || "draft")}
-                          </span>
-                        </div>
-                        <h4 className="mt-1 text-base font-semibold text-slate-900">{topic.topic}</h4>
-                        <p className="mt-2 text-sm leading-6 text-slate-600">
-                          {topic.conclusion || topic.problem_conclusion || "해결 방향이 아직 없습니다."}
-                        </p>
-                        <p className="mt-2 text-xs text-slate-500">
-                          AI 초안 {topic.ai_suggestions.length}개 · 메모 {topic.notes.length}개
-                        </p>
-                      </button>
-                    ))}
-                  </div>
-                </section>
-
-                <section>
-                  <button
-                    type="button"
-                    onClick={() => setShowTranscriptCollection((prev) => !prev)}
-                    className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-white/80 px-4 py-3 text-left transition hover:bg-white"
-                  >
-                    <div>
-                      <h4 className="text-lg font-semibold text-slate-900">전사 내용 모음</h4>
-                      <p className="mt-1 text-sm text-slate-500">
-                        핵심 요약에 영향을 준 주요 발화 요약 {allRefinedTranscriptSentences.length}개
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-semibold text-slate-600">
-                      {showTranscriptCollection ? "접기" : "펼치기"}
-                    </span>
-                  </button>
-                  {showTranscriptCollection ? (
-                    <div className="mt-3 rounded-2xl border border-slate-200 bg-white/75 p-4">
-                      {allRefinedTranscriptSentences.length > 0 ? (
-                        <div className="space-y-2">
-                          {allRefinedTranscriptSentences.map((item, index) => (
-                            <div key={`all-refined-${item.utterance_id}-${index}`} className="rounded-xl bg-[#fafafa] px-3 py-2">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p className="text-xs font-semibold text-slate-500">{item.speaker || `발화 ${index + 1}`}</p>
-                                  {item.sourceItemTitle ? (
-                                    <p className="mt-0.5 truncate text-[11px] text-slate-400">{item.sourceItemTitle}</p>
-                                  ) : null}
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => focusCanvasItemInIdeation(item.sourceItemId, "전사 내용의 원문 노드로 이동했습니다.")}
-                                  className="shrink-0 rounded-full border border-black/10 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  원문 이동
-                                </button>
-                              </div>
-                              <p className="mt-1 text-sm leading-6 text-slate-700">{stripLeadingTimestamp(item.text)}</p>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-sm leading-6 text-slate-500">
-                          LLM이 아이디어 노드를 생성하면 핵심 요약에 영향을 준 주요 발화 요약이 여기에 정리됩니다.
-                        </p>
-                      )}
-                    </div>
-                  ) : null}
-                </section>
-              </div>
-            )}
             </div>
           </aside>
 
@@ -12931,7 +12343,7 @@ export default function MeetingCanvasTab({
             </div>
           </section>
 
-          <aside className={`imms-side-panel imms-right-panel relative order-3 min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] bg-[#f9f9f9] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-start-2 xl:min-h-0 xl:max-h-none ${rightDrawerCollapsed ? "overflow-hidden px-0 py-0" : "imms-overlay-scroll overflow-y-auto px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] xl:overflow-y-auto"}`}>
+          <aside className={`imms-side-panel imms-right-panel relative order-3 min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] bg-white shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-start-2 xl:min-h-0 xl:max-h-none ${rightDrawerCollapsed ? "overflow-hidden px-0 py-0" : "imms-overlay-scroll overflow-y-auto px-[clamp(0.875rem,1.5vw,1.25rem)] py-[clamp(1rem,2vh,1.5rem)] xl:overflow-y-auto"}`}>
             <button
               type="button"
               aria-label="오른쪽 패널 너비 조절"
@@ -12941,15 +12353,15 @@ export default function MeetingCanvasTab({
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
             {rightDrawerCollapsed ? (
-              <div className="flex h-full items-start justify-center pt-12">
+              <div className="flex h-full items-start justify-center pt-[clamp(3rem,6vh,4rem)]">
                 <span className="[writing-mode:vertical-rl] text-xs font-semibold text-[#4d4d4d]">패널 열기</span>
               </div>
             ) : null}
             <div className={rightDrawerCollapsed ? "hidden" : ""}>
-            <section className="imms-side-panel-surface p-4">
+            <section className="border-b border-black/10 pb-[clamp(1rem,2vh,1.5rem)]">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-medium text-black/50">개인 노트</p>
+                  <p className="text-xs font-medium text-black/50">Personal note</p>
                   <h3 className="mt-1 text-xl font-semibold text-black">개인 노트</h3>
                 </div>
                 <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-medium text-[#4d4d4d]">{projectPersonalNotes.length}개</span>
@@ -13025,8 +12437,13 @@ export default function MeetingCanvasTab({
               </div>
             </section>
 
-            <section className="imms-side-panel-surface mt-4 p-4">
-              <h3 className="text-lg font-semibold text-black">내 메모 목록</h3>
+            <section className="pt-[clamp(1rem,2vh,1.5rem)]">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-lg font-semibold text-black">내 메모 목록</h3>
+                <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-medium text-[#4d4d4d]">
+                  {projectPersonalNotes.length}
+                </span>
+              </div>
               {stage === "problem-definition" ? (
                 <p className="mt-2 text-sm leading-6 text-slate-500">메모 카드를 문제 정의 그룹으로 드래그해서 편입할 수 있습니다.</p>
               ) : null}
