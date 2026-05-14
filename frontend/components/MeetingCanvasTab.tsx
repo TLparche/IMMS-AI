@@ -7014,9 +7014,10 @@ export default function MeetingCanvasTab({
   );
 
   const handlePruneSolutionSuggestions = useCallback(
-    async (targetTopicId = "", persistImmediately = false) => {
+    async (targetTopicId = "", persistImmediately = false, sourceTopics?: SolutionTopicViewModel[]) => {
+      const baseSolutionTopics = sourceTopics || latestSharedWorkspaceRef.current.solutionTopics || solutionTopics;
       const { topics: nextSolutionTopics, removedCount } = pruneUnselectedSolutionSuggestions(
-        solutionTopics,
+        baseSolutionTopics,
         targetTopicId,
       );
 
@@ -7394,8 +7395,8 @@ export default function MeetingCanvasTab({
         setActivityMessage("사용자 해결책 카드를 추가했습니다.");
       };
       const toggleSolutionFinalNote = (topicId: string, noteId: string) => {
-        setSolutionTopics((prev) =>
-          prev.map((topic) =>
+        setSolutionTopics((prev) => {
+          const nextSolutionTopics = prev.map((topic) =>
             topic.group_id === topicId
               ? {
                   ...topic,
@@ -7412,8 +7413,15 @@ export default function MeetingCanvasTab({
                   ),
                 }
               : topic,
-          ),
-        );
+          );
+          latestSharedWorkspaceRef.current = {
+            ...latestSharedWorkspaceRef.current,
+            stage,
+            solutionTopics: nextSolutionTopics,
+            importedState: persistedSharedImportedState,
+          };
+          return nextSolutionTopics;
+        });
         setSelectedSolutionTopicId(topicId);
         setSelectedNodeId(`solution-${topicId}`);
       };
@@ -8650,6 +8658,7 @@ export default function MeetingCanvasTab({
     latestHighlightedTopicId,
     loadingProblemGroupIds,
     nodePositions,
+    persistedSharedImportedState,
     problemGroups,
     problemIdeaDrag,
     problemIdeaDropPreview,
@@ -11958,8 +11967,8 @@ export default function MeetingCanvasTab({
   };
 
   const handleToggleFinalSolutionNote = (topicId: string, noteId: string) => {
-    setSolutionTopics((prev) =>
-      prev.map((topic) =>
+    setSolutionTopics((prev) => {
+      const nextSolutionTopics = prev.map((topic) =>
         topic.group_id === topicId
           ? {
               ...topic,
@@ -11976,8 +11985,15 @@ export default function MeetingCanvasTab({
               ),
             }
           : topic,
-      ),
-    );
+      );
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        stage,
+        solutionTopics: nextSolutionTopics,
+        importedState: persistedSharedImportedState,
+      };
+      return nextSolutionTopics;
+    });
   };
 
   const startPanelResize = (side: "left" | "right") => (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -12011,20 +12027,30 @@ export default function MeetingCanvasTab({
   const handleEndMeetingClick = async () => {
     await flushIdeaAssimilationBuffer("stage-change");
     await flushProblemDiscussionBuffer("stage-change");
-    let endingSolutionTopics = solutionTopics;
-    if (solutionTopics.some((topic) => topic.ai_suggestions.some((suggestion) => suggestion.status !== "selected"))) {
-      endingSolutionTopics = await handlePruneSolutionSuggestions("", true);
+    let endingSolutionTopics = latestSharedWorkspaceRef.current.solutionTopics.length > 0
+      ? latestSharedWorkspaceRef.current.solutionTopics
+      : solutionTopics;
+    if (endingSolutionTopics.some((topic) => topic.ai_suggestions.some((suggestion) => suggestion.status !== "selected"))) {
+      endingSolutionTopics = await handlePruneSolutionSuggestions("", true, endingSolutionTopics);
     }
-    if (meetingId && sharedSyncEnabled) {
+    if (meetingId) {
+      const finalSolutionSummary = buildFinalSolutionSummaryPayload(endingSolutionTopics);
       try {
+        console.info("[canvas final summary save]", {
+          meetingId,
+          finalCount: finalSolutionSummary.final_count,
+          topicCount: finalSolutionSummary.topics.length,
+        });
         await saveCanvasWorkspacePatch({
           meeting_id: meetingId,
           solution_topics: serializeSharedSolutionTopics(endingSolutionTopics),
-          final_solution_summary: buildFinalSolutionSummaryPayload(endingSolutionTopics),
+          final_solution_summary: finalSolutionSummary,
           imported_state: persistedSharedImportedState,
         });
       } catch (error) {
         console.error("Failed to save final solution summary before ending meeting:", error);
+        alert("최종 결과 저장에 실패했습니다. 결과 확인에 표시되지 않을 수 있어 회의 종료를 중단했습니다.");
+        return;
       }
     }
     await onEndMeeting?.();

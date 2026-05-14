@@ -9313,6 +9313,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),
+            "final_solution_count": int((workspace.get("final_solution_summary") or {}).get("final_count") or 0),
             "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
         },
     )
