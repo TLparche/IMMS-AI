@@ -12261,9 +12261,12 @@ export default function MeetingCanvasTab({
   };
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
+  const rightDrawerShowsDetailPanel = stage === "ideation";
   const rightDrawerExpandedWidth = `clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
   const rightDrawerBodyClassName = rightDrawerContentVisible
-    ? "imms-drawer-body imms-overlay-scroll box-border h-full max-h-[min(48vh,500px)] translate-x-0 overflow-y-auto px-[clamp(1rem,1.6vw,1.35rem)] py-[clamp(1rem,2vh,1.5rem)] opacity-100 xl:max-h-none xl:overflow-y-auto"
+    ? `imms-drawer-body imms-overlay-scroll box-border h-full translate-x-0 overflow-y-auto px-[clamp(1rem,1.6vw,1.35rem)] py-[clamp(1rem,2vh,1.5rem)] opacity-100 xl:overflow-y-auto ${
+        rightDrawerShowsDetailPanel ? "max-h-[min(48vh,500px)] xl:max-h-none" : "max-h-none"
+      }`
     : `imms-drawer-body ${rightDrawerCollapsed ? "hidden " : ""}pointer-events-none translate-x-8 opacity-0`;
   const rightDrawerBodyStyle = isDesktopLayout && !rightDrawerCollapsed
     ? { width: rightDrawerExpandedWidth }
@@ -12276,10 +12279,12 @@ export default function MeetingCanvasTab({
   }`;
   const rightDrawerToggleIconClassName = `h-5 w-5 transition-transform duration-200 ${rightDrawerCollapsed ? "" : "rotate-180"}`;
   const rightDrawerResizeHandleClassName = "absolute left-[-7px] top-0 hidden h-full w-4 cursor-ew-resize xl:block";
-  const rightDrawerBottomPanelClassName = `imms-drawer-pane imms-side-panel imms-right-panel relative min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] flex-1 overflow-hidden bg-transparent xl:min-h-0 xl:max-h-none ${
+  const rightDrawerBottomPanelClassName = `imms-drawer-pane imms-side-panel imms-right-panel relative flex-1 overflow-hidden bg-transparent ${
+    rightDrawerShowsDetailPanel ? "min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] xl:min-h-0 xl:max-h-none" : "min-h-0 max-h-none"
+  } ${
     rightDrawerCollapsed && !rightDrawerContentVisible
       ? "hidden pointer-events-none -translate-x-8 px-0 py-0 opacity-0"
-      : "border-t-4 border-[#d5d5d5] translate-x-0 opacity-100"
+      : `${rightDrawerShowsDetailPanel ? "border-t-4 border-[#d5d5d5]" : ""} translate-x-0 opacity-100`
   }`;
   const workspaceGridColumns = rightDrawerCollapsed
     ? "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
@@ -14451,35 +14456,37 @@ export default function MeetingCanvasTab({
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
             <div className={rightDrawerPanelStackClassName}>
-            <RightDrawerPanel
-              className={rightDrawerTopPanelClassName}
-              bodyClassName={rightDrawerBodyClassName}
-              bodyStyle={rightDrawerBodyStyle}
-            >
-            <RightDetailPanelShell
-              collapsed={rightDrawerDetailCollapsed}
-              onToggleCollapsed={() => setRightDrawerDetailCollapsed((prev) => !prev)}
-            >
-                {leftPanelDetail ? (
-                  <>
-                    {renderDetailHeaderSection()}
+            {rightDrawerShowsDetailPanel ? (
+              <RightDrawerPanel
+                className={rightDrawerTopPanelClassName}
+                bodyClassName={rightDrawerBodyClassName}
+                bodyStyle={rightDrawerBodyStyle}
+              >
+                <RightDetailPanelShell
+                  collapsed={rightDrawerDetailCollapsed}
+                  onToggleCollapsed={() => setRightDrawerDetailCollapsed((prev) => !prev)}
+                >
+                  {leftPanelDetail ? (
+                    <>
+                      {renderDetailHeaderSection()}
 
-                    {renderDetailKeywordSection()}
+                      {renderDetailKeywordSection()}
 
-                    {renderProblemInsightSection()}
+                      {renderProblemInsightSection()}
 
-                    {renderDetailSummarySection()}
+                      {renderDetailSummarySection()}
 
-                    {renderSolutionDetailSections()}
-                    {renderGeneralOrganizeSection()}
-                    {renderIdeationRelatedSections()}
-                    {renderProblemRelatedSections()}
-                  </>
-                ) : (
-                  <RightDetailEmptyState />
-                )}
-            </RightDetailPanelShell>
-            </RightDrawerPanel>
+                      {renderSolutionDetailSections()}
+                      {renderGeneralOrganizeSection()}
+                      {renderIdeationRelatedSections()}
+                      {renderProblemRelatedSections()}
+                    </>
+                  ) : (
+                    <RightDetailEmptyState />
+                  )}
+                </RightDetailPanelShell>
+              </RightDrawerPanel>
+            ) : null}
 
             <RightDrawerPanel
               className={rightDrawerBottomPanelClassName}
