@@ -26,6 +26,7 @@ import {
   getCanvasProblemDiscussionWorkspaceJob,
   generateProblemGroupConclusion,
   generateCanvasProblemDefinition,
+  generateCanvasIdeationSuggestions,
   generateCanvasSolutionStage,
   flushCanvasPersonalNotes,
   flushCanvasWorkspacePatch,
@@ -45,6 +46,7 @@ import type {
   CanvasProblemDefinitionGroup,
   CanvasRealtimeSyncPayload,
   CanvasRefinedUtterance,
+  CanvasIdeationSuggestion,
   CanvasProblemDiscussionItem,
   CanvasSolutionTopicResponse,
   CanvasWorkspaceStateResponse,
@@ -354,6 +356,14 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasW
     ai_generated: Boolean(item.ai_generated),
     user_edited: Boolean(item.user_edited),
     ai_pending: Boolean(item.ai_pending),
+    ai_suggestions: (item.ai_suggestions || [])
+      .map((suggestion) => ({
+        id: suggestion.id,
+        text: suggestion.text.trim(),
+        status: normalizeIdeationSuggestionStatus(suggestion.status),
+      }))
+      .filter((suggestion) => suggestion.id && suggestion.text)
+      .slice(0, 8),
   }));
 }
 
@@ -609,6 +619,7 @@ function serializeAgendaOverrides(overrides: Record<string, AgendaOverride>) {
 
 type SolutionAiSuggestionViewModel = SolutionTopicViewModel["ai_suggestions"][number];
 type SolutionNoteViewModel = SolutionTopicViewModel["notes"][number];
+type IdeationSuggestionViewModel = CanvasIdeationSuggestion;
 
 type AgendaViewModel = {
   id: string;
@@ -723,6 +734,19 @@ function stageLabel(stage: CanvasStage) {
 
 function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
+}
+
+function KeyboardDoubleArrowDownIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      className={className}
+      fill="currentColor"
+    >
+      <path d="M5.41 5.59 12 12.17l6.59-6.58L20 7l-8 8-8-8 1.41-1.41Zm0 6L12 18.17l6.59-6.58L20 13l-8 8-8-8 1.41-1.41Z" />
+    </svg>
+  );
 }
 
 function isComposerTool(tool: CanvasTool): tool is ComposerTool {
@@ -850,6 +874,11 @@ function canvasItemStatusTone(status: CanvasItemStatus) {
 }
 
 function normalizeSolutionAiSuggestionStatus(raw: string | undefined): SolutionAiSuggestionStatus {
+  if (raw === "selected" || raw === "dismissed") return raw;
+  return "draft";
+}
+
+function normalizeIdeationSuggestionStatus(raw: string | undefined) {
   if (raw === "selected" || raw === "dismissed") return raw;
   return "draft";
 }
@@ -2443,6 +2472,14 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       ai_generated: Boolean(item.ai_generated),
       user_edited: Boolean(item.user_edited),
       ai_pending: Boolean(item.ai_pending),
+      ai_suggestions: (item.ai_suggestions || [])
+        .map((suggestion) => ({
+          id: (suggestion.id || "").trim(),
+          text: (suggestion.text || "").trim(),
+          status: normalizeIdeationSuggestionStatus(suggestion.status),
+        }))
+        .filter((suggestion) => suggestion.id && suggestion.text)
+        .slice(0, 8),
       x: undefined,
       y: undefined,
     };
@@ -2860,6 +2897,8 @@ export default function MeetingCanvasTab({
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
   const [ideaCreateStack, setIdeaCreateStack] = useState(0);
+  const [ideationSuggestionBusyRootId, setIdeationSuggestionBusyRootId] = useState("");
+  const [ideationSuggestionCollapsedByRootId, setIdeationSuggestionCollapsedByRootId] = useState<Record<string, boolean>>({});
   const [showTranscriptCollection, setShowTranscriptCollection] = useState(false);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
@@ -3142,6 +3181,8 @@ export default function MeetingCanvasTab({
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
     setProblemDiscussionStatus("");
+    setIdeationSuggestionBusyRootId("");
+    setIdeationSuggestionCollapsedByRootId({});
     setShowTranscriptCollection(false);
     agendaDragPreviewRef.current = null;
     setAgendaDragPreview(null);
@@ -7547,6 +7588,23 @@ export default function MeetingCanvasTab({
         return;
       }
 
+      if (
+        stage === "ideation" &&
+        (armedCanvasTool === "note" || armedCanvasTool === "comment")
+      ) {
+        const rightPaneRect = ideationRightPaneRef.current?.getBoundingClientRect() || null;
+        const insideRightPane =
+          Boolean(rightPaneRect) &&
+          clientX >= rightPaneRect!.left &&
+          clientX <= rightPaneRect!.right &&
+          clientY >= rightPaneRect!.top &&
+          clientY <= rightPaneRect!.bottom;
+        if (!insideRightPane) {
+          setCanvasPlacementPreview(null);
+          return;
+        }
+      }
+
       const rect = canvasSurfaceRef.current.getBoundingClientRect();
       const previewWidth = 232;
       const previewHeight = 112;
@@ -7572,6 +7630,22 @@ export default function MeetingCanvasTab({
     async (tool: CanvasTool, clientX: number, clientY: number, agendaId?: string, pointId?: string) => {
       if (!flowRef.current || !canvasSurfaceRef.current) {
         return;
+      }
+
+      if (stage === "ideation" && (tool === "note" || tool === "comment")) {
+        const rightPaneRect = ideationRightPaneRef.current?.getBoundingClientRect() || null;
+        const insideRightPane =
+          Boolean(rightPaneRect) &&
+          clientX >= rightPaneRect!.left &&
+          clientX <= rightPaneRect!.right &&
+          clientY >= rightPaneRect!.top &&
+          clientY <= rightPaneRect!.bottom;
+        if (!insideRightPane) {
+          setArmedCanvasTool(null);
+          setCanvasPlacementPreview(null);
+          setActivityMessage("메모와 댓글은 오른쪽 상세 캔버스에서 추가해 주세요.");
+          return;
+        }
       }
 
       const canvasRect = canvasSurfaceRef.current.getBoundingClientRect();
@@ -10402,6 +10476,200 @@ export default function MeetingCanvasTab({
       left: nodes.filter((node) => node.id.startsWith("solution-")),
     };
   }, [nodes, stage]);
+  const selectedIdeationSuggestions = selectedRootItemForIdeationCanvas?.ai_suggestions || [];
+  const ideationSuggestionBusy =
+    Boolean(selectedRootItemForIdeationCanvas) &&
+    ideationSuggestionBusyRootId === selectedRootItemForIdeationCanvas?.id;
+  const ideationSuggestionCollapsed =
+    Boolean(selectedRootItemForIdeationCanvas) &&
+    (ideationSuggestionCollapsedByRootId[selectedRootItemForIdeationCanvas?.id || ""] ?? true);
+
+  const persistIdeationCanvasItems = (
+    nextCanvasItemsSnapshot: CanvasItemViewModel[],
+    message: string,
+    selectedItemId = selectedCanvasItemId,
+  ) => {
+    const nextNodePositionsSnapshot = normalizeCanvasNodePositionsForComputedIdeation(nodePositions);
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    if (selectedItemId) {
+      setSelectedCanvasItemId(selectedItemId);
+      setSelectedNodeId(`canvas-item-${selectedItemId}`);
+    }
+    setActivityMessage(message);
+    latestSharedWorkspaceRef.current = {
+      ...latestSharedWorkspaceRef.current,
+      stage,
+      canvasItems: nextCanvasItemsSnapshot,
+      nodePositions: nextNodePositionsSnapshot,
+      importedState: persistedSharedImportedState,
+    };
+
+    if (!sharedSyncEnabled) {
+      return;
+    }
+
+    if (meetingId) {
+      writeSharedWorkspaceSessionCache(
+        meetingId,
+        buildFullWorkspacePatchPayload({
+          meetingId,
+          meetingGoal: meetingGoalDraft,
+          meetingGoalContext: meetingGoalContextDraft,
+          stage,
+          agendaOverrides,
+          canvasItems: nextCanvasItemsSnapshot,
+          customGroups,
+          problemGroups,
+          solutionTopics,
+          nodePositions: nextNodePositionsSnapshot,
+          importedState: persistedSharedImportedState,
+        }),
+      );
+    }
+    forceBroadcastSharedCanvas({
+      canvasItems: nextCanvasItemsSnapshot,
+      nodePositions: nextNodePositionsSnapshot,
+    });
+    if (meetingId) {
+      void saveCanvasWorkspacePatch({
+        meeting_id: meetingId,
+        canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        node_positions: nextNodePositionsSnapshot,
+        imported_state: persistedSharedImportedState,
+      }).catch((error) => {
+        console.error("Failed to save shared ideation suggestions:", error);
+      });
+    }
+  };
+
+  const handleGenerateIdeationSuggestions = async () => {
+    const rootItem = selectedRootItemForIdeationCanvas;
+    if (!rootItem || !meetingId) {
+      setActivityMessage("추천을 만들 topic을 먼저 선택해 주세요.");
+      return;
+    }
+
+    const childItems = getCanvasItemDescendantIds(canvasItems, rootItem.id)
+      .map((itemId) => canvasItems.find((item) => item.id === itemId) || null)
+      .filter((item): item is CanvasItemViewModel => Boolean(item && !isTopicCanvasItem(item)))
+      .slice(0, 12);
+
+    setIdeationSuggestionBusyRootId(rootItem.id);
+    setActivityMessage("AI 추천 아이디어를 생성하는 중입니다.");
+    try {
+      const result = await generateCanvasIdeationSuggestions({
+        meeting_id: meetingId,
+        meeting_topic: meetingTopicForAi,
+        topic: {
+          id: rootItem.id,
+          title: rootItem.title,
+          body: rootItem.body || "",
+          keywords: rootItem.keywords || [],
+        },
+        child_items: childItems.map((item) => ({
+          id: item.id,
+          kind: item.kind || "note",
+          title: item.title,
+          body: item.body || "",
+          keywords: item.keywords || [],
+        })),
+      });
+      const existingByText = new Map(
+        (rootItem.ai_suggestions || []).map((suggestion) => [suggestion.text.trim(), suggestion]),
+      );
+      const nextSuggestions: IdeationSuggestionViewModel[] = (result.suggestions || [])
+        .map((suggestion, index) => {
+          const text = (suggestion.text || "").trim();
+          const existing = existingByText.get(text);
+          return {
+            id: suggestion.id || existing?.id || `ideation-suggestion-${Date.now()}-${index}`,
+            text,
+            status: normalizeIdeationSuggestionStatus(existing?.status || suggestion.status),
+          };
+        })
+        .filter((suggestion) => suggestion.text)
+        .slice(0, 5);
+      const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+        item.id === rootItem.id
+          ? {
+              ...item,
+              ai_suggestions: nextSuggestions,
+            }
+          : item,
+      );
+      persistIdeationCanvasItems(
+        nextCanvasItemsSnapshot,
+        result.warning || `AI 추천 아이디어 ${nextSuggestions.length}개를 생성했습니다.`,
+        rootItem.id,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setActivityMessage(`AI 추천 아이디어 생성 실패: ${message}`);
+    } finally {
+      setIdeationSuggestionBusyRootId("");
+    }
+  };
+
+  const handleAdoptIdeationSuggestion = (suggestionId: string) => {
+    const rootItem = selectedRootItemForIdeationCanvas;
+    if (!rootItem) return;
+    const suggestion = (rootItem.ai_suggestions || []).find((item) => item.id === suggestionId);
+    if (!suggestion || normalizeIdeationSuggestionStatus(suggestion.status) === "selected") return;
+
+    const nextItemId = `item-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+    const titleSource = suggestion.text.split(/[.!?。！？\n]/)[0]?.trim() || suggestion.text;
+    const title = titleSource.length > 26 ? `${titleSource.slice(0, 26)}...` : titleSource;
+    const nextItem: CanvasItemViewModel = {
+      id: nextItemId,
+      agenda_id: rootItem.agenda_id,
+      point_id: "",
+      kind: "note",
+      status: "discussion",
+      title: title || "AI 추천 아이디어",
+      body: suggestion.text,
+      keywords: extractCanvasItemKeywords(title, suggestion.text, 5),
+      key_evidence: [],
+      refined_utterances: [],
+      evidence_utterance_ids: [],
+      ignored_utterance_ids: [],
+      merged_children: [],
+      compacted_from_ids: [],
+      compaction_level: 0,
+      parent_topic_id: rootItem.id,
+      parent_topic_source: "user",
+      parent_topic_locked: true,
+      child_item_ids: [],
+      topic_collapsed: false,
+      created_by: "user",
+      manual_position: false,
+      ai_generated: true,
+      user_edited: false,
+      ai_pending: false,
+      x: undefined,
+      y: undefined,
+    };
+    const nextCanvasItemsSnapshot = [
+      nextItem,
+      ...canvasItems.map((item) =>
+        item.id === rootItem.id
+          ? {
+              ...item,
+              child_item_ids: [...new Set([...(item.child_item_ids || []), nextItemId])],
+              ai_suggestions: (item.ai_suggestions || []).map((candidate) =>
+                candidate.id === suggestionId
+                  ? {
+                      ...candidate,
+                      status: "selected",
+                    }
+                  : candidate,
+              ),
+            }
+          : item,
+      ),
+    ];
+    persistIdeationCanvasItems(nextCanvasItemsSnapshot, "AI 추천 아이디어를 카드로 채택했습니다.", nextItemId);
+  };
 
   const focusCanvasItemInIdeation = (itemId: string, reason = "원문 위치로 이동했습니다.") => {
     const item = canvasItems.find((candidate) => candidate.id === itemId) || null;
@@ -10506,6 +10774,16 @@ export default function MeetingCanvasTab({
       if (canvasItem?.agenda_id) {
         setSelectedAgendaId(canvasItem.agenda_id);
       }
+      if (
+        armedCanvasTool &&
+        stage === "ideation" &&
+        (armedCanvasTool === "note" || armedCanvasTool === "comment") &&
+        canvasItem &&
+        !canvasItem.parent_topic_id
+      ) {
+        setActivityMessage("메모와 댓글은 오른쪽 상세 캔버스에서 추가해 주세요.");
+        return;
+      }
     } else {
       setSelectedCanvasItemId("");
     }
@@ -10571,6 +10849,15 @@ export default function MeetingCanvasTab({
         setSelectedNodeId("");
         setLeftPanelTab("detail");
       }
+      return;
+    }
+    if (
+      stage === "ideation" &&
+      pane !== "ideation-right" &&
+      (armedCanvasTool === "note" || armedCanvasTool === "comment")
+    ) {
+      setCanvasPlacementPreview(null);
+      setActivityMessage("메모와 댓글은 오른쪽 상세 캔버스에서 추가해 주세요.");
       return;
     }
     setSelectedCanvasItemId("");
@@ -12023,7 +12310,91 @@ export default function MeetingCanvasTab({
                         </div>
                       </div>
                     </div>
-                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
+                    <div className="flex min-h-0 flex-1 flex-col bg-[#f5f6f8]">
+                      {selectedRootItemForIdeationCanvas ? (
+                        <section className={`shrink-0 border-b border-black/10 bg-white px-5 ${ideationSuggestionCollapsed ? "py-2.5" : "py-4"}`}>
+                          <div className={`flex justify-between gap-4 ${ideationSuggestionCollapsed ? "items-center" : "items-start"}`}>
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">AI 추천 아이디어</p>
+                              {ideationSuggestionCollapsed ? null : (
+                              <p className="mt-1 text-sm leading-6 text-[#777]">
+                                선택한 topic의 하위 내용을 바탕으로 참고용 아이디어를 제안합니다.
+                              </p>
+                              )}
+                            </div>
+                            <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                              {ideationSuggestionCollapsed ? null : (
+                              <button
+                                type="button"
+                                onClick={() => void handleGenerateIdeationSuggestions()}
+                                disabled={ideationSuggestionBusy}
+                                className="rounded-full border border-black/10 bg-[#f5f6f8] px-4 py-2 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#eff0f6] disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {ideationSuggestionBusy ? "생성 중" : "추천 생성"}
+                              </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const rootId = selectedRootItemForIdeationCanvas.id;
+                                  setIdeationSuggestionCollapsedByRootId((current) => ({
+                                    ...current,
+                                    [rootId]: !Boolean(current[rootId]),
+                                  }));
+                                }}
+                                aria-label={ideationSuggestionCollapsed ? "AI 추천 아이디어 펼치기" : "AI 추천 아이디어 접기"}
+                                title={ideationSuggestionCollapsed ? "펼치기" : "접기"}
+                                className="flex h-8 w-8 items-center justify-center rounded-full border border-black/10 bg-white text-base font-bold leading-none text-[#4d4d4d] transition hover:bg-[#f5f6f8]"
+                              >
+                                <KeyboardDoubleArrowDownIcon
+                                  className={`h-5 w-5 transition-transform ${
+                                    ideationSuggestionCollapsed ? "" : "rotate-180"
+                                  }`}
+                                />
+                              </button>
+                            </div>
+                          </div>
+                          {ideationSuggestionCollapsed ? null : (
+                            <div className="mt-3 flex gap-3 overflow-x-auto pb-1">
+                              {selectedIdeationSuggestions.length > 0 ? (
+                                selectedIdeationSuggestions.map((suggestion, index) => {
+                                  const adopted = normalizeIdeationSuggestionStatus(suggestion.status) === "selected";
+                                  return (
+                                    <article
+                                      key={suggestion.id}
+                                      className={`min-w-[260px] max-w-[340px] border px-4 py-3 ${
+                                        adopted
+                                          ? "border-blue-200 bg-blue-50/70"
+                                          : "border-black/10 bg-[#fafafa]"
+                                      }`}
+                                    >
+                                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#777]">
+                                        추천 {index + 1}
+                                      </p>
+                                      <p className={`mt-2 line-clamp-3 text-sm leading-6 ${adopted ? "text-blue-700" : "text-[#4d4d4d]"}`}>
+                                        {suggestion.text}
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleAdoptIdeationSuggestion(suggestion.id)}
+                                        disabled={adopted}
+                                        className="mt-3 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-60"
+                                      >
+                                        {adopted ? "채택됨" : "카드로 채택"}
+                                      </button>
+                                    </article>
+                                  );
+                                })
+                              ) : (
+                                <div className="min-w-[280px] border border-dashed border-black/10 bg-[#fafafa] px-4 py-3 text-sm leading-6 text-[#777]">
+                                  아직 추천 아이디어가 없습니다. `추천 생성`을 누르면 이 영역에 참고용 제안이 표시됩니다.
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </section>
+                      ) : null}
+                      <div className="min-h-0 flex-1">
                       <ReactFlow<Node, Edge>
                         nodes={ideationSplitNodes.right}
                         edges={[] as Edge[]}
@@ -12053,6 +12424,7 @@ export default function MeetingCanvasTab({
                         />
                         <Controls />
                       </ReactFlow>
+                      </div>
                     </div>
                   </div>
                 </div>

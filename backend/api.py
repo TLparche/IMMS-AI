@@ -680,6 +680,32 @@ def _normalize_canvas_merged_children(raw_children: Any, limit: int = 80, depth:
     return normalized
 
 
+def _normalize_canvas_ideation_suggestions(raw_suggestions: Any, limit: int = 8) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for index, raw in enumerate(raw_suggestions or []):
+        if hasattr(raw, "model_dump"):
+            item = raw.model_dump()
+        elif isinstance(raw, dict):
+            item = raw
+        else:
+            continue
+        text = _safe_text(item.get("text"))
+        if not text:
+            continue
+        status = _safe_text(item.get("status"), "draft")
+        if status not in {"draft", "selected", "dismissed"}:
+            status = "draft"
+        suggestion_id = _safe_text(item.get("id")) or f"ideation-suggestion-{index + 1}"
+        normalized.append({
+            "id": suggestion_id,
+            "text": text,
+            "status": status,
+        })
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
 def _normalize_canvas_workspace_items(
     items: list[CanvasWorkspaceCanvasItemInput] | None,
 ) -> list[dict[str, Any]]:
@@ -718,6 +744,7 @@ def _normalize_canvas_workspace_items(
             "ai_generated": bool(item.ai_generated),
             "user_edited": bool(item.user_edited),
             "ai_pending": bool(getattr(item, "ai_pending", False)),
+            "ai_suggestions": _normalize_canvas_ideation_suggestions(item.ai_suggestions),
         }
 
         normalized.append(payload)
@@ -1789,6 +1816,34 @@ class SolutionStageGenerateInput(BaseModel):
     topics: list[SolutionStageTopicInput] = Field(default_factory=list)
 
 
+class IdeationSuggestionTopicInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+
+
+class IdeationSuggestionChildInput(BaseModel):
+    id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+
+
+class IdeationSuggestionGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    topic: IdeationSuggestionTopicInput = Field(default_factory=IdeationSuggestionTopicInput)
+    child_items: list[IdeationSuggestionChildInput] = Field(default_factory=list)
+
+
+class CanvasIdeationSuggestionInput(BaseModel):
+    id: str = ""
+    text: str = ""
+    status: str = "draft"
+
+
 class CanvasWorkspaceIdeaInput(BaseModel):
     id: str = ""
     kind: str = "note"
@@ -1842,6 +1897,7 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     ai_generated: bool = False
     user_edited: bool = False
     ai_pending: bool = False
+    ai_suggestions: list[CanvasIdeationSuggestionInput] = Field(default_factory=list)
     x: float | None = None
     y: float | None = None
 
@@ -2853,6 +2909,74 @@ def _build_solution_stage_prompt(meeting_topic: str, topics: list[dict[str, Any]
         "- 서로 중복되지 않게 작성한다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
+
+
+def _build_ideation_suggestions_prompt(payload: IdeationSuggestionGenerateInput) -> str:
+    serialized = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "topic": {
+            "id": _safe_text(payload.topic.id),
+            "title": _safe_text(payload.topic.title),
+            "body": _safe_text(payload.topic.body),
+            "keywords": [_safe_text(item) for item in (payload.topic.keywords or []) if _safe_text(item)][:8],
+        },
+        "child_items": [
+            {
+                "id": _safe_text(item.id),
+                "kind": _safe_text(item.kind, "note"),
+                "title": _safe_text(item.title),
+                "body": _safe_text(item.body),
+                "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
+            }
+            for item in (payload.child_items or [])
+            if _safe_text(item.title) or _safe_text(item.body)
+        ][:12],
+    }
+    return (
+        "너는 아이디어 단계의 topic을 보고 회의에서 추가로 검토할 아이디어를 제안하는 AI다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- topic과 하위 아이디어/메모를 바탕으로 아직 카드로 만들지 않은 새 아이디어를 제안한다.\n"
+        "- 기존 내용을 다른 말로 반복하지 말고, 서로 구분되는 제안을 만든다.\n"
+        "- 회의 참가자가 선택적으로 채택할 참고 제안처럼 낮은 위계로 쓸 수 있게 짧게 작성한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(serialized, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "suggestions": [\n'
+        '    {"text": "추천 아이디어 1"},\n'
+        '    {"text": "추천 아이디어 2"}\n'
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- suggestions는 2~5개.\n"
+        "- 각 text는 한국어 1문장 또는 짧은 명사구.\n"
+        "- 기존 child_items의 title/body와 의미가 거의 같은 제안은 제외한다.\n"
+        "- 너무 추상적인 표현 대신 바로 카드로 채택 가능한 아이디어로 쓴다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_local_ideation_suggestions(payload: IdeationSuggestionGenerateInput) -> list[dict[str, str]]:
+    topic_title = _safe_text(payload.topic.title, "선택한 topic")
+    topic_keywords = [_safe_text(item) for item in (payload.topic.keywords or []) if _safe_text(item)]
+    child_titles = [_safe_text(item.title) for item in (payload.child_items or []) if _safe_text(item.title)]
+    anchors = _dedup_preserve([*topic_keywords, *child_titles, topic_title], limit=5)
+    if not anchors:
+        anchors = [topic_title]
+    candidates = [
+        f"{anchors[0]}를 빠르게 검증할 수 있는 사용자 시나리오를 만든다.",
+        f"{anchors[min(1, len(anchors) - 1)]} 관점에서 비교 가능한 대안을 정리한다.",
+        f"{topic_title}에 대한 실행 우선순위를 정하는 판단 기준을 만든다.",
+    ]
+    return [
+        {
+            "id": f"ideation-suggestion-{index + 1}",
+            "text": text,
+            "status": "draft",
+        }
+        for index, text in enumerate(_dedup_preserve(candidates, limit=3))
+        if _safe_text(text)
+    ]
 
 
 def _build_agenda_markdown(rt: RuntimeStore) -> str:
@@ -8890,6 +9014,74 @@ def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
         RT,
         normalized_meeting_id,
         "solution_stage",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/ideation-suggestions")
+def post_canvas_ideation_suggestions(payload: IdeationSuggestionGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        suggestions = _build_local_ideation_suggestions(payload)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_ideation_suggestions_prompt(payload),
+                    stage="canvas_ideation_suggestions",
+                    temperature=0.35,
+                    max_tokens=900,
+                )
+                parsed_suggestions = parsed.get("suggestions") if isinstance(parsed, dict) else None
+                if isinstance(parsed_suggestions, list):
+                    normalized = _normalize_canvas_ideation_suggestions(
+                        [
+                            {
+                                "id": f"ideation-suggestion-{index + 1}",
+                                "text": _safe_text(item.get("text") if isinstance(item, dict) else item),
+                                "status": "draft",
+                            }
+                            for index, item in enumerate(parsed_suggestions)
+                        ],
+                        limit=5,
+                    )
+                    if normalized:
+                        suggestions = normalized
+                        used_llm = True
+                        RT.last_llm_parsed_json = {
+                            "stage": "canvas_ideation_suggestions",
+                            "suggestions": copy.deepcopy(suggestions),
+                        }
+                        RT.last_llm_parsed_at = _now_ts()
+                    else:
+                        warning = "LLM 추천 결과가 비어 있어 로컬 추천을 사용했습니다."
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 추천을 사용했습니다."
+            except Exception as exc:
+                warning = f"아이디어 추천 LLM 생성 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 추천을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "suggestions": suggestions,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "ideation_suggestions",
         signature,
         _compute,
     )

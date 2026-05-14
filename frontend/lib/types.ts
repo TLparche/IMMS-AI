@@ -269,6 +269,12 @@ export interface CanvasProblemConclusionResponse {
   conclusion: string;
 }
 
+export interface CanvasIdeationSuggestion {
+  id: string;
+  text: string;
+  status?: "draft" | "selected" | "dismissed" | string;
+}
+
 export interface CanvasWorkspaceItem {
   id: string;
   agenda_id: string;
@@ -295,6 +301,7 @@ export interface CanvasWorkspaceItem {
   ai_generated?: boolean;
   user_edited?: boolean;
   ai_pending?: boolean;
+  ai_suggestions?: CanvasIdeationSuggestion[];
   x?: number;
   y?: number;
 }
@@ -551,4 +558,12 @@ export interface CanvasSolutionStageResponse {
   warning?: string;
   generated_at: string;
   topics: CanvasSolutionTopicResponse[];
+}
+
+export interface CanvasIdeationSuggestionResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  suggestions: CanvasIdeationSuggestion[];
 }

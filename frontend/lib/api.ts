@@ -9,6 +9,7 @@ import type {
   CanvasIdeaAssimilationIdea,
   CanvasIdeaAssimilationResponse,
   CanvasIdeaAssimilationUtterance,
+  CanvasIdeationSuggestionResponse,
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasPersonalNotesStateResponse,
@@ -201,6 +202,30 @@ export async function generateCanvasSolutionStage(payload: {
   }>;
 }): Promise<CanvasSolutionStageResponse> {
   return requestJson<CanvasSolutionStageResponse>("/api/canvas/solution-stage", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generateCanvasIdeationSuggestions(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  topic: {
+    id: string;
+    title: string;
+    body: string;
+    keywords: string[];
+  };
+  child_items: Array<{
+    id: string;
+    kind: string;
+    title: string;
+    body: string;
+    keywords: string[];
+  }>;
+}): Promise<CanvasIdeationSuggestionResponse> {
+  return requestJson<CanvasIdeationSuggestionResponse>("/api/canvas/ideation-suggestions", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
