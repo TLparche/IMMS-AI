@@ -995,7 +995,6 @@ function HomeContent() {
 
   const endMeeting = async () => {
     if (!meetingId) return;
-    if (!confirm("회의를 종료하시겠습니까?")) return;
 
     if (isRecording) {
       const recorder = audioRecorderRef.current;

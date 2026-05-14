@@ -3955,6 +3955,13 @@ export default function MeetingCanvasTab({
   const [problemIdeaDropPreview, setProblemIdeaDropPreview] = useState<ProblemIdeaDropPreviewState | null>(null);
   const [problemIdeaDragPoint, setProblemIdeaDragPoint] = useState<ProblemIdeaDragPointState | null>(null);
   const [meetingGoalEditorOpen, setMeetingGoalEditorOpen] = useState(false);
+  const [endMeetingConfirmOpen, setEndMeetingConfirmOpen] = useState(false);
+  const [endMeetingSaving, setEndMeetingSaving] = useState(false);
+  const [endMeetingPreview, setEndMeetingPreview] = useState<{
+    finalCount: number;
+    topicCount: number;
+    solutionTopics: SolutionTopicViewModel[];
+  } | null>(null);
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
@@ -4243,6 +4250,9 @@ export default function MeetingCanvasTab({
     setMeetingGoalContextEditorDraft("");
     setMeetingGoalSaving(false);
     setMeetingGoalEditorOpen(false);
+    setEndMeetingConfirmOpen(false);
+    setEndMeetingSaving(false);
+    setEndMeetingPreview(null);
     onMeetingGoalChange("");
     onMeetingGoalContextChange("");
     setCustomGroupDraftTitle("");
@@ -12024,12 +12034,36 @@ export default function MeetingCanvasTab({
     await flushProblemDiscussionBuffer("manual");
   };
 
+  const getEndingSolutionTopicsSnapshot = () =>
+    latestSharedWorkspaceRef.current.solutionTopics.length > 0
+      ? latestSharedWorkspaceRef.current.solutionTopics
+      : solutionTopics;
+
   const handleEndMeetingClick = async () => {
     await flushIdeaAssimilationBuffer("stage-change");
     await flushProblemDiscussionBuffer("stage-change");
-    let endingSolutionTopics = latestSharedWorkspaceRef.current.solutionTopics.length > 0
-      ? latestSharedWorkspaceRef.current.solutionTopics
-      : solutionTopics;
+
+    const endingSolutionTopics = getEndingSolutionTopicsSnapshot();
+    const finalSolutionSummary = buildFinalSolutionSummaryPayload(endingSolutionTopics);
+    setEndMeetingPreview({
+      finalCount: finalSolutionSummary.final_count,
+      topicCount: finalSolutionSummary.topics.length,
+      solutionTopics: endingSolutionTopics,
+    });
+    setEndMeetingConfirmOpen(true);
+  };
+
+  const handleCancelEndMeeting = () => {
+    if (endMeetingSaving) return;
+    setEndMeetingConfirmOpen(false);
+    setEndMeetingPreview(null);
+  };
+
+  const handleConfirmEndMeeting = async () => {
+    if (endMeetingSaving) return;
+    setEndMeetingSaving(true);
+
+    let endingSolutionTopics = endMeetingPreview?.solutionTopics || getEndingSolutionTopicsSnapshot();
     if (endingSolutionTopics.some((topic) => topic.ai_suggestions.some((suggestion) => suggestion.status !== "selected"))) {
       endingSolutionTopics = await handlePruneSolutionSuggestions("", true, endingSolutionTopics);
     }
@@ -12050,10 +12084,21 @@ export default function MeetingCanvasTab({
       } catch (error) {
         console.error("Failed to save final solution summary before ending meeting:", error);
         alert("최종 결과 저장에 실패했습니다. 결과 확인에 표시되지 않을 수 있어 회의 종료를 중단했습니다.");
+        setEndMeetingSaving(false);
         return;
       }
     }
-    await onEndMeeting?.();
+
+    try {
+      await onEndMeeting?.();
+      setEndMeetingConfirmOpen(false);
+      setEndMeetingPreview(null);
+    } catch (error) {
+      console.error("Failed to end meeting after final summary save:", error);
+      alert("회의 종료에 실패했습니다.");
+    } finally {
+      setEndMeetingSaving(false);
+    }
   };
 
   const handleOpenMeetingGoalEditor = () => {
@@ -13549,9 +13594,10 @@ export default function MeetingCanvasTab({
               <button
                 type="button"
                 onClick={() => void handleEndMeetingClick()}
-                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#ef4e4e] px-[clamp(14px,1.7vw,24px)] text-[clamp(16px,1.2vw,20px)] font-semibold text-white hover:bg-[#df3f3f]"
+                disabled={endMeetingSaving}
+                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#ef4e4e] px-[clamp(14px,1.7vw,24px)] text-[clamp(16px,1.2vw,20px)] font-semibold text-white hover:bg-[#df3f3f] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                종료
+                {endMeetingSaving ? "종료 중" : "종료"}
               </button>
               <button
                 type="button"
@@ -14525,6 +14571,59 @@ export default function MeetingCanvasTab({
           </div>
         </div>
       </section>
+
+      {endMeetingConfirmOpen ? (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4">
+          <div className="w-full max-w-[560px] overflow-hidden rounded-[18px] border border-black/10 bg-white shadow-2xl">
+            <div className="border-b border-black/10 px-7 py-6">
+              <p className="text-sm font-semibold text-[#ef4e4e]">회의 종료 확인</p>
+              <h2 className="mt-2 text-2xl font-semibold text-black">
+                {(endMeetingPreview?.finalCount || 0) > 0 ? "회의를 종료할까요?" : "최종 결과 없이 종료할까요?"}
+              </h2>
+              <p className="mt-3 text-sm leading-6 text-[#4d4d4d]">
+                {(endMeetingPreview?.finalCount || 0) > 0
+                  ? `최종 결과 ${endMeetingPreview?.finalCount || 0}개가 대시보드 결과 확인에 저장됩니다.`
+                  : "현재 최종 결과로 선택된 항목이 없습니다. 그대로 종료하면 대시보드 결과 확인에 표시할 내용이 없습니다."}
+              </p>
+            </div>
+            <div className="space-y-3 px-7 py-5">
+              <div className="rounded-[14px] bg-[#f9f9f9] px-4 py-3">
+                <div className="flex items-center justify-between gap-4 text-sm">
+                  <span className="font-medium text-[#4d4d4d]">저장될 최종 항목</span>
+                  <span className="font-semibold text-black">{endMeetingPreview?.finalCount || 0}개</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-4 text-sm">
+                  <span className="font-medium text-[#4d4d4d]">포함된 해결책 그룹</span>
+                  <span className="font-semibold text-black">{endMeetingPreview?.topicCount || 0}개</span>
+                </div>
+              </div>
+              {(endMeetingPreview?.finalCount || 0) === 0 ? (
+                <p className="rounded-[14px] border border-[#f0c6c6] bg-[#fff5f5] px-4 py-3 text-sm font-medium leading-6 text-[#b23b3b]">
+                  결과를 남기려면 해결책 단계에서 카드의 `최종 결론` 표시를 먼저 선택해 주세요.
+                </p>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-3 border-t border-black/10 px-7 py-5">
+              <button
+                type="button"
+                onClick={handleCancelEndMeeting}
+                disabled={endMeetingSaving}
+                className="inline-flex h-11 items-center justify-center rounded-[12px] bg-[#eff0f6] px-5 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                돌아가기
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmEndMeeting()}
+                disabled={endMeetingSaving}
+                className="inline-flex h-11 items-center justify-center rounded-[12px] bg-[#ef4e4e] px-5 text-sm font-semibold text-white transition hover:bg-[#df3f3f] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {endMeetingSaving ? "저장 중" : (endMeetingPreview?.finalCount || 0) > 0 ? "저장하고 종료" : "결과 없이 종료"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
