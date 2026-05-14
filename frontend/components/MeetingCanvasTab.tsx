@@ -17,7 +17,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type ReactNode } from "react";
 import {
   getCanvasWorkspaceState,
   getCanvasPersonalNotes,
@@ -728,6 +728,414 @@ function KeyboardDoubleArrowLeftIcon({ className = "" }: { className?: string })
     >
       <path d="M18.41 5.41 11.83 12l6.58 6.59L17 20l-8-8 8-8 1.41 1.41Zm-6 0L5.83 12l6.58 6.59L11 20l-8-8 8-8 1.41 1.41Z" />
     </svg>
+  );
+}
+
+function RightDrawerPanel({
+  className,
+  bodyClassName,
+  bodyStyle,
+  children,
+}: {
+  className: string;
+  bodyClassName: string;
+  bodyStyle?: CSSProperties;
+  children: ReactNode;
+}) {
+  return (
+    <aside className={className}>
+      <div className={bodyClassName} style={bodyStyle}>
+        {children}
+      </div>
+    </aside>
+  );
+}
+
+function RightDrawerSectionHeader({
+  eyebrow,
+  title,
+  titleClassName = "mt-1 text-lg font-semibold leading-tight text-black",
+  action,
+}: {
+  eyebrow: string;
+  title: string;
+  titleClassName?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-black/50">{eyebrow}</p>
+        <h3 className={titleClassName}>{title}</h3>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function RightDetailPanelContent({
+  collapsed,
+  children,
+}: {
+  collapsed: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`imms-left-panel-detail mt-[clamp(0.875rem,1.5vw,1rem)] ${collapsed ? "hidden" : ""}`}>
+      {children}
+    </div>
+  );
+}
+
+function RightDetailPanelShell({
+  collapsed,
+  onToggleCollapsed,
+  children,
+}: {
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <div className="border-b border-black/10 pb-[clamp(0.875rem,1.4vw,1rem)]">
+        <RightDrawerSectionHeader
+          eyebrow="선택 정보"
+          title="내용 상세보기"
+          action={
+            <button
+              type="button"
+              onClick={onToggleCollapsed}
+              className="shrink-0 rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
+            >
+              {collapsed ? "열기" : "접기"}
+            </button>
+          }
+        />
+      </div>
+      <RightDetailPanelContent collapsed={collapsed}>
+        {children}
+      </RightDetailPanelContent>
+    </>
+  );
+}
+
+function RightDetailEmptyState() {
+  return (
+    <div className="rounded-2xl border border-dashed border-black/10 bg-[#fafafa] px-4 py-5">
+      <p className="text-base font-semibold text-slate-900">선택된 내용이 없습니다</p>
+      <p className="mt-2 text-sm leading-6 text-slate-500">
+        왼쪽 캔버스에서 그룹을 선택하거나 오른쪽 캔버스에서 아이디어/댓글을 선택하면 상세 정보가 표시됩니다.
+      </p>
+    </div>
+  );
+}
+
+function RightDrawerNotesPanel({
+  collapsed,
+  noteCount,
+  onToggleCollapsed,
+  children,
+}: {
+  collapsed: boolean;
+  noteCount: number;
+  onToggleCollapsed: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border-b border-black/10 pb-[clamp(1rem,2vh,1.5rem)]">
+      <RightDrawerSectionHeader
+        eyebrow="Personal note"
+        title="개인 노트"
+        titleClassName="mt-1 text-xl font-semibold leading-tight text-black"
+        action={
+          <button
+            type="button"
+            onClick={onToggleCollapsed}
+            className="shrink-0 rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
+          >
+            {collapsed ? "열기" : `${noteCount}개 · 접기`}
+          </button>
+        }
+      />
+      {collapsed ? null : children}
+    </section>
+  );
+}
+
+function PersonalNoteComposer({
+  agendaModels,
+  composerAgendaId,
+  composerTitle,
+  composerBody,
+  composerLinkedCanvasItemId,
+  composerLinkedCanvasItemTitle,
+  pendingPersonalNoteLinkId,
+  composerBodyRef,
+  onAgendaChange,
+  onTitleChange,
+  onBodyChange,
+  onStartLinkSelection,
+  onClearLinkedIdea,
+  onCancelPendingLink,
+  onSave,
+}: {
+  agendaModels: AgendaViewModel[];
+  composerAgendaId: string;
+  composerTitle: string;
+  composerBody: string;
+  composerLinkedCanvasItemId: string;
+  composerLinkedCanvasItemTitle: string;
+  pendingPersonalNoteLinkId: string;
+  composerBodyRef: RefObject<HTMLTextAreaElement | null>;
+  onAgendaChange: (value: string) => void;
+  onTitleChange: (value: string) => void;
+  onBodyChange: (value: string) => void;
+  onStartLinkSelection: () => void;
+  onClearLinkedIdea: () => void;
+  onCancelPendingLink: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="mt-4 space-y-3">
+      <select value={composerAgendaId} onChange={(event) => onAgendaChange(event.target.value)} className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none">
+        <option value="">프로젝트 전체 메모</option>
+        {agendaModels.map((agenda) => (
+          <option key={agenda.id} value={agenda.id}>
+            {agenda.title}
+          </option>
+        ))}
+      </select>
+      <input value={composerTitle} onChange={(event) => onTitleChange(event.target.value)} placeholder="메모 제목" className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none" />
+      <textarea ref={composerBodyRef} value={composerBody} onChange={(event) => onBodyChange(event.target.value)} placeholder="메모 내용" className="min-h-[118px] w-full rounded-2xl border border-black/10 bg-white px-4 py-3.5 text-base leading-7 text-[#4d4d4d] focus:border-black/30 focus:outline-none" />
+      <div className="rounded-xl border border-black/10 bg-white px-3 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-[#4d4d4d]">연결 아이디어</p>
+            <p className="mt-1 truncate text-xs leading-5 text-black/45">
+              {composerLinkedCanvasItemId
+                ? composerLinkedCanvasItemTitle || "선택된 아이디어"
+                : "선택하지 않아도 메모를 저장할 수 있습니다."}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              onClick={onStartLinkSelection}
+              className="rounded-full border border-black/10 bg-[#fafafa] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+            >
+              {composerLinkedCanvasItemId ? "다시 선택" : "아이디어 선택"}
+            </button>
+            {composerLinkedCanvasItemId ? (
+              <button
+                type="button"
+                onClick={onClearLinkedIdea}
+                className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+              >
+                해제
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+      {pendingPersonalNoteLinkId ? (
+        <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3 text-sm leading-6 text-blue-700">
+          {pendingPersonalNoteLinkId === COMPOSER_PERSONAL_NOTE_LINK_ID
+            ? "작성 중인 메모에 연결할 아이디어 노드를 캔버스에서 선택해 주세요."
+            : "연결할 아이디어 노드를 캔버스에서 선택해 주세요."}
+          <button
+            type="button"
+            onClick={onCancelPendingLink}
+            className="ml-2 font-semibold underline underline-offset-2"
+          >
+            취소
+          </button>
+        </div>
+      ) : null}
+      <button type="button" onClick={onSave} className="ml-auto block rounded-full bg-[#eff0f6] px-5 py-2 text-sm font-medium text-[#4d4d4d] hover:bg-[#e3e5ee]">
+        개인 메모 저장
+      </button>
+    </div>
+  );
+}
+
+function PersonalNoteList({
+  notes,
+  stage,
+  agendaModels,
+  editingPersonalNoteId,
+  draggingPersonalNoteId,
+  personalNoteDraftAgendaId,
+  personalNoteDraftTitle,
+  personalNoteDraftBody,
+  onDragStartNote,
+  onDragEndNote,
+  onDraftAgendaChange,
+  onDraftTitleChange,
+  onDraftBodyChange,
+  onCancelEdit,
+  onSaveEdit,
+  onStartEdit,
+  onDelete,
+  onFocusLinkedIdea,
+  onStartRelink,
+  onUnlinkIdea,
+}: {
+  notes: PersonalNote[];
+  stage: CanvasStage;
+  agendaModels: AgendaViewModel[];
+  editingPersonalNoteId: string;
+  draggingPersonalNoteId: string;
+  personalNoteDraftAgendaId: string;
+  personalNoteDraftTitle: string;
+  personalNoteDraftBody: string;
+  onDragStartNote: (noteId: string) => void;
+  onDragEndNote: () => void;
+  onDraftAgendaChange: (value: string) => void;
+  onDraftTitleChange: (value: string) => void;
+  onDraftBodyChange: (value: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (noteId: string) => void;
+  onStartEdit: (note: PersonalNote) => void;
+  onDelete: (noteId: string) => void;
+  onFocusLinkedIdea: (itemId: string) => void;
+  onStartRelink: (noteId: string, hasExistingLink: boolean) => void;
+  onUnlinkIdea: (noteId: string) => void;
+}) {
+  return (
+    <section className="pt-[clamp(1rem,2vh,1.5rem)]">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-lg font-semibold text-black">내 메모 목록</h3>
+        <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-medium text-[#4d4d4d]">
+          {notes.length}
+        </span>
+      </div>
+      {stage === "problem-definition" ? (
+        <p className="mt-2 text-sm leading-6 text-slate-500">메모 카드를 문제 정의 그룹으로 드래그해서 편입할 수 있습니다.</p>
+      ) : null}
+      <div className="mt-4 space-y-3">
+        {notes.length === 0 ? (
+          <p className="text-base leading-7 text-slate-500">이 프로젝트에 저장한 개인 메모가 없습니다.</p>
+        ) : (
+          notes.map((note) => {
+            const isEditing = editingPersonalNoteId === note.id;
+
+            return (
+              <article
+                key={note.id}
+                draggable={stage === "problem-definition" && !isEditing}
+                onDragStart={(event) => {
+                  if (stage !== "problem-definition" || isEditing) return;
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("application/x-imms-note-id", note.id);
+                  event.dataTransfer.setData("text/plain", note.id);
+                  onDragStartNote(note.id);
+                }}
+                onDragEnd={onDragEndNote}
+                className={`rounded-xl border border-black/10 bg-white p-4 shadow-[0_1px_0_rgba(0,0,0,0.04)] ${stage === "problem-definition" && !isEditing ? "cursor-grab active:cursor-grabbing" : ""} ${draggingPersonalNoteId === note.id ? "opacity-60" : ""}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">{toolLabel(note.kind)}</p>
+                    {isEditing ? (
+                      <input
+                        value={personalNoteDraftTitle}
+                        onChange={(event) => onDraftTitleChange(event.target.value)}
+                        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-base font-semibold text-slate-900"
+                      />
+                    ) : (
+                      <h4 className="mt-1 text-base font-semibold text-slate-900">{note.title}</h4>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    {isEditing ? (
+                      <>
+                        <button type="button" onClick={onCancelEdit} className="text-sm font-medium text-slate-500 hover:text-slate-700">
+                          취소
+                        </button>
+                        <button type="button" onClick={() => onSaveEdit(note.id)} className="text-sm font-medium text-slate-700 hover:text-slate-900">
+                          저장
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" onClick={() => onStartEdit(note)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
+                          수정
+                        </button>
+                        <button type="button" onClick={() => onDelete(note.id)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
+                          삭제
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                {isEditing ? (
+                  <>
+                    <select
+                      value={personalNoteDraftAgendaId}
+                      onChange={(event) => onDraftAgendaChange(event.target.value)}
+                      className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
+                    >
+                      <option value="">프로젝트 전체 메모</option>
+                      {agendaModels.map((agenda) => (
+                        <option key={agenda.id} value={agenda.id}>
+                          {agenda.title}
+                        </option>
+                      ))}
+                    </select>
+                    <textarea
+                      value={personalNoteDraftBody}
+                      onChange={(event) => onDraftBodyChange(event.target.value)}
+                      className="mt-3 min-h-[140px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                    />
+                  </>
+                ) : (
+                  <p className="mt-2 text-base leading-7 text-slate-600">{note.body}</p>
+                )}
+                {!isEditing ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {note.linkedCanvasItemId ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onFocusLinkedIdea(note.linkedCanvasItemId || "")}
+                          className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                        >
+                          연결 아이디어: {note.linkedCanvasItemTitle || "아이디어"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onStartRelink(note.id, true)}
+                          className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                        >
+                          다른 아이디어 연결
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onUnlinkIdea(note.id)}
+                          className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                        >
+                          연결 해제
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onStartRelink(note.id, false)}
+                        className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                      >
+                        아이디어 연결
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+                <p className="mt-3 text-sm text-slate-400">연결 그룹: {agendaModels.find((agenda) => agenda.id === (isEditing ? personalNoteDraftAgendaId : note.agendaId))?.title || "프로젝트 전체"}</p>
+              </article>
+            );
+          })
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -10238,6 +10646,25 @@ export default function MeetingCanvasTab({
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
   const rightDrawerExpandedWidth = `clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
+  const rightDrawerBodyClassName = rightDrawerContentVisible
+    ? "imms-drawer-body imms-overlay-scroll box-border h-full max-h-[min(48vh,500px)] translate-x-0 overflow-y-auto px-[clamp(1rem,1.6vw,1.35rem)] py-[clamp(1rem,2vh,1.5rem)] opacity-100 xl:max-h-none xl:overflow-y-auto"
+    : `imms-drawer-body ${rightDrawerCollapsed ? "hidden " : ""}pointer-events-none translate-x-8 opacity-0`;
+  const rightDrawerBodyStyle = isDesktopLayout && !rightDrawerCollapsed
+    ? { width: rightDrawerExpandedWidth }
+    : undefined;
+  const rightDrawerWrapperClassName = `imms-drawer-pane imms-side-panel relative order-2 flex min-h-[min(34vh,420px)] flex-col overflow-visible border-b border-black/10 shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:min-h-0 xl:border-b-0 ${rightDrawerCollapsed ? "border border-black/10 bg-[#f7f8fb]" : "bg-white"}`;
+  const rightDrawerPanelStackClassName = "flex min-h-0 flex-1 flex-col overflow-hidden";
+  const rightDrawerTopPanelClassName = "imms-drawer-pane imms-side-panel imms-left-panel relative min-h-[min(34vh,420px)] flex-1 overflow-hidden bg-transparent";
+  const rightDrawerToggleClassName = `pointer-events-auto absolute top-1/2 z-50 flex h-[clamp(2.25rem,3vw,2.75rem)] w-[clamp(2.25rem,3vw,2.75rem)] items-center justify-center rounded-full border border-black/10 bg-white text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-all duration-300 hover:bg-[#f5f6f8] ${
+    rightDrawerCollapsed ? "left-1/2 -translate-x-1/2 -translate-y-1/2" : "left-0 -translate-x-1/2 -translate-y-1/2"
+  }`;
+  const rightDrawerToggleIconClassName = `h-5 w-5 transition-transform duration-200 ${rightDrawerCollapsed ? "" : "rotate-180"}`;
+  const rightDrawerResizeHandleClassName = "absolute left-[-7px] top-0 hidden h-full w-4 cursor-ew-resize xl:block";
+  const rightDrawerBottomPanelClassName = `imms-drawer-pane imms-side-panel imms-right-panel relative min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] flex-1 overflow-hidden bg-transparent xl:min-h-0 xl:max-h-none ${
+    rightDrawerCollapsed && !rightDrawerContentVisible
+      ? "hidden pointer-events-none -translate-x-8 px-0 py-0 opacity-0"
+      : "border-t-4 border-[#d5d5d5] translate-x-0 opacity-100"
+  }`;
   const workspaceGridColumns = rightDrawerCollapsed
     ? "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
@@ -10697,6 +11124,757 @@ export default function MeetingCanvasTab({
       event.clientX,
       event.clientY,
       selectedAgendaId || agendaModels[0]?.id,
+    );
+  };
+
+  const renderDetailHeaderSection = () => {
+    if (!leftPanelDetail) return null;
+
+    return (
+      <section className="border-b border-slate-200/80 pb-6">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Detail</p>
+            {isEditingSelectedAgenda || isEditingSelectedCanvasItem || isEditingSelectedProblemGroup || isEditingSelectedSolutionTopic ? (
+              <input
+                value={
+                  isEditingSelectedAgenda
+                    ? agendaDraftTitle
+                    : isEditingSelectedCanvasItem
+                    ? canvasItemDraftTitle
+                    : isEditingSelectedProblemGroup
+                    ? problemGroupDraftTopic
+                    : solutionTopicDraftTitle
+                }
+                onChange={(event) => {
+                  if (isEditingSelectedAgenda) {
+                    setAgendaDraftTitle(event.target.value);
+                    return;
+                  }
+                  if (isEditingSelectedCanvasItem) {
+                    setCanvasItemDraftTitle(event.target.value);
+                    return;
+                  }
+                  if (isEditingSelectedProblemGroup) {
+                    setProblemGroupDraftTopic(event.target.value);
+                    return;
+                  }
+                  setSolutionTopicDraftTitle(event.target.value);
+                }}
+                className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-lg font-semibold text-slate-900"
+              />
+            ) : (
+              <h4 className="mt-3 text-xl font-semibold text-slate-900">{leftPanelDetail.title}</h4>
+            )}
+            <p className="mt-2 text-base text-slate-500">{leftPanelDetail.subtitle}</p>
+          </div>
+          {stage === "ideation" && selectedCanvasItem ? (
+            <div className="flex shrink-0 gap-2">
+              {isEditingSelectedCanvasItem ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCancelCanvasItemEdit}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveCanvasItemEdit}
+                    className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    저장
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleStartCanvasItemEdit}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    수정
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeleteCanvasItem}
+                    className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50"
+                  >
+                    삭제
+                  </button>
+                </>
+              )}
+            </div>
+          ) : stage === "ideation" && selectedAgenda ? (
+            <div className="flex shrink-0 gap-2">
+              {isEditingSelectedAgenda ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCancelAgendaEdit}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveAgendaEdit}
+                    className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    저장
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartAgendaEdit}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  수정
+                </button>
+              )}
+            </div>
+          ) : stage === "problem-definition" && selectedProblemGroup ? (
+            <div className="flex shrink-0 gap-2">
+              {isEditingSelectedProblemGroup ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCancelProblemGroupEdit}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveProblemGroupEdit}
+                    className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    저장
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartProblemGroupEdit}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  수정
+                </button>
+              )}
+            </div>
+          ) : stage === "solution" && selectedSolutionTopic ? (
+            <div className="flex shrink-0 gap-2">
+              {isEditingSelectedSolutionTopic ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleCancelSolutionTopicEdit}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveSolutionTopicEdit}
+                    className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    저장
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartSolutionTopicEdit}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  수정
+                </button>
+              )}
+            </div>
+          ) : null}
+        </div>
+        {leftPanelDetail.badges.length > 0 ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {leftPanelDetail.badges.map((badge) => (
+              <span key={`${leftPanelDetail.title}-${badge}`} className="rounded-full bg-white px-3 py-1 text-sm text-slate-600">
+                {badge}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {stage === "problem-definition" && selectedProblemGroup ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
+              <button
+                key={status}
+                type="button"
+                onClick={() => handleSetProblemGroupStatus(status)}
+                className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
+                  selectedProblemGroup.status === status
+                    ? "bg-slate-900 text-white"
+                    : "bg-white text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                {problemGroupStatusLabel(status)}
+              </button>
+            ))}
+          </div>
+        ) : stage === "solution" && selectedSolutionTopic ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
+              <button
+                key={status}
+                type="button"
+                onClick={() => handleSetSolutionTopicStatus(status)}
+                className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
+                  selectedSolutionTopic.status === status
+                    ? "bg-slate-900 text-white"
+                    : "bg-white text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                {problemGroupStatusLabel(status)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </section>
+    );
+  };
+
+  const renderDetailKeywordSection = () => {
+    if (!leftPanelDetail) return null;
+
+    return (
+      <section className="border-b border-slate-200/80 py-6">
+        <div className="flex items-center justify-between gap-3">
+          <h4 className="text-lg font-semibold text-slate-900">키워드</h4>
+          {stage === "ideation" && selectedCanvasItem ? (
+            <button
+              type="button"
+              onClick={() => handleExtractCanvasItemKeywords(selectedCanvasItem.id)}
+              disabled={isEditingSelectedCanvasItem}
+              title={isEditingSelectedCanvasItem ? "편집을 저장한 뒤 키워드를 추출할 수 있습니다." : "제목과 내용에서 키워드를 추출합니다."}
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              키워드 추출
+            </button>
+          ) : null}
+        </div>
+        {isEditingSelectedAgenda ? (
+          <>
+            <input
+              value={agendaDraftKeywords}
+              onChange={(event) => setAgendaDraftKeywords(event.target.value)}
+              placeholder="쉼표로 구분해 키워드를 입력합니다."
+              className="mt-4 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base text-slate-700"
+            />
+            <p className="mt-3 text-sm leading-6 text-slate-500">예: 고객 경험, 협업 흐름, 실행 우선순위</p>
+          </>
+        ) : leftPanelDetail.keywords.length > 0 ? (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {leftPanelDetail.keywords.map((keyword) => (
+              <span key={`${leftPanelDetail.title}-${keyword}`} className="rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
+                #{keyword}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-4 text-base leading-7 text-slate-500">아직 정리된 키워드가 없습니다.</p>
+        )}
+      </section>
+    );
+  };
+
+  const renderProblemInsightSection = () => {
+    if (stage !== "problem-definition" || !selectedProblemGroup) return null;
+
+    return (
+      <section className="border-b border-slate-200/80 py-6">
+        <div className="flex items-center justify-between gap-3">
+          <h4 className="text-lg font-semibold text-slate-900">Insight</h4>
+          {selectedProblemGroup.insight_user_edited ? (
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+              수동 수정됨
+            </span>
+          ) : null}
+        </div>
+        {isEditingSelectedProblemGroup ? (
+          <>
+            <textarea
+              value={problemGroupDraftInsight}
+              onChange={(event) => setProblemGroupDraftInsight(event.target.value)}
+              className="mt-4 min-h-[110px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+              placeholder="이 그룹의 인사이트를 직접 정리할 수 있습니다."
+            />
+            <p className="mt-3 text-sm leading-6 text-slate-500">
+              저장하면 이 Insight는 이후 AI 재생성으로 덮어쓰지 않습니다.
+            </p>
+          </>
+        ) : (
+          <p className="mt-4 text-base leading-7 text-slate-500">
+            Insight는 노드 내부에서 확인하고, 수정 모드에서 직접 편집할 수 있습니다.
+          </p>
+        )}
+      </section>
+    );
+  };
+
+  const renderDetailSummarySection = () => {
+    if (!leftPanelDetail || stage === "solution") return null;
+
+    return (
+      <section className="border-b border-slate-200/80 py-6">
+        <div className="flex items-center justify-between gap-3">
+          <h4 className="text-lg font-semibold text-slate-900">
+            {stage === "ideation"
+              ? selectedCanvasItem
+                ? "내용"
+                : "요약"
+              : "결론"}
+          </h4>
+          {stage === "problem-definition" && selectedProblemGroup?.conclusion_user_edited ? (
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+              수동 수정됨
+            </span>
+          ) : null}
+        </div>
+        {stage === "ideation" && isEditingSelectedAgenda ? (
+          <>
+            <textarea
+              value={agendaDraftSummary}
+              onChange={(event) => setAgendaDraftSummary(event.target.value)}
+              className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+              placeholder="한 줄에 하나씩 요약 또는 맥락을 입력합니다."
+            />
+            <p className="mt-3 text-sm leading-6 text-slate-500">
+              줄 단위로 저장되며, ideation 안건 노드와 상세 맥락에 함께 반영됩니다.
+            </p>
+          </>
+        ) : stage === "ideation" && isEditingSelectedCanvasItem ? (
+          <>
+            <textarea
+              value={canvasItemDraftBody}
+              onChange={(event) => setCanvasItemDraftBody(event.target.value)}
+              className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+              placeholder="공용 canvas 아이템 내용을 입력합니다."
+            />
+            <p className="mt-3 text-sm leading-6 text-slate-500">
+              저장하면 선택한 공용 canvas 노드 본문이 바로 갱신됩니다.
+            </p>
+          </>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {leftPanelDetail.summaryItems.map((item, index) => (
+              <div key={`${leftPanelDetail.title}-summary-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                {stage === "problem-definition" && index === 0 && isEditingSelectedProblemGroup ? (
+                  <textarea
+                    value={problemGroupDraftConclusion}
+                    onChange={(event) => setProblemGroupDraftConclusion(event.target.value)}
+                    className="mt-2 min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                  />
+                ) : (
+                  <p className="mt-1 text-base leading-7 text-slate-700">{item.value}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {stage === "problem-definition" && isEditingSelectedProblemGroup ? (
+          <p className="mt-3 text-sm leading-6 text-slate-500">
+            저장하면 이 결론은 이후 AI 재생성으로 덮어쓰지 않습니다.
+          </p>
+        ) : null}
+      </section>
+    );
+  };
+
+  const renderGeneralOrganizeSection = () => {
+    if (!leftPanelDetail || stage === "solution" || leftPanelDetail.organizeItems.length === 0) return null;
+
+    return (
+      <section className="pt-6">
+        <h4 className="text-lg font-semibold text-slate-900">{leftPanelDetail.organizeTitle || "안건 정리"}</h4>
+        <div className="mt-4 space-y-3">
+          {leftPanelDetail.organizeItems.map((item, index) => (
+            <div key={`${leftPanelDetail.title}-organize-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+              <p className="mt-1 text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  };
+
+  const renderSolutionDetailSections = () => {
+    if (stage !== "solution" || !selectedSolutionTopic) return null;
+
+    return (
+      <>
+        <section className="border-b border-slate-200/80 py-6">
+          <h4 className="text-lg font-semibold text-slate-900">해결 방향</h4>
+          {isEditingSelectedSolutionTopic ? (
+            <textarea
+              value={solutionTopicDraftConclusion}
+              onChange={(event) => setSolutionTopicDraftConclusion(event.target.value)}
+              className="mt-4 min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+            />
+          ) : (
+            <div className="mt-4 rounded-xl bg-[#fafafa] px-4 py-3">
+              <p className="text-base leading-7 text-slate-700">
+                {selectedSolutionTopic.conclusion || "아직 정리된 해결 방향이 없습니다."}
+              </p>
+            </div>
+          )}
+        </section>
+
+        <section className="border-b border-slate-200/80 py-6">
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="text-lg font-semibold text-slate-900">AI 초안</h4>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+              {selectedSolutionTopic.ai_suggestions.length}개
+            </span>
+          </div>
+          {isEditingSelectedSolutionTopic ? (
+            <>
+              <textarea
+                value={solutionTopicDraftIdeas}
+                onChange={(event) => setSolutionTopicDraftIdeas(event.target.value)}
+                className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                placeholder="한 줄에 하나씩 아이디어를 입력합니다."
+              />
+              <p className="mt-3 text-sm leading-6 text-slate-500">각 줄이 하나의 실행 아이디어로 저장됩니다.</p>
+            </>
+          ) : (
+            <div className="mt-4 space-y-3">
+              {selectedSolutionTopic.ai_suggestions.length > 0 ? (
+                selectedSolutionTopic.ai_suggestions.map((idea, index) => (
+                  <div key={idea.id} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-500">AI 제안 {index + 1}</p>
+                        <p className={`mt-1 text-base leading-7 ${idea.status === "selected" ? "text-blue-600" : "text-slate-700"}`}>
+                          {idea.text}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleAdoptAiSuggestion(selectedSolutionTopic.group_id, idea.id)}
+                        disabled={idea.status === "selected"}
+                        className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
+                      >
+                        {idea.status === "selected" ? "채택됨" : "채택"}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-base leading-7 text-slate-500">아직 제안된 AI 초안이 없습니다.</p>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="border-b border-slate-200/80 py-6">
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="text-lg font-semibold text-slate-900">채택 메모</h4>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+              {selectedSolutionTopic.notes.length}개
+            </span>
+          </div>
+          <div className="mt-4 space-y-3">
+            {selectedSolutionTopic.notes.length > 0 ? (
+              selectedSolutionTopic.notes.map((note, index) => (
+                <div key={note.id} className="rounded-xl border border-amber-100 bg-amber-50/70 px-4 py-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-amber-700">
+                        {note.source === "ai" ? `채택 메모 ${index + 1}` : `사용자 메모 ${index + 1}`}
+                      </p>
+                      <p className="mt-2 text-base leading-7 text-slate-700">{note.text}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFinalSolutionNote(selectedSolutionTopic.group_id, note.id)}
+                      className={`shrink-0 rounded-xl px-3 py-2 text-sm font-medium ${
+                        note.is_final_candidate
+                          ? "bg-slate-900 text-white"
+                          : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                      }`}
+                    >
+                      {note.is_final_candidate ? "최종 결론" : "결론 후보"}
+                    </button>
+                  </div>
+                  {note.is_final_candidate ? (
+                    <textarea
+                      value={note.final_comment || ""}
+                      onChange={(event) =>
+                        handleUpdateFinalSolutionComment(
+                          selectedSolutionTopic.group_id,
+                          note.id,
+                          event.target.value,
+                        )
+                      }
+                      placeholder="추가 설명을 입력할 수 있습니다."
+                      className="mt-3 min-h-[84px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700"
+                    />
+                  ) : null}
+                </div>
+              ))
+            ) : (
+              <p className="text-base leading-7 text-slate-500">아직 채택된 메모가 없습니다. AI 초안이나 사용자 메모를 추가해 보세요.</p>
+            )}
+          </div>
+
+          <div className="mt-5 rounded-xl bg-[#fafafa] px-4 py-4">
+            <p className="text-sm font-semibold text-slate-600">사용자 메모 추가</p>
+            <textarea
+              value={solutionNoteDraft}
+              onChange={(event) => setSolutionNoteDraft(event.target.value)}
+              placeholder="직접 해결책 메모를 추가합니다."
+              className="mt-3 min-h-[110px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+            />
+            <button
+              type="button"
+              onClick={handleAddSolutionUserNote}
+              className="mt-3 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              메모 추가
+            </button>
+          </div>
+        </section>
+
+        <section className="border-b border-slate-200/80 py-6">
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="text-lg font-semibold text-slate-900">최종 결론 모음</h4>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+              {allSolutionFinalNotes.length}개
+            </span>
+          </div>
+          <div className="mt-4 space-y-3">
+            {allSolutionFinalNotes.length > 0 ? (
+              allSolutionFinalNotes.map((note) => (
+                <button
+                  key={note.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedSolutionTopicId(note.topicId);
+                    setSelectedNodeId(`solution-${note.topicId}`);
+                  }}
+                  className={`w-full rounded-xl border px-4 py-3 text-left ${
+                    note.topicId === selectedSolutionTopic.group_id
+                      ? "border-slate-300 bg-white"
+                      : "border-slate-200 bg-[#fafafa]"
+                  }`}
+                >
+                  <p className="text-sm font-semibold text-slate-700">{note.topicTitle}</p>
+                  <p className="mt-1 text-base leading-7 text-slate-700">{note.text}</p>
+                  {note.final_comment ? (
+                    <p className="mt-2 text-sm leading-6 text-slate-500">{note.final_comment}</p>
+                  ) : null}
+                </button>
+              ))
+            ) : (
+              <p className="text-base leading-7 text-slate-500">최종 결론으로 표시된 메모가 아직 없습니다.</p>
+            )}
+          </div>
+        </section>
+
+        <section className="pt-6">
+          <h4 className="text-lg font-semibold text-slate-900">연결 문제정의</h4>
+          <div className="mt-4 space-y-3">
+            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
+              <p className="text-sm font-semibold text-slate-500">문제 정의 주제</p>
+              <p className="mt-1 text-base leading-7 text-slate-700">
+                {selectedSolutionTopic.problem_topic || "연결된 문제정의가 아직 없습니다."}
+              </p>
+            </div>
+            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
+              <p className="text-sm font-semibold text-slate-500">소결론</p>
+              <p className="mt-1 text-base leading-7 text-slate-700">
+                {selectedSolutionTopic.problem_insight || "연결된 소결론이 아직 없습니다."}
+              </p>
+            </div>
+            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
+              <p className="text-sm font-semibold text-slate-500">문제 정의 결론</p>
+              <p className="mt-1 text-base leading-7 text-slate-700">
+                {selectedSolutionTopic.problem_conclusion || "연결된 결론이 아직 없습니다."}
+              </p>
+            </div>
+            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
+              <p className="text-sm font-semibold text-slate-500">연결 안건</p>
+              <p className="mt-1 text-base leading-7 text-slate-700">
+                {selectedSolutionTopic.agenda_titles.length > 0
+                  ? selectedSolutionTopic.agenda_titles.join(", ")
+                  : "연결된 안건이 아직 없습니다."}
+              </p>
+            </div>
+          </div>
+        </section>
+      </>
+    );
+  };
+
+  const renderIdeationRelatedSections = () => {
+    if (!leftPanelDetail || stage !== "ideation" || !selectedCanvasItem) return null;
+
+    return (
+      <>
+        {leftPanelDetail.mergedItems?.length ? (
+          <section className="pt-6">
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="text-lg font-semibold text-slate-900">포함된 하위 아이디어</h4>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+                {leftPanelDetail.mergedItems.length}개 묶음
+              </span>
+            </div>
+            <div className="mt-4 space-y-3">
+              {leftPanelDetail.mergedItems.map((item) => (
+                <div key={`${leftPanelDetail.title}-merged-${item.id}`} className="rounded-xl border border-slate-200 bg-[#fafafa] px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-700">{item.label}</p>
+                      <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">
+                        {stripLeadingTimestamp(item.value)}
+                      </p>
+                    </div>
+                    {item.sourceCount > 1 ? (
+                      <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+                        {item.sourceCount}개
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => focusCanvasItemInIdeation(item.id, "하위 아이디어 위치로 이동했습니다.")}
+                      className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                    >
+                      원문 이동
+                    </button>
+                  </div>
+                  {item.keywords.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {item.keywords.slice(0, 4).map((keyword) => (
+                        <span key={`${item.id}-${keyword}`} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+                          #{keyword}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+        {leftPanelDetail.refinedItems?.length ? (
+          <section className="pt-6">
+            <h4 className="text-lg font-semibold text-slate-900">정리된 발화</h4>
+            <div className="mt-4 space-y-3">
+              {leftPanelDetail.refinedItems.map((item, index) => (
+                <div key={`${leftPanelDetail.title}-refined-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                    <button
+                      type="button"
+                      onClick={() => focusCanvasItemInIdeation(item.sourceItemId, "정리된 발화의 원문 노드로 이동했습니다.")}
+                      className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                    >
+                      원문 이동
+                    </button>
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+        <section className="pt-6">
+          <div className="flex items-center justify-between gap-3">
+            <h4 className="text-lg font-semibold text-slate-900">댓글</h4>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+              {leftPanelDetail.commentItems?.length || 0}개
+            </span>
+          </div>
+          <div className="mt-4 space-y-3">
+            {leftPanelDetail.commentItems?.length ? (
+              leftPanelDetail.commentItems.map((item) => (
+                <div key={`${leftPanelDetail.title}-comment-${item.id}`} className="rounded-xl border border-sky-100 bg-sky-50/60 px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-700">{item.label}</p>
+                      <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">
+                        {stripLeadingTimestamp(item.value)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => focusCanvasItemInIdeation(item.id, "댓글 위치로 이동했습니다.")}
+                      className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
+                    >
+                      원문 이동
+                    </button>
+                  </div>
+                  {item.keywords.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {item.keywords.slice(0, 4).map((keyword) => (
+                        <span key={`${item.id}-comment-keyword-${keyword}`} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
+                          #{keyword}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            ) : (
+              <p className="rounded-xl border border-dashed border-slate-200 bg-[#fafafa] px-4 py-4 text-sm leading-6 text-slate-500">
+                아직 이 내용에 연결된 댓글이 없습니다.
+              </p>
+            )}
+          </div>
+        </section>
+      </>
+    );
+  };
+
+  const renderProblemRelatedSections = () => {
+    if (!leftPanelDetail || stage !== "problem-definition") return null;
+
+    return (
+      <>
+        {leftPanelDetail.evidenceItems?.length ? (
+          <section className="pt-6">
+            <h4 className="text-lg font-semibold text-slate-900">근거 요약</h4>
+            <div className="mt-4 space-y-3">
+              {leftPanelDetail.evidenceItems.map((item, index) => (
+                <div key={`${leftPanelDetail.title}-evidence-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                  <p className="text-sm font-semibold text-slate-500">{item.label}</p>
+                  <p className="mt-1 text-base leading-7 text-slate-700">{item.value}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+        <section className="pt-6">
+          <h4 className="text-lg font-semibold text-slate-900">연결 메모</h4>
+          <div className="mt-4 space-y-3">
+            {leftPanelDetail.noteItems?.length ? (
+              leftPanelDetail.noteItems.map((item, index) => (
+                <div key={`${leftPanelDetail.title}-note-${item.id}-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-slate-700">{item.label}</p>
+                    <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">{toolLabel((item.kind as ComposerTool) || "note")}</span>
+                  </div>
+                  <p className="mt-2 text-base leading-7 text-slate-600">{item.value || "메모 내용이 없습니다."}</p>
+                </div>
+              ))
+            ) : (
+              <p className="text-base leading-7 text-slate-500">아직 연결된 메모가 없습니다. 오른쪽 개인 메모를 그룹 카드로 드래그하면 여기에 표시됩니다.</p>
+            )}
+          </div>
+        </section>
+      </>
     );
   };
 
@@ -11698,1035 +12876,135 @@ export default function MeetingCanvasTab({
             </div>
           </section>
 
-          <div className={`imms-drawer-pane imms-side-panel relative order-2 flex min-h-[min(34vh,420px)] flex-col overflow-visible border-b border-black/10 shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:min-h-0 xl:border-b-0 ${rightDrawerCollapsed ? "border border-black/10 bg-[#f7f8fb]" : "bg-white"}`}>
+          <div className={rightDrawerWrapperClassName}>
             <button
               type="button"
               aria-label={rightDrawerCollapsed ? "오른쪽 패널 열기" : "오른쪽 패널 접기"}
               onClick={toggleRightDrawer}
-              className={`pointer-events-auto absolute top-1/2 z-50 flex h-[clamp(2.25rem,3vw,2.75rem)] w-[clamp(2.25rem,3vw,2.75rem)] items-center justify-center rounded-full border border-black/10 bg-white text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-all duration-300 hover:bg-[#f5f6f8] ${
-                rightDrawerCollapsed ? "left-1/2 -translate-x-1/2 -translate-y-1/2" : "left-0 -translate-x-1/2 -translate-y-1/2"
-              }`}
+              className={rightDrawerToggleClassName}
             >
-              <KeyboardDoubleArrowLeftIcon className={`h-5 w-5 transition-transform duration-200 ${rightDrawerCollapsed ? "" : "rotate-180"}`} />
+              <KeyboardDoubleArrowLeftIcon className={rightDrawerToggleIconClassName} />
             </button>
             <button
               type="button"
               aria-label="오른쪽 패널 너비 조절"
               onMouseDown={startPanelResize("right")}
-              className="absolute left-[-7px] top-0 hidden h-full w-4 cursor-ew-resize xl:block"
+              className={rightDrawerResizeHandleClassName}
             >
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <aside className="imms-drawer-pane imms-side-panel imms-left-panel relative min-h-[min(34vh,420px)] flex-1 overflow-hidden bg-transparent">
-            <button
-              type="button"
-              aria-label={rightDrawerCollapsed ? "오른쪽 패널 열기" : "오른쪽 패널 접기"}
-              onClick={toggleRightDrawer}
-              className={`absolute top-1/2 z-40 flex h-[clamp(2.25rem,3vw,2.75rem)] w-[clamp(2.25rem,3vw,2.75rem)] items-center justify-center rounded-full border border-black/10 bg-white text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-all duration-300 hover:bg-[#f5f6f8] hidden ${
-                rightDrawerCollapsed ? "left-1/2 -translate-x-1/2 -translate-y-1/2" : "left-0 -translate-x-1/2 -translate-y-1/2"
-              }`}
+            <div className={rightDrawerPanelStackClassName}>
+            <RightDrawerPanel
+              className={rightDrawerTopPanelClassName}
+              bodyClassName={rightDrawerBodyClassName}
+              bodyStyle={rightDrawerBodyStyle}
             >
-              <KeyboardDoubleArrowLeftIcon className={`h-5 w-5 transition-transform duration-200 ${rightDrawerCollapsed ? "" : "rotate-180"}`} />
-            </button>
-            <button
-              type="button"
-              aria-label="왼쪽 패널 너비 조절"
-              onMouseDown={startPanelResize("left")}
-              className="hidden"
+            <RightDetailPanelShell
+              collapsed={rightDrawerDetailCollapsed}
+              onToggleCollapsed={() => setRightDrawerDetailCollapsed((prev) => !prev)}
             >
-              <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
-            </button>
-            <div
-              className={`imms-drawer-body ${rightDrawerContentVisible ? "imms-overlay-scroll box-border h-full max-h-[min(48vh,500px)] translate-x-0 overflow-y-auto px-[clamp(1rem,1.6vw,1.35rem)] py-[clamp(1rem,2vh,1.5rem)] opacity-100 xl:max-h-none xl:overflow-y-auto" : rightDrawerCollapsed ? "hidden pointer-events-none translate-x-8 opacity-0" : "pointer-events-none translate-x-8 opacity-0"}`}
-              style={isDesktopLayout && !rightDrawerCollapsed ? { width: rightDrawerExpandedWidth } : undefined}
-            >
-            <div className="border-b border-black/10 pb-[clamp(0.875rem,1.4vw,1rem)]">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-black/50">선택 정보</p>
-                <h3 className="mt-1 text-lg font-semibold leading-tight text-black">내용 상세보기</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setRightDrawerDetailCollapsed((prev) => !prev)}
-                className="shrink-0 rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
-              >
-                {rightDrawerDetailCollapsed ? "열기" : "접기"}
-              </button>
-            </div>
-            </div>
-
-            <div className={`imms-left-panel-detail mt-[clamp(0.875rem,1.5vw,1rem)] ${rightDrawerDetailCollapsed ? "hidden" : ""}`}>
                 {leftPanelDetail ? (
                   <>
-                    <section className="border-b border-slate-200/80 pb-6">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Detail</p>
-                          {isEditingSelectedAgenda || isEditingSelectedCanvasItem || isEditingSelectedProblemGroup || isEditingSelectedSolutionTopic ? (
-                            <input
-                              value={
-                                isEditingSelectedAgenda
-                                  ? agendaDraftTitle
-                                  : isEditingSelectedCanvasItem
-                                  ? canvasItemDraftTitle
-                                  : isEditingSelectedProblemGroup
-                                  ? problemGroupDraftTopic
-                                  : solutionTopicDraftTitle
-                              }
-                              onChange={(event) => {
-                                if (isEditingSelectedAgenda) {
-                                  setAgendaDraftTitle(event.target.value);
-                                  return;
-                                }
-                                if (isEditingSelectedCanvasItem) {
-                                  setCanvasItemDraftTitle(event.target.value);
-                                  return;
-                                }
-                                if (isEditingSelectedProblemGroup) {
-                                  setProblemGroupDraftTopic(event.target.value);
-                                  return;
-                                }
-                                setSolutionTopicDraftTitle(event.target.value);
-                              }}
-                              className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-lg font-semibold text-slate-900"
-                            />
-                          ) : (
-                            <h4 className="mt-3 text-xl font-semibold text-slate-900">{leftPanelDetail.title}</h4>
-                          )}
-                          <p className="mt-2 text-base text-slate-500">{leftPanelDetail.subtitle}</p>
-                        </div>
-                        {stage === "ideation" && selectedCanvasItem ? (
-                          <div className="flex shrink-0 gap-2">
-                            {isEditingSelectedCanvasItem ? (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={handleCancelCanvasItemEdit}
-                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                                >
-                                  취소
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={handleSaveCanvasItemEdit}
-                                  className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
-                                >
-                                  저장
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={handleStartCanvasItemEdit}
-                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                                >
-                                  수정
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={handleDeleteCanvasItem}
-                                  className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50"
-                                >
-                                  삭제
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        ) : stage === "ideation" && selectedAgenda ? (
-                          <div className="flex shrink-0 gap-2">
-                            {isEditingSelectedAgenda ? (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={handleCancelAgendaEdit}
-                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                                >
-                                  취소
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={handleSaveAgendaEdit}
-                                  className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
-                                >
-                                  저장
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={handleStartAgendaEdit}
-                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                              >
-                                수정
-                              </button>
-                            )}
-                          </div>
-                        ) : stage === "problem-definition" && selectedProblemGroup ? (
-                          <div className="flex shrink-0 gap-2">
-                            {isEditingSelectedProblemGroup ? (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={handleCancelProblemGroupEdit}
-                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                                >
-                                  취소
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={handleSaveProblemGroupEdit}
-                                  className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
-                                >
-                                  저장
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={handleStartProblemGroupEdit}
-                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                              >
-                                수정
-                              </button>
-                            )}
-                          </div>
-                        ) : stage === "solution" && selectedSolutionTopic ? (
-                          <div className="flex shrink-0 gap-2">
-                            {isEditingSelectedSolutionTopic ? (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={handleCancelSolutionTopicEdit}
-                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                                >
-                                  취소
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={handleSaveSolutionTopicEdit}
-                                  className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
-                                >
-                                  저장
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={handleStartSolutionTopicEdit}
-                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
-                              >
-                                수정
-                              </button>
-                            )}
-                          </div>
-                        ) : null}
-                      </div>
-                      {leftPanelDetail.badges.length > 0 ? (
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {leftPanelDetail.badges.map((badge) => (
-                            <span key={`${leftPanelDetail.title}-${badge}`} className="rounded-full bg-white px-3 py-1 text-sm text-slate-600">
-                              {badge}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                      {stage === "problem-definition" && selectedProblemGroup ? (
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
-                            <button
-                              key={status}
-                              type="button"
-                              onClick={() => handleSetProblemGroupStatus(status)}
-                              className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
-                                selectedProblemGroup.status === status
-                                  ? "bg-slate-900 text-white"
-                                  : "bg-white text-slate-600 hover:bg-slate-100"
-                              }`}
-                            >
-                              {problemGroupStatusLabel(status)}
-                            </button>
-                          ))}
-                        </div>
-                      ) : stage === "solution" && selectedSolutionTopic ? (
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
-                            <button
-                              key={status}
-                              type="button"
-                              onClick={() => handleSetSolutionTopicStatus(status)}
-                              className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
-                                selectedSolutionTopic.status === status
-                                  ? "bg-slate-900 text-white"
-                                  : "bg-white text-slate-600 hover:bg-slate-100"
-                              }`}
-                            >
-                              {problemGroupStatusLabel(status)}
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </section>
+                    {renderDetailHeaderSection()}
 
-                    <section className="border-b border-slate-200/80 py-6">
-                      <div className="flex items-center justify-between gap-3">
-                        <h4 className="text-lg font-semibold text-slate-900">키워드</h4>
-                        {stage === "ideation" && selectedCanvasItem ? (
-                          <button
-                            type="button"
-                            onClick={() => handleExtractCanvasItemKeywords(selectedCanvasItem.id)}
-                            disabled={isEditingSelectedCanvasItem}
-                            title={isEditingSelectedCanvasItem ? "편집을 저장한 뒤 키워드를 추출할 수 있습니다." : "제목과 내용에서 키워드를 추출합니다."}
-                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
-                          >
-                            키워드 추출
-                          </button>
-                        ) : null}
-                      </div>
-                      {isEditingSelectedAgenda ? (
-                        <>
-                          <input
-                            value={agendaDraftKeywords}
-                            onChange={(event) => setAgendaDraftKeywords(event.target.value)}
-                            placeholder="쉼표로 구분해 키워드를 입력합니다."
-                            className="mt-4 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base text-slate-700"
-                          />
-                          <p className="mt-3 text-sm leading-6 text-slate-500">예: 고객 경험, 협업 흐름, 실행 우선순위</p>
-                        </>
-                      ) : leftPanelDetail.keywords.length > 0 ? (
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {leftPanelDetail.keywords.map((keyword) => (
-                            <span key={`${leftPanelDetail.title}-${keyword}`} className="rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
-                              #{keyword}
-                            </span>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="mt-4 text-base leading-7 text-slate-500">아직 정리된 키워드가 없습니다.</p>
-                      )}
-                    </section>
+                    {renderDetailKeywordSection()}
 
-                    {stage === "problem-definition" && selectedProblemGroup ? (
-                      <section className="border-b border-slate-200/80 py-6">
-                        <div className="flex items-center justify-between gap-3">
-                          <h4 className="text-lg font-semibold text-slate-900">Insight</h4>
-                          {selectedProblemGroup.insight_user_edited ? (
-                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                              수동 수정됨
-                            </span>
-                          ) : null}
-                        </div>
-                        {isEditingSelectedProblemGroup ? (
-                          <>
-                            <textarea
-                              value={problemGroupDraftInsight}
-                              onChange={(event) => setProblemGroupDraftInsight(event.target.value)}
-                              className="mt-4 min-h-[110px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                              placeholder="이 그룹의 인사이트를 직접 정리할 수 있습니다."
-                            />
-                            <p className="mt-3 text-sm leading-6 text-slate-500">
-                              저장하면 이 Insight는 이후 AI 재생성으로 덮어쓰지 않습니다.
-                            </p>
-                          </>
-                        ) : (
-                          <p className="mt-4 text-base leading-7 text-slate-500">
-                            Insight는 노드 내부에서 확인하고, 수정 모드에서 직접 편집할 수 있습니다.
-                          </p>
-                        )}
-                      </section>
-                    ) : null}
+                    {renderProblemInsightSection()}
 
-                    {stage !== "solution" ? (
-                    <section className="border-b border-slate-200/80 py-6">
-                      <div className="flex items-center justify-between gap-3">
-                        <h4 className="text-lg font-semibold text-slate-900">
-                          {stage === "ideation"
-                            ? selectedCanvasItem
-                              ? "내용"
-                              : "요약"
-                            : "결론"}
-                        </h4>
-                        {stage === "problem-definition" && selectedProblemGroup?.conclusion_user_edited ? (
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-                            수동 수정됨
-                          </span>
-                        ) : null}
-                      </div>
-                      {stage === "ideation" && isEditingSelectedAgenda ? (
-                        <>
-                          <textarea
-                            value={agendaDraftSummary}
-                            onChange={(event) => setAgendaDraftSummary(event.target.value)}
-                            className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                            placeholder="한 줄에 하나씩 요약 또는 맥락을 입력합니다."
-                          />
-                          <p className="mt-3 text-sm leading-6 text-slate-500">
-                            줄 단위로 저장되며, ideation 안건 노드와 상세 맥락에 함께 반영됩니다.
-                          </p>
-                        </>
-                      ) : stage === "ideation" && isEditingSelectedCanvasItem ? (
-                        <>
-                          <textarea
-                            value={canvasItemDraftBody}
-                            onChange={(event) => setCanvasItemDraftBody(event.target.value)}
-                            className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                            placeholder="공용 canvas 아이템 내용을 입력합니다."
-                          />
-                          <p className="mt-3 text-sm leading-6 text-slate-500">
-                            저장하면 선택한 공용 canvas 노드 본문이 바로 갱신됩니다.
-                          </p>
-                        </>
-                      ) : (
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.summaryItems.map((item, index) => (
-                            <div key={`${leftPanelDetail.title}-summary-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                              {stage === "problem-definition" && index === 0 && isEditingSelectedProblemGroup ? (
-                                <textarea
-                                  value={problemGroupDraftConclusion}
-                                  onChange={(event) => setProblemGroupDraftConclusion(event.target.value)}
-                                  className="mt-2 min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                                />
-                              ) : (
-                                <p className="mt-1 text-base leading-7 text-slate-700">{item.value}</p>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {stage === "problem-definition" && isEditingSelectedProblemGroup ? (
-                        <p className="mt-3 text-sm leading-6 text-slate-500">
-                          저장하면 이 결론은 이후 AI 재생성으로 덮어쓰지 않습니다.
-                        </p>
-                      ) : null}
-                    </section>
-                    ) : null}
+                    {renderDetailSummarySection()}
 
-                    {stage === "solution" && selectedSolutionTopic ? (
-                      <>
-                        <section className="border-b border-slate-200/80 py-6">
-                          <h4 className="text-lg font-semibold text-slate-900">해결 방향</h4>
-                          {isEditingSelectedSolutionTopic ? (
-                            <textarea
-                              value={solutionTopicDraftConclusion}
-                              onChange={(event) => setSolutionTopicDraftConclusion(event.target.value)}
-                              className="mt-4 min-h-[120px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                            />
-                          ) : (
-                            <div className="mt-4 rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-base leading-7 text-slate-700">
-                                {selectedSolutionTopic.conclusion || "아직 정리된 해결 방향이 없습니다."}
-                              </p>
-                            </div>
-                          )}
-                        </section>
-
-                        <section className="border-b border-slate-200/80 py-6">
-                          <div className="flex items-center justify-between gap-3">
-                            <h4 className="text-lg font-semibold text-slate-900">AI 초안</h4>
-                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-                              {selectedSolutionTopic.ai_suggestions.length}개
-                            </span>
-                          </div>
-                          {isEditingSelectedSolutionTopic ? (
-                            <>
-                              <textarea
-                                value={solutionTopicDraftIdeas}
-                                onChange={(event) => setSolutionTopicDraftIdeas(event.target.value)}
-                                className="mt-4 min-h-[180px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                                placeholder="한 줄에 하나씩 아이디어를 입력합니다."
-                              />
-                              <p className="mt-3 text-sm leading-6 text-slate-500">각 줄이 하나의 실행 아이디어로 저장됩니다.</p>
-                            </>
-                          ) : (
-                            <div className="mt-4 space-y-3">
-                              {selectedSolutionTopic.ai_suggestions.length > 0 ? (
-                                selectedSolutionTopic.ai_suggestions.map((idea, index) => (
-                                  <div key={idea.id} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                                    <div className="flex items-start justify-between gap-3">
-                                      <div className="min-w-0">
-                                        <p className="text-sm font-semibold text-slate-500">AI 제안 {index + 1}</p>
-                                        <p className={`mt-1 text-base leading-7 ${idea.status === "selected" ? "text-blue-600" : "text-slate-700"}`}>
-                                          {idea.text}
-                                        </p>
-                                      </div>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleAdoptAiSuggestion(selectedSolutionTopic.group_id, idea.id)}
-                                        disabled={idea.status === "selected"}
-                                        className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
-                                      >
-                                        {idea.status === "selected" ? "채택됨" : "채택"}
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))
-                              ) : (
-                                <p className="text-base leading-7 text-slate-500">아직 제안된 AI 초안이 없습니다.</p>
-                              )}
-                            </div>
-                          )}
-                        </section>
-
-                        <section className="border-b border-slate-200/80 py-6">
-                          <div className="flex items-center justify-between gap-3">
-                            <h4 className="text-lg font-semibold text-slate-900">채택 메모</h4>
-                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-                              {selectedSolutionTopic.notes.length}개
-                            </span>
-                          </div>
-                          <div className="mt-4 space-y-3">
-                            {selectedSolutionTopic.notes.length > 0 ? (
-                              selectedSolutionTopic.notes.map((note, index) => (
-                                <div key={note.id} className="rounded-xl border border-amber-100 bg-amber-50/70 px-4 py-4">
-                                  <div className="flex items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                      <p className="text-sm font-semibold text-amber-700">
-                                        {note.source === "ai" ? `채택 메모 ${index + 1}` : `사용자 메모 ${index + 1}`}
-                                      </p>
-                                      <p className="mt-2 text-base leading-7 text-slate-700">{note.text}</p>
-                                    </div>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleToggleFinalSolutionNote(selectedSolutionTopic.group_id, note.id)}
-                                      className={`shrink-0 rounded-xl px-3 py-2 text-sm font-medium ${
-                                        note.is_final_candidate
-                                          ? "bg-slate-900 text-white"
-                                          : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                                      }`}
-                                    >
-                                      {note.is_final_candidate ? "최종 결론" : "결론 후보"}
-                                    </button>
-                                  </div>
-                                  {note.is_final_candidate ? (
-                                    <textarea
-                                      value={note.final_comment || ""}
-                                      onChange={(event) =>
-                                        handleUpdateFinalSolutionComment(
-                                          selectedSolutionTopic.group_id,
-                                          note.id,
-                                          event.target.value,
-                                        )
-                                      }
-                                      placeholder="추가 설명을 입력할 수 있습니다."
-                                      className="mt-3 min-h-[84px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700"
-                                    />
-                                  ) : null}
-                                </div>
-                              ))
-                            ) : (
-                              <p className="text-base leading-7 text-slate-500">아직 채택된 메모가 없습니다. AI 초안이나 사용자 메모를 추가해 보세요.</p>
-                            )}
-                          </div>
-
-                          <div className="mt-5 rounded-xl bg-[#fafafa] px-4 py-4">
-                            <p className="text-sm font-semibold text-slate-600">사용자 메모 추가</p>
-                            <textarea
-                              value={solutionNoteDraft}
-                              onChange={(event) => setSolutionNoteDraft(event.target.value)}
-                              placeholder="직접 해결책 메모를 추가합니다."
-                              className="mt-3 min-h-[110px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                            />
-                            <button
-                              type="button"
-                              onClick={handleAddSolutionUserNote}
-                              className="mt-3 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
-                            >
-                              메모 추가
-                            </button>
-                          </div>
-                        </section>
-
-                        <section className="border-b border-slate-200/80 py-6">
-                          <div className="flex items-center justify-between gap-3">
-                            <h4 className="text-lg font-semibold text-slate-900">최종 결론 모음</h4>
-                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-                              {allSolutionFinalNotes.length}개
-                            </span>
-                          </div>
-                          <div className="mt-4 space-y-3">
-                            {allSolutionFinalNotes.length > 0 ? (
-                              allSolutionFinalNotes.map((note) => (
-                                <button
-                                  key={note.id}
-                                  type="button"
-                                  onClick={() => {
-                                    setSelectedSolutionTopicId(note.topicId);
-                                    setSelectedNodeId(`solution-${note.topicId}`);
-                                  }}
-                                  className={`w-full rounded-xl border px-4 py-3 text-left ${
-                                    note.topicId === selectedSolutionTopic.group_id
-                                      ? "border-slate-300 bg-white"
-                                      : "border-slate-200 bg-[#fafafa]"
-                                  }`}
-                                >
-                                  <p className="text-sm font-semibold text-slate-700">{note.topicTitle}</p>
-                                  <p className="mt-1 text-base leading-7 text-slate-700">{note.text}</p>
-                                  {note.final_comment ? (
-                                    <p className="mt-2 text-sm leading-6 text-slate-500">{note.final_comment}</p>
-                                  ) : null}
-                                </button>
-                              ))
-                            ) : (
-                              <p className="text-base leading-7 text-slate-500">최종 결론으로 표시된 메모가 아직 없습니다.</p>
-                            )}
-                          </div>
-                        </section>
-
-                        <section className="pt-6">
-                          <h4 className="text-lg font-semibold text-slate-900">연결 문제정의</h4>
-                          <div className="mt-4 space-y-3">
-                            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">문제 정의 주제</p>
-                              <p className="mt-1 text-base leading-7 text-slate-700">
-                                {selectedSolutionTopic.problem_topic || "연결된 문제정의가 아직 없습니다."}
-                              </p>
-                            </div>
-                            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">소결론</p>
-                              <p className="mt-1 text-base leading-7 text-slate-700">
-                                {selectedSolutionTopic.problem_insight || "연결된 소결론이 아직 없습니다."}
-                              </p>
-                            </div>
-                            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">문제 정의 결론</p>
-                              <p className="mt-1 text-base leading-7 text-slate-700">
-                                {selectedSolutionTopic.problem_conclusion || "연결된 결론이 아직 없습니다."}
-                              </p>
-                            </div>
-                            <div className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">연결 안건</p>
-                              <p className="mt-1 text-base leading-7 text-slate-700">
-                                {selectedSolutionTopic.agenda_titles.length > 0
-                                  ? selectedSolutionTopic.agenda_titles.join(", ")
-                                  : "연결된 안건이 아직 없습니다."}
-                              </p>
-                            </div>
-                          </div>
-                        </section>
-                      </>
-                    ) : leftPanelDetail.organizeItems.length > 0 ? (
-                      <section className="pt-6">
-                        <h4 className="text-lg font-semibold text-slate-900">{leftPanelDetail.organizeTitle || "안건 정리"}</h4>
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.organizeItems.map((item, index) => (
-                            <div key={`${leftPanelDetail.title}-organize-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                              <p className="mt-1 text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    ) : null}
-                    {stage === "ideation" && selectedCanvasItem && leftPanelDetail.mergedItems?.length ? (
-                      <section className="pt-6">
-                        <div className="flex items-center justify-between gap-3">
-                          <h4 className="text-lg font-semibold text-slate-900">포함된 하위 아이디어</h4>
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-                            {leftPanelDetail.mergedItems.length}개 묶음
-                          </span>
-                        </div>
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.mergedItems.map((item) => (
-                            <div key={`${leftPanelDetail.title}-merged-${item.id}`} className="rounded-xl border border-slate-200 bg-[#fafafa] px-4 py-3">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p className="text-sm font-semibold text-slate-700">{item.label}</p>
-                                  <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">
-                                    {stripLeadingTimestamp(item.value)}
-                                  </p>
-                                </div>
-                                {item.sourceCount > 1 ? (
-                                  <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
-                                    {item.sourceCount}개
-                                  </span>
-                                ) : null}
-                                <button
-                                  type="button"
-                                  onClick={() => focusCanvasItemInIdeation(item.id, "하위 아이디어 위치로 이동했습니다.")}
-                                  className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  원문 이동
-                                </button>
-                              </div>
-                              {item.keywords.length > 0 ? (
-                                <div className="mt-3 flex flex-wrap gap-2">
-                                  {item.keywords.slice(0, 4).map((keyword) => (
-                                    <span key={`${item.id}-${keyword}`} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
-                                      #{keyword}
-                                    </span>
-                                  ))}
-                                </div>
-                              ) : null}
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    ) : null}
-                    {stage === "ideation" && selectedCanvasItem && leftPanelDetail.refinedItems?.length ? (
-                      <section className="pt-6">
-                        <h4 className="text-lg font-semibold text-slate-900">정리된 발화</h4>
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.refinedItems.map((item, index) => (
-                            <div key={`${leftPanelDetail.title}-refined-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <div className="flex items-start justify-between gap-3">
-                                <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                                <button
-                                  type="button"
-                                  onClick={() => focusCanvasItemInIdeation(item.sourceItemId, "정리된 발화의 원문 노드로 이동했습니다.")}
-                                  className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  원문 이동
-                                </button>
-                              </div>
-                              <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    ) : null}
-                    {stage === "ideation" && selectedCanvasItem ? (
-                      <section className="pt-6">
-                        <div className="flex items-center justify-between gap-3">
-                          <h4 className="text-lg font-semibold text-slate-900">댓글</h4>
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-                            {leftPanelDetail.commentItems?.length || 0}개
-                          </span>
-                        </div>
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.commentItems?.length ? (
-                            leftPanelDetail.commentItems.map((item) => (
-                              <div key={`${leftPanelDetail.title}-comment-${item.id}`} className="rounded-xl border border-sky-100 bg-sky-50/60 px-4 py-3">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <p className="text-sm font-semibold text-slate-700">{item.label}</p>
-                                    <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">
-                                      {stripLeadingTimestamp(item.value)}
-                                    </p>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => focusCanvasItemInIdeation(item.id, "댓글 위치로 이동했습니다.")}
-                                    className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                  >
-                                    원문 이동
-                                  </button>
-                                </div>
-                                {item.keywords.length > 0 ? (
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    {item.keywords.slice(0, 4).map((keyword) => (
-                                      <span key={`${item.id}-comment-keyword-${keyword}`} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">
-                                        #{keyword}
-                                      </span>
-                                    ))}
-                                  </div>
-                                ) : null}
-                              </div>
-                            ))
-                          ) : (
-                            <p className="rounded-xl border border-dashed border-slate-200 bg-[#fafafa] px-4 py-4 text-sm leading-6 text-slate-500">
-                              아직 이 내용에 연결된 댓글이 없습니다.
-                            </p>
-                          )}
-                        </div>
-                      </section>
-                    ) : null}
-                    {stage === "problem-definition" && leftPanelDetail.evidenceItems?.length ? (
-                      <section className="pt-6">
-                        <h4 className="text-lg font-semibold text-slate-900">근거 요약</h4>
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.evidenceItems.map((item, index) => (
-                            <div key={`${leftPanelDetail.title}-evidence-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                              <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                              <p className="mt-1 text-base leading-7 text-slate-700">{item.value}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    ) : null}
-                    {stage === "problem-definition" ? (
-                      <section className="pt-6">
-                        <h4 className="text-lg font-semibold text-slate-900">연결 메모</h4>
-                        <div className="mt-4 space-y-3">
-                          {leftPanelDetail.noteItems?.length ? (
-                            leftPanelDetail.noteItems.map((item, index) => (
-                              <div key={`${leftPanelDetail.title}-note-${item.id}-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                                <div className="flex items-center justify-between gap-3">
-                                  <p className="text-sm font-semibold text-slate-700">{item.label}</p>
-                                  <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500">{toolLabel((item.kind as ComposerTool) || "note")}</span>
-                                </div>
-                                <p className="mt-2 text-base leading-7 text-slate-600">{item.value || "메모 내용이 없습니다."}</p>
-                              </div>
-                            ))
-                          ) : (
-                            <p className="text-base leading-7 text-slate-500">아직 연결된 메모가 없습니다. 오른쪽 개인 메모를 그룹 카드로 드래그하면 여기에 표시됩니다.</p>
-                          )}
-                        </div>
-                      </section>
-                    ) : null}
+                    {renderSolutionDetailSections()}
+                    {renderGeneralOrganizeSection()}
+                    {renderIdeationRelatedSections()}
+                    {renderProblemRelatedSections()}
                   </>
                 ) : (
-                  <div className="rounded-2xl border border-dashed border-black/10 bg-[#fafafa] px-4 py-5">
-                    <p className="text-base font-semibold text-slate-900">선택된 내용이 없습니다</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-500">
-                      왼쪽 캔버스에서 그룹을 선택하거나 오른쪽 캔버스에서 아이디어/댓글을 선택하면 상세 정보가 표시됩니다.
-                    </p>
-                  </div>
+                  <RightDetailEmptyState />
                 )}
-              </div>
-            </div>
-          </aside>
+            </RightDetailPanelShell>
+            </RightDrawerPanel>
 
-            <aside className={`imms-drawer-pane imms-side-panel imms-right-panel relative min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] flex-1 overflow-hidden bg-transparent xl:min-h-0 xl:max-h-none ${rightDrawerCollapsed && !rightDrawerContentVisible ? "hidden pointer-events-none -translate-x-8 px-0 py-0 opacity-0" : "border-t-4 border-[#d5d5d5] translate-x-0 opacity-100"}`}>
-            <div
-              className={`imms-drawer-body ${rightDrawerContentVisible ? "imms-overlay-scroll box-border h-full max-h-[min(48vh,500px)] translate-x-0 overflow-y-auto px-[clamp(1rem,1.6vw,1.35rem)] py-[clamp(1rem,2vh,1.5rem)] opacity-100 xl:max-h-none xl:overflow-y-auto" : rightDrawerCollapsed ? "hidden pointer-events-none translate-x-8 opacity-0" : "pointer-events-none translate-x-8 opacity-0"}`}
-              style={isDesktopLayout && !rightDrawerCollapsed ? { width: rightDrawerExpandedWidth } : undefined}
+            <RightDrawerPanel
+              className={rightDrawerBottomPanelClassName}
+              bodyClassName={rightDrawerBodyClassName}
+              bodyStyle={rightDrawerBodyStyle}
             >
-            <section className="border-b border-black/10 pb-[clamp(1rem,2vh,1.5rem)]">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-black/50">Personal note</p>
-                  <h3 className="mt-1 text-xl font-semibold leading-tight text-black">개인 노트</h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setRightDrawerNotesCollapsed((prev) => !prev)}
-                  className="shrink-0 rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
-                >
-                  {rightDrawerNotesCollapsed ? "열기" : `${projectPersonalNotes.length}개 · 접기`}
-                </button>
-              </div>
-              <div className={`mt-4 space-y-3 ${rightDrawerNotesCollapsed ? "hidden" : ""}`}>
-                <select value={composerAgendaId} onChange={(event) => setComposerAgendaId(event.target.value)} className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none">
-                  <option value="">프로젝트 전체 메모</option>
-                  {agendaModels.map((agenda) => (
-                    <option key={agenda.id} value={agenda.id}>
-                      {agenda.title}
-                    </option>
-                  ))}
-                </select>
-                <input value={composerTitle} onChange={(event) => setComposerTitle(event.target.value)} placeholder="메모 제목" className="w-full rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base text-[#4d4d4d] focus:border-black/30 focus:outline-none" />
-                <textarea ref={composerBodyRef} value={composerBody} onChange={(event) => setComposerBody(event.target.value)} placeholder="메모 내용" className="min-h-[118px] w-full rounded-2xl border border-black/10 bg-white px-4 py-3.5 text-base leading-7 text-[#4d4d4d] focus:border-black/30 focus:outline-none" />
-                <div className="rounded-xl border border-black/10 bg-white px-3 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-[#4d4d4d]">연결 아이디어</p>
-                      <p className="mt-1 truncate text-xs leading-5 text-black/45">
-                        {composerLinkedCanvasItemId
-                          ? composerLinkedCanvasItemTitle || "선택된 아이디어"
-                          : "선택하지 않아도 메모를 저장할 수 있습니다."}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPendingPersonalNoteLinkId(COMPOSER_PERSONAL_NOTE_LINK_ID);
-                          setStage("ideation");
-                          setLeftPanelTab("detail");
-                          setActivityMessage("캔버스에서 이 메모에 미리 연결할 아이디어 노드를 클릭해 주세요.");
-                        }}
-                        className="rounded-full border border-black/10 bg-[#fafafa] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                      >
-                        {composerLinkedCanvasItemId ? "다시 선택" : "아이디어 선택"}
-                      </button>
-                      {composerLinkedCanvasItemId ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setComposerLinkedCanvasItemId("");
-                            setComposerLinkedCanvasItemTitle("");
-                          }}
-                          className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                        >
-                          해제
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-                {pendingPersonalNoteLinkId ? (
-                  <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3 text-sm leading-6 text-blue-700">
-                    {pendingPersonalNoteLinkId === COMPOSER_PERSONAL_NOTE_LINK_ID
-                      ? "작성 중인 메모에 연결할 아이디어 노드를 캔버스에서 선택해 주세요."
-                      : "연결할 아이디어 노드를 캔버스에서 선택해 주세요."}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPendingPersonalNoteLinkId("");
-                      }}
-                      className="ml-2 font-semibold underline underline-offset-2"
-                    >
-                      취소
-                    </button>
-                  </div>
-                ) : null}
-                <button type="button" onClick={handleAddPersonalNote} className="ml-auto block rounded-full bg-[#eff0f6] px-5 py-2 text-sm font-medium text-[#4d4d4d] hover:bg-[#e3e5ee]">
-                  개인 메모 저장
-                </button>
-              </div>
-            </section>
+            <RightDrawerNotesPanel
+              collapsed={rightDrawerNotesCollapsed}
+              noteCount={projectPersonalNotes.length}
+              onToggleCollapsed={() => setRightDrawerNotesCollapsed((prev) => !prev)}
+            >
+                <PersonalNoteComposer
+                  agendaModels={agendaModels}
+                  composerAgendaId={composerAgendaId}
+                  composerTitle={composerTitle}
+                  composerBody={composerBody}
+                  composerLinkedCanvasItemId={composerLinkedCanvasItemId}
+                  composerLinkedCanvasItemTitle={composerLinkedCanvasItemTitle}
+                  pendingPersonalNoteLinkId={pendingPersonalNoteLinkId}
+                  composerBodyRef={composerBodyRef}
+                  onAgendaChange={setComposerAgendaId}
+                  onTitleChange={setComposerTitle}
+                  onBodyChange={setComposerBody}
+                  onStartLinkSelection={() => {
+                    setPendingPersonalNoteLinkId(COMPOSER_PERSONAL_NOTE_LINK_ID);
+                    setStage("ideation");
+                    setLeftPanelTab("detail");
+                    setActivityMessage("캔버스에서 이 메모에 미리 연결할 아이디어 노드를 클릭해 주세요.");
+                  }}
+                  onClearLinkedIdea={() => {
+                    setComposerLinkedCanvasItemId("");
+                    setComposerLinkedCanvasItemTitle("");
+                  }}
+                  onCancelPendingLink={() => setPendingPersonalNoteLinkId("")}
+                  onSave={handleAddPersonalNote}
+                />
+            </RightDrawerNotesPanel>
 
-            <section className={`pt-[clamp(1rem,2vh,1.5rem)] ${rightDrawerNotesCollapsed ? "hidden" : ""}`}>
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-lg font-semibold text-black">내 메모 목록</h3>
-                <span className="rounded-full border border-black/10 bg-[#eff0f6] px-3 py-1 text-sm font-medium text-[#4d4d4d]">
-                  {projectPersonalNotes.length}
-                </span>
-              </div>
-              {stage === "problem-definition" ? (
-                <p className="mt-2 text-sm leading-6 text-slate-500">메모 카드를 문제 정의 그룹으로 드래그해서 편입할 수 있습니다.</p>
-              ) : null}
-              <div className="mt-4 space-y-3">
-                {projectPersonalNotes.length === 0 ? (
-                  <p className="text-base leading-7 text-slate-500">이 프로젝트에 저장한 개인 메모가 없습니다.</p>
-                ) : (
-                  projectPersonalNotes.map((note) => {
-                    const isEditing = editingPersonalNoteId === note.id;
-
-                    return (
-                      <article
-                        key={note.id}
-                        draggable={stage === "problem-definition" && !isEditing}
-                        onDragStart={(event) => {
-                          if (stage !== "problem-definition" || isEditing) return;
-                          event.dataTransfer.effectAllowed = "move";
-                          event.dataTransfer.setData("application/x-imms-note-id", note.id);
-                          event.dataTransfer.setData("text/plain", note.id);
-                          setDraggingPersonalNoteId(note.id);
-                        }}
-                        onDragEnd={() => {
-                          setDraggingPersonalNoteId("");
-                          setDropProblemGroupId("");
-                        }}
-                        className={`rounded-xl border border-black/10 bg-white p-4 shadow-[0_1px_0_rgba(0,0,0,0.04)] ${stage === "problem-definition" && !isEditing ? "cursor-grab active:cursor-grabbing" : ""} ${draggingPersonalNoteId === note.id ? "opacity-60" : ""}`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">{toolLabel(note.kind)}</p>
-                            {isEditing ? (
-                              <input
-                                value={personalNoteDraftTitle}
-                                onChange={(event) => setPersonalNoteDraftTitle(event.target.value)}
-                                className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-base font-semibold text-slate-900"
-                              />
-                            ) : (
-                              <h4 className="mt-1 text-base font-semibold text-slate-900">{note.title}</h4>
-                            )}
-                          </div>
-                          <div className="flex shrink-0 gap-2">
-                            {isEditing ? (
-                              <>
-                                <button type="button" onClick={handleCancelPersonalNoteEdit} className="text-sm font-medium text-slate-500 hover:text-slate-700">
-                                  취소
-                                </button>
-                                <button type="button" onClick={() => handleSavePersonalNoteEdit(note.id)} className="text-sm font-medium text-slate-700 hover:text-slate-900">
-                                  저장
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button type="button" onClick={() => handleStartPersonalNoteEdit(note)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
-                                  수정
-                                </button>
-                                <button type="button" onClick={() => handleDeletePersonalNote(note.id)} className="text-sm font-medium text-slate-400 hover:text-slate-600">
-                                  삭제
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                        {isEditing ? (
-                          <>
-                            <select
-                              value={personalNoteDraftAgendaId}
-                              onChange={(event) => setPersonalNoteDraftAgendaId(event.target.value)}
-                              className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
-                            >
-                              <option value="">프로젝트 전체 메모</option>
-                              {agendaModels.map((agenda) => (
-                                <option key={agenda.id} value={agenda.id}>
-                                  {agenda.title}
-                                </option>
-                              ))}
-                            </select>
-                            <textarea
-                              value={personalNoteDraftBody}
-                              onChange={(event) => setPersonalNoteDraftBody(event.target.value)}
-                              className="mt-3 min-h-[140px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
-                            />
-                          </>
-                        ) : (
-                          <p className="mt-2 text-base leading-7 text-slate-600">{note.body}</p>
-                        )}
-                        {!isEditing ? (
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {note.linkedCanvasItemId ? (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => focusCanvasItemInIdeation(note.linkedCanvasItemId || "", "개인 메모와 연결된 아이디어로 이동했습니다.")}
-                                  className="rounded-full border border-blue-100 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100"
-                                >
-                                  연결 아이디어: {note.linkedCanvasItemTitle || "아이디어"}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setPendingPersonalNoteLinkId(note.id);
-                                    setStage("ideation");
-                                    setActivityMessage("캔버스에서 새로 연결할 아이디어 노드를 클릭해 주세요.");
-                                  }}
-                                  className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  다른 아이디어 연결
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setPersonalNotes((prev) =>
-                                      prev.map((item) =>
-                                        item.id === note.id
-                                          ? {
-                                              ...item,
-                                              linkedCanvasItemId: "",
-                                              linkedCanvasItemTitle: "",
-                                            }
-                                          : item,
-                                      ),
-                                    )
-                                  }
-                                  className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                                >
-                                  연결 해제
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setPendingPersonalNoteLinkId(note.id);
-                                  setStage("ideation");
-                                  setActivityMessage("캔버스에서 연결할 아이디어 노드를 클릭해 주세요.");
-                                }}
-                                className="rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                              >
-                                아이디어 연결
-                              </button>
-                            )}
-                          </div>
-                        ) : null}
-                        <p className="mt-3 text-sm text-slate-400">연결 그룹: {agendaModels.find((agenda) => agenda.id === (isEditing ? personalNoteDraftAgendaId : note.agendaId))?.title || "프로젝트 전체"}</p>
-                      </article>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-            </div>
-          </aside>
+            {rightDrawerNotesCollapsed ? null : (
+              <PersonalNoteList
+                notes={projectPersonalNotes}
+                stage={stage}
+                agendaModels={agendaModels}
+                editingPersonalNoteId={editingPersonalNoteId}
+                draggingPersonalNoteId={draggingPersonalNoteId}
+                personalNoteDraftAgendaId={personalNoteDraftAgendaId}
+                personalNoteDraftTitle={personalNoteDraftTitle}
+                personalNoteDraftBody={personalNoteDraftBody}
+                onDragStartNote={setDraggingPersonalNoteId}
+                onDragEndNote={() => {
+                  setDraggingPersonalNoteId("");
+                  setDropProblemGroupId("");
+                }}
+                onDraftAgendaChange={setPersonalNoteDraftAgendaId}
+                onDraftTitleChange={setPersonalNoteDraftTitle}
+                onDraftBodyChange={setPersonalNoteDraftBody}
+                onCancelEdit={handleCancelPersonalNoteEdit}
+                onSaveEdit={handleSavePersonalNoteEdit}
+                onStartEdit={handleStartPersonalNoteEdit}
+                onDelete={handleDeletePersonalNote}
+                onFocusLinkedIdea={(itemId) => focusCanvasItemInIdeation(itemId, "개인 메모와 연결된 아이디어로 이동했습니다.")}
+                onStartRelink={(noteId, hasExistingLink) => {
+                  setPendingPersonalNoteLinkId(noteId);
+                  setStage("ideation");
+                  setActivityMessage(hasExistingLink ? "캔버스에서 새로 연결할 아이디어 노드를 클릭해 주세요." : "캔버스에서 연결할 아이디어 노드를 클릭해 주세요.");
+                }}
+                onUnlinkIdea={(noteId) =>
+                  setPersonalNotes((prev) =>
+                    prev.map((item) =>
+                      item.id === noteId
+                        ? {
+                            ...item,
+                            linkedCanvasItemId: "",
+                            linkedCanvasItemTitle: "",
+                          }
+                        : item,
+                    ),
+                  )
+                }
+              />
+            )}
+            </RightDrawerPanel>
             </div>
           </div>
         </div>
