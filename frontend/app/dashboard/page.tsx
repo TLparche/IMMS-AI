@@ -155,19 +155,23 @@ function buildFinalResultSummaryFromSolutionTopics(topics: CanvasSolutionTopicRe
 
 function formatDashboardDate(value: string) {
   if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
 
   return new Intl.DateTimeFormat("ko-KR", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   })
-    .format(new Date(value))
+    .format(date)
     .replace(/\. /g, ".")
     .replace(/\.$/, "");
 }
 
 function formatDashboardDateTime(value?: string) {
   if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
 
   return new Intl.DateTimeFormat("ko-KR", {
     year: "numeric",
@@ -176,7 +180,7 @@ function formatDashboardDateTime(value?: string) {
     hour: "2-digit",
     minute: "2-digit",
   })
-    .format(new Date(value))
+    .format(date)
     .replace(/\. /g, ".")
     .replace(/\.$/, "");
 }
