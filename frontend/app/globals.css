@@ -114,6 +114,14 @@
   opacity: 0.72;
 }
 
+.react-flow__node.imms-solution-canvas-node {
+  text-align: left;
+}
+
+.react-flow__node.imms-solution-canvas-node .react-flow__handle {
+  display: none !important;
+}
+
 .imms-side-panel-surface {
   border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 16px;

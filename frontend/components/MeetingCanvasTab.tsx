@@ -1194,6 +1194,24 @@ function extractCanvasItemIdFromNodeId(nodeId: string) {
   return nodeId.startsWith("canvas-item-") ? nodeId.slice("canvas-item-".length) : "";
 }
 
+function extractSolutionDetailTopicIdFromNodeId(nodeId: string) {
+  const prefixes = [
+    "solution-detail::",
+    "solution-ai-header::",
+    "solution-ai::",
+    "solution-note-header::",
+    "solution-note::",
+    "solution-composer::",
+    "solution-final-header::",
+    "solution-final::",
+    "solution-empty::",
+  ];
+  const prefix = prefixes.find((candidate) => nodeId.startsWith(candidate));
+  if (!prefix) return "";
+  const topicId = nodeId.slice(prefix.length).split("::")[0] || "";
+  return topicId === "none" ? "" : topicId;
+}
+
 function stripLeadingTimestamp(text: string) {
   return text
     .replace(
@@ -2538,7 +2556,7 @@ function makeSolutionNodeLabel(topic: SolutionTopicViewModel, selected: boolean)
   const finalCount = solutionTopicFinalNotes(topic).length;
   return (
     <div
-      className={`nopan min-w-0 cursor-pointer border bg-white px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition ${
+      className={`nopan box-border flex h-full w-full min-w-0 cursor-pointer flex-col justify-start border bg-white px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] transition ${
         selected
           ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]"
           : "border-black/10 shadow-[0_1px_0_rgba(0,0,0,0.04)] hover:border-emerald-300"
@@ -2571,6 +2589,208 @@ function makeSolutionNodeLabel(topic: SolutionTopicViewModel, selected: boolean)
           결론 {finalCount}
         </span>
       </div>
+    </div>
+  );
+}
+
+function makeSolutionOverviewNodeLabel(topic: SolutionTopicViewModel) {
+  return (
+    <div className="nopan box-border flex h-full w-full flex-col justify-start border border-black/10 bg-white px-5 py-5 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">해결 방향</p>
+          <h4 className="mt-2 text-xl font-semibold leading-8 text-slate-950">{topic.topic}</h4>
+        </div>
+        <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${problemGroupStatusTone(topic.status)}`}>
+          {problemGroupStatusLabel(topic.status)}
+        </span>
+      </div>
+      <p className="mt-4 line-clamp-4 text-base leading-7 text-[#4d4d4d]">
+        {topic.conclusion || topic.problem_conclusion || "해결 방향이 아직 없습니다."}
+      </p>
+      <div className="mt-4 grid gap-3 text-sm leading-6 text-[#4d4d4d] md:grid-cols-3">
+        <div className="border border-black/10 bg-[#fafafa] px-3 py-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#777]">문제정의</p>
+          <p className="mt-1 line-clamp-2">{topic.problem_topic || "연결된 문제정의 없음"}</p>
+        </div>
+        <div className="border border-black/10 bg-[#fafafa] px-3 py-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#777]">인사이트</p>
+          <p className="mt-1 line-clamp-2">{topic.problem_insight || "인사이트 없음"}</p>
+        </div>
+        <div className="border border-black/10 bg-[#fafafa] px-3 py-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#777]">출처</p>
+          <p className="mt-1 line-clamp-2">{topic.agenda_titles.length > 0 ? topic.agenda_titles.join(", ") : "연결 안건 없음"}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function makeSolutionAiSuggestionNodeLabel(
+  suggestion: SolutionAiSuggestionViewModel,
+  index: number,
+  onAdopt: (event: React.MouseEvent<HTMLButtonElement>) => void,
+  busy = false,
+) {
+  const selected = suggestion.status === "selected";
+  if (busy) {
+    return (
+      <article className="nopan box-border flex h-full w-full flex-col justify-center border border-emerald-100 bg-white px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+        <div className="flex items-center gap-3">
+          <span className="h-3 w-3 animate-ping rounded-full bg-emerald-500" />
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">
+              AI 추천 생성 중
+            </p>
+            <p className="mt-1 text-sm leading-6 text-[#4d4d4d]">
+              선택한 인사이트 기준으로 해결책 아이디어를 다시 정리하고 있습니다.
+            </p>
+          </div>
+        </div>
+      </article>
+    );
+  }
+
+  return (
+    <article className={`nopan box-border flex h-full w-full flex-col justify-start border px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] ${
+      selected ? "border-blue-100 bg-slate-50/90 opacity-80" : "border-black/10 bg-white"
+    } shadow-[0_1px_0_rgba(0,0,0,0.04)]`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#777]">AI 제안 {index + 1}</p>
+          <p className={`mt-2 line-clamp-5 text-sm leading-6 ${selected ? "text-slate-500" : "text-[#4d4d4d]"}`}>
+            {suggestion.text}
+          </p>
+          {selected ? (
+            <p className="mt-2 text-xs font-semibold text-blue-600">채택 카드로 이동됨</p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={onAdopt}
+          disabled={selected}
+          className="nodrag shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {selected ? "채택됨" : "채택"}
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function makeSolutionNoteNodeLabel(
+  note: SolutionNoteViewModel,
+  index: number,
+  onToggleFinal: (event: React.MouseEvent<HTMLButtonElement>) => void,
+  onCommentChange: (value: string) => void,
+) {
+  const sourceLabel = note.source === "ai" ? `AI 채택 카드 ${index + 1}` : `사용자 카드 ${index + 1}`;
+  const shellClass = note.is_final_candidate
+    ? "border-slate-900 bg-white"
+    : note.source === "ai"
+      ? "border-blue-100 bg-blue-50/70"
+      : "border-amber-100 bg-amber-50/80";
+  const labelClass = note.is_final_candidate
+    ? "text-slate-900"
+    : note.source === "ai"
+      ? "text-blue-700"
+      : "text-amber-700";
+
+  return (
+    <article className={`nopan box-border flex h-full w-full flex-col justify-start border px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] ${shellClass}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className={`text-xs font-semibold uppercase tracking-[0.14em] ${labelClass}`}>
+            {sourceLabel}
+          </p>
+          <p className="mt-2 line-clamp-5 text-sm leading-6 text-slate-700">{note.text}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onToggleFinal}
+          className={`nodrag shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+            note.is_final_candidate
+              ? "bg-slate-900 text-white"
+              : "border border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
+          }`}
+        >
+          {note.is_final_candidate ? "최종 결론" : "결론 후보"}
+        </button>
+      </div>
+      {note.is_final_candidate ? (
+        <textarea
+          value={note.final_comment || ""}
+          onChange={(event) => onCommentChange(event.target.value)}
+          onPointerDown={(event) => event.stopPropagation()}
+          placeholder="최종 결론에 붙일 설명을 입력합니다."
+          className="nodrag mt-3 min-h-[72px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function makeSolutionComposerNodeLabel(
+  draft: string,
+  onDraftChange: (value: string) => void,
+  onAdd: (event: React.MouseEvent<HTMLButtonElement>) => void,
+) {
+  return (
+    <div className="nopan box-border flex h-full w-full flex-col justify-start border border-black/10 bg-[#fafafa] px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+      <p className="text-sm font-semibold text-slate-700">사용자 해결책 추가</p>
+      <textarea
+        value={draft}
+        onChange={(event) => onDraftChange(event.target.value)}
+        onPointerDown={(event) => event.stopPropagation()}
+        placeholder="직접 해결책 메모를 추가합니다."
+        className="nodrag mt-3 min-h-[96px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
+      />
+      <button
+        type="button"
+        onClick={onAdd}
+        className="nodrag mt-3 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+      >
+        카드 추가
+      </button>
+    </div>
+  );
+}
+
+function makeSolutionFinalNoteNodeLabel(
+  note: {
+    id: string;
+    topicId: string;
+    topicTitle: string;
+    text: string;
+    final_comment: string;
+  },
+  active: boolean,
+  onFocus: (event: React.MouseEvent<HTMLButtonElement>) => void,
+) {
+  return (
+    <button
+      type="button"
+      onClick={onFocus}
+      className={`nopan nodrag box-border block h-full w-full border px-4 py-3 text-left font-['Inter','Noto_Sans_KR',sans-serif] transition ${
+        active ? "border-slate-900 bg-white" : "border-black/10 bg-[#fafafa] hover:bg-white"
+      }`}
+    >
+      <p className="text-sm font-semibold text-slate-700">{note.topicTitle}</p>
+      <p className="mt-2 line-clamp-4 text-sm leading-6 text-slate-700">{note.text}</p>
+      {note.final_comment ? (
+        <p className="mt-2 line-clamp-3 text-xs leading-5 text-slate-500">{note.final_comment}</p>
+      ) : null}
+    </button>
+  );
+}
+
+function makeSolutionEmptyNodeLabel() {
+  return (
+    <div className="nopan box-border flex h-full w-full flex-col items-center justify-center border border-dashed border-black/10 bg-white px-6 py-8 text-center font-['Inter','Noto_Sans_KR',sans-serif]">
+      <p className="text-base font-semibold text-slate-950">해결책 인사이트를 선택해 주세요</p>
+      <p className="mt-2 text-sm leading-6 text-[#777]">
+        왼쪽 인사이트를 클릭하면 AI 추천 아이디어와 채택 카드가 오른쪽 캔버스에 표시됩니다.
+      </p>
     </div>
   );
 }
@@ -2940,6 +3160,43 @@ function buildGridPositions(heights: number[], gapX: number, gapY: number, baseX
   });
 }
 
+function buildColumnPositions(
+  heights: number[],
+  columns: number,
+  gapX: number,
+  gapY: number,
+  baseX: number,
+  baseY: number,
+) {
+  const safeColumns = Math.max(1, columns);
+  const rowHeights: number[] = [];
+
+  heights.forEach((height, index) => {
+    const row = Math.floor(index / safeColumns);
+    rowHeights[row] = Math.max(rowHeights[row] || 0, height);
+  });
+
+  const rowOffsets: number[] = [];
+  let nextY = baseY;
+  rowHeights.forEach((height, rowIndex) => {
+    rowOffsets[rowIndex] = nextY;
+    nextY += height + gapY;
+  });
+
+  return heights.map((_, index) => {
+    const column = index % safeColumns;
+    const row = Math.floor(index / safeColumns);
+    return {
+      x: baseX + column * gapX,
+      y: rowOffsets[row] ?? baseY,
+    };
+  });
+}
+
+function estimateSolutionCardLineChars(width: number) {
+  return Math.max(22, Math.floor(width / 10.5));
+}
+
 function serializeSharedProblemGroups(groups: ProblemGroupViewModel[]) {
   return groups.map((group) => ({
     group_id: group.group_id,
@@ -3080,6 +3337,42 @@ function hydrateSolutionTopics(
       notes,
     };
   });
+}
+
+function pruneUnselectedSolutionSuggestions(
+  topics: SolutionTopicViewModel[],
+  targetTopicId = "",
+): { topics: SolutionTopicViewModel[]; removedCount: number } {
+  let removedCount = 0;
+  const nextTopics = topics.map((topic) => {
+    if (targetTopicId && topic.group_id !== targetTopicId) {
+      return topic;
+    }
+
+    const adoptedAiIds = new Set(
+      topic.notes
+        .filter((note) => note.source === "ai" && note.source_ai_id)
+        .map((note) => note.source_ai_id || ""),
+    );
+    const keptSuggestions = topic.ai_suggestions.filter(
+      (suggestion) => suggestion.status === "selected" || adoptedAiIds.has(suggestion.id),
+    );
+    removedCount += topic.ai_suggestions.length - keptSuggestions.length;
+
+    if (keptSuggestions.length === topic.ai_suggestions.length) {
+      return topic;
+    }
+
+    return {
+      ...topic,
+      ideas: keptSuggestions.map((suggestion) => suggestion.text),
+      ai_suggestions: keptSuggestions.map((suggestion) =>
+        makeSolutionAiSuggestion({ ...suggestion, status: "selected" }, suggestion.id),
+      ),
+    };
+  });
+
+  return { topics: nextTopics, removedCount };
 }
 
 function serializeSharedSolutionTopics(topics: SolutionTopicViewModel[]) {
@@ -3434,6 +3727,7 @@ export default function MeetingCanvasTab({
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
   const [solutionStagePending, setSolutionStagePending] = useState(false);
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
+  const [solutionSuggestionBusyTopicId, setSolutionSuggestionBusyTopicId] = useState("");
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
@@ -3465,6 +3759,7 @@ export default function MeetingCanvasTab({
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
+  const [solutionRightPaneWidth, setSolutionRightPaneWidth] = useState(0);
   const [placementFeedback, setPlacementFeedback] = useState<{
     id: string;
     x: number;
@@ -3514,6 +3809,7 @@ export default function MeetingCanvasTab({
   const ideationRightFlowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
   const ideationLeftPaneRef = useRef<HTMLDivElement | null>(null);
   const ideationRightPaneRef = useRef<HTMLDivElement | null>(null);
+  const solutionRightPaneRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startRatio: number } | null>(null);
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
@@ -3760,6 +4056,7 @@ export default function MeetingCanvasTab({
     setIdeaAssimilationStatus("");
     setProblemDiscussionStatus("");
     setIdeationSuggestionBusyRootId("");
+    setSolutionSuggestionBusyTopicId("");
     setIdeationSuggestionCollapsedByRootId({});
     agendaDragPreviewRef.current = null;
     setAgendaDragPreview(null);
@@ -4245,6 +4542,21 @@ export default function MeetingCanvasTab({
     window.addEventListener("resize", syncViewportMode);
     return () => window.removeEventListener("resize", syncViewportMode);
   }, []);
+
+  useEffect(() => {
+    const element = solutionRightPaneRef.current;
+    if (!element) return;
+
+    const syncWidth = () => {
+      const nextWidth = Math.round(element.getBoundingClientRect().width);
+      setSolutionRightPaneWidth((current) => (Math.abs(current - nextWidth) > 4 ? nextWidth : current));
+    };
+
+    syncWidth();
+    const observer = new ResizeObserver(syncWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [stage]);
 
   const buildProblemConclusionPayload = useCallback(
     (group: ProblemGroupViewModel) => ({
@@ -6398,6 +6710,143 @@ export default function MeetingCanvasTab({
     [canvasItems, meetingId, userId],
   );
 
+  const handleGenerateSolutionSuggestions = useCallback(
+    async (topicId: string) => {
+      const targetTopic = solutionTopics.find((topic) => topic.group_id === topicId);
+      if (!targetTopic || !meetingId) {
+        setActivityMessage("AI 추천을 생성할 해결책 항목을 먼저 선택해 주세요.");
+        return;
+      }
+
+      setSolutionSuggestionBusyTopicId(topicId);
+      setActivityMessage("해결책 AI 추천 아이디어를 생성하는 중입니다.");
+      try {
+        const result = await generateCanvasSolutionStage({
+          meeting_id: meetingId,
+          meeting_topic: meetingTopicForAi,
+          topics: [
+            {
+              group_id: targetTopic.group_id,
+              topic_no: targetTopic.topic_no,
+              topic: targetTopic.problem_topic || targetTopic.topic,
+              conclusion: targetTopic.problem_conclusion || targetTopic.conclusion,
+            },
+          ],
+        });
+        const generatedTopic = hydrateSolutionTopics(result.topics || [], problemGroups, [targetTopic])
+          .find((topic) => topic.group_id === topicId);
+
+        if (!generatedTopic) {
+          setActivityMessage(result.warning || "AI 추천 결과를 찾지 못했습니다.");
+          return;
+        }
+
+        const generatedTexts = new Set<string>();
+        const generatedSuggestions = (generatedTopic.ai_suggestions || [])
+          .map((suggestion, index) => {
+            const text = suggestion.text.trim();
+            if (!text || generatedTexts.has(text)) return null;
+            generatedTexts.add(text);
+            const previous = targetTopic.ai_suggestions.find((item) => item.text.trim() === text);
+            return makeSolutionAiSuggestion(
+              {
+                ...suggestion,
+                id: suggestion.id || previous?.id || `${topicId}-ai-${index + 1}`,
+                status: previous?.status || suggestion.status,
+              },
+              `${topicId}-ai-${index + 1}`,
+            );
+          })
+          .filter((suggestion): suggestion is SolutionAiSuggestionViewModel => Boolean(suggestion));
+        const usedSuggestionIds = new Set(generatedSuggestions.map((suggestion) => suggestion.id));
+        const preservedSelectedSuggestions = targetTopic.ai_suggestions
+          .filter((suggestion) => suggestion.status === "selected" && !generatedTexts.has(suggestion.text.trim()))
+          .map((suggestion, index) => {
+            const fallbackId = `${topicId}-selected-ai-${index + 1}`;
+            const nextId = usedSuggestionIds.has(suggestion.id) ? fallbackId : suggestion.id || fallbackId;
+            usedSuggestionIds.add(nextId);
+            return makeSolutionAiSuggestion({ ...suggestion, id: nextId }, nextId);
+          });
+        const nextSuggestions = [...generatedSuggestions, ...preservedSelectedSuggestions].slice(0, 8);
+
+        setSolutionTopics((prev) =>
+          prev.map((topic) =>
+            topic.group_id === topicId
+              ? {
+                  ...topic,
+                  ideas: nextSuggestions.map((suggestion) => suggestion.text),
+                  ai_suggestions: nextSuggestions,
+                }
+              : topic,
+          ),
+        );
+        setSelectedSolutionTopicId(topicId);
+        setSelectedNodeId(`solution-${topicId}`);
+        setActivityMessage(result.warning || `AI 추천 아이디어 ${nextSuggestions.length}개를 생성했습니다.`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setActivityMessage(`해결책 AI 추천 생성 실패: ${message}`);
+      } finally {
+        setSolutionSuggestionBusyTopicId("");
+      }
+    },
+    [meetingId, meetingTopicForAi, problemGroups, solutionTopics],
+  );
+
+  const handlePruneSolutionSuggestions = useCallback(
+    async (targetTopicId = "", persistImmediately = false) => {
+      const { topics: nextSolutionTopics, removedCount } = pruneUnselectedSolutionSuggestions(
+        solutionTopics,
+        targetTopicId,
+      );
+
+      if (removedCount === 0) {
+        setActivityMessage("정리할 미채택 AI 추천이 없습니다.");
+        return nextSolutionTopics;
+      }
+
+      setSolutionTopics(nextSolutionTopics);
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        stage,
+        solutionTopics: nextSolutionTopics,
+        importedState: persistedSharedImportedState,
+      };
+
+      if (sharedSyncEnabled) {
+        forceBroadcastSharedCanvas({
+          solutionTopics: nextSolutionTopics,
+        });
+
+        if (meetingId) {
+          const patch = {
+            meeting_id: meetingId,
+            solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
+            imported_state: persistedSharedImportedState,
+          };
+          if (persistImmediately) {
+            await saveCanvasWorkspacePatch(patch);
+          } else {
+            void saveCanvasWorkspacePatch(patch).catch((error) => {
+              console.error("Failed to prune solution suggestions:", error);
+            });
+          }
+        }
+      }
+
+      setActivityMessage(`미채택 AI 추천 ${removedCount}개를 정리했습니다.`);
+      return nextSolutionTopics;
+    },
+    [
+      forceBroadcastSharedCanvas,
+      meetingId,
+      persistedSharedImportedState,
+      sharedSyncEnabled,
+      solutionTopics,
+      stage,
+    ],
+  );
+
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
       const heights = problemGroups.map((group) => estimateProblemGroupNodeHeight(group));
@@ -6568,13 +7017,557 @@ export default function MeetingCanvasTab({
         positions.push({ x: 24, y: nextY });
         nextY += height + 18;
       });
+      const activeSolutionTopic =
+        solutionTopics.find((topic) => topic.group_id === selectedSolutionTopicId) ||
+        solutionTopics[0] ||
+        null;
+      const adoptSolutionSuggestion = (topicId: string, suggestionId: string) => {
+        setSolutionTopics((prev) =>
+          prev.map((topic) => {
+            if (topic.group_id !== topicId) return topic;
+            const suggestion = topic.ai_suggestions.find((item) => item.id === suggestionId);
+            if (!suggestion || suggestion.status === "selected") return topic;
+            const hasExistingNote = topic.notes.some((note) => note.source_ai_id === suggestion.id);
+            const nextSuggestions = topic.ai_suggestions.map((item) =>
+              item.id === suggestionId
+                ? makeSolutionAiSuggestion({ ...item, status: "selected" }, item.id)
+                : makeSolutionAiSuggestion(item, item.id),
+            );
+            const nextNotes = hasExistingNote
+              ? topic.notes
+              : [
+                  ...topic.notes,
+                  makeSolutionNote(
+                    {
+                      text: suggestion.text,
+                      source: "ai",
+                      source_ai_id: suggestion.id,
+                      is_final_candidate: false,
+                      final_comment: "",
+                    },
+                    `solution-note-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+                  ),
+                ];
+
+            return {
+              ...topic,
+              ai_suggestions: nextSuggestions,
+              notes: nextNotes,
+            };
+          }),
+        );
+        setSelectedSolutionTopicId(topicId);
+        setSelectedNodeId(`solution-${topicId}`);
+        setActivityMessage("AI 추천 아이디어를 해결책 카드로 채택했습니다.");
+      };
+      const addSolutionUserNote = (topicId: string) => {
+        const nextText = solutionNoteDraft.trim();
+        if (!nextText) {
+          setActivityMessage("추가할 해결책 메모를 입력해 주세요.");
+          return;
+        }
+
+        setSolutionTopics((prev) =>
+          prev.map((topic) =>
+            topic.group_id === topicId
+              ? {
+                  ...topic,
+                  notes: [
+                    ...topic.notes,
+                    makeSolutionNote(
+                      {
+                        text: nextText,
+                        source: "user",
+                        is_final_candidate: false,
+                        final_comment: "",
+                      },
+                      `solution-user-note-${Date.now()}`,
+                    ),
+                  ],
+                }
+              : topic,
+          ),
+        );
+        setSolutionNoteDraft("");
+        setSelectedSolutionTopicId(topicId);
+        setSelectedNodeId(`solution-${topicId}`);
+        setActivityMessage("사용자 해결책 카드를 추가했습니다.");
+      };
+      const toggleSolutionFinalNote = (topicId: string, noteId: string) => {
+        setSolutionTopics((prev) =>
+          prev.map((topic) =>
+            topic.group_id === topicId
+              ? {
+                  ...topic,
+                  notes: topic.notes.map((note) =>
+                    note.id === noteId
+                      ? makeSolutionNote(
+                          {
+                            ...note,
+                            is_final_candidate: !note.is_final_candidate,
+                          },
+                          note.id,
+                        )
+                      : makeSolutionNote(note, note.id),
+                  ),
+                }
+              : topic,
+          ),
+        );
+        setSelectedSolutionTopicId(topicId);
+        setSelectedNodeId(`solution-${topicId}`);
+      };
+      const updateSolutionFinalComment = (topicId: string, noteId: string, value: string) => {
+        setSolutionTopics((prev) =>
+          prev.map((topic) =>
+            topic.group_id === topicId
+              ? {
+                  ...topic,
+                  notes: topic.notes.map((note) =>
+                    note.id === noteId
+                      ? makeSolutionNote(
+                          {
+                            ...note,
+                            final_comment: value,
+                          },
+                          note.id,
+                        )
+                      : makeSolutionNote(note, note.id),
+                  ),
+                }
+              : topic,
+          ),
+        );
+      };
+      const finalNotes = solutionTopics.flatMap((topic) =>
+        solutionTopicFinalNotes(topic).map((note) => ({
+          id: `${topic.group_id}-${note.id}`,
+          topicId: topic.group_id,
+          topicTitle: topic.topic,
+          text: note.text,
+          final_comment: note.final_comment || "",
+        })),
+      );
+      const rightDescriptors: CanvasNodeDescriptor[] = [];
+
+      if (activeSolutionTopic) {
+        const measuredPaneWidth = solutionRightPaneWidth || (isDesktopLayout ? 920 : 520);
+        const rightBaseX = Math.max(20, Math.min(44, Math.round(measuredPaneWidth * 0.045)));
+        const availableWidth = Math.max(300, measuredPaneWidth - rightBaseX * 2);
+        const solutionCanvasColumns = availableWidth >= 740 ? 2 : 1;
+        const rightColumnGap = solutionCanvasColumns > 1
+          ? Math.max(20, Math.min(36, Math.round(availableWidth * 0.04)))
+          : 0;
+        const rightCardWidth = solutionCanvasColumns > 1
+          ? Math.min(400, Math.floor((availableWidth - rightColumnGap) / 2))
+          : Math.min(520, availableWidth);
+        const rightContentWidth = solutionCanvasColumns > 1
+          ? rightCardWidth * 2 + rightColumnGap
+          : rightCardWidth;
+        const rightGapX = rightCardWidth + rightColumnGap;
+        const rightGapY = solutionCanvasColumns > 1 ? 18 : 14;
+        const cardLineChars = estimateSolutionCardLineChars(rightCardWidth);
+        const overviewHeight = solutionCanvasColumns > 1 ? 270 : 330;
+        const sectionHeaderHeight = solutionCanvasColumns > 1 ? 72 : 108;
+        const solutionSuggestionBusy = solutionSuggestionBusyTopicId === activeSolutionTopic.group_id;
+        let rightBaseY = 32;
+
+        rightDescriptors.push({
+          id: `solution-detail::${activeSolutionTopic.group_id}`,
+          position: { x: rightBaseX, y: rightBaseY },
+          positionSource: "computed",
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: rightContentWidth, minHeight: overviewHeight, padding: 0 },
+          draggable: false,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "solution-detail",
+              activeSolutionTopic.group_id,
+              activeSolutionTopic.topic,
+              activeSolutionTopic.conclusion,
+              activeSolutionTopic.problem_topic,
+              activeSolutionTopic.problem_insight,
+              activeSolutionTopic.problem_conclusion,
+              activeSolutionTopic.status,
+            ]),
+            label: makeSolutionOverviewNodeLabel(activeSolutionTopic),
+          },
+        });
+
+        rightBaseY += overviewHeight + 34;
+        rightDescriptors.push({
+          id: `solution-ai-header::${activeSolutionTopic.group_id}`,
+          position: { x: rightBaseX, y: rightBaseY },
+          positionSource: "computed",
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: rightContentWidth, minHeight: sectionHeaderHeight, padding: 0 },
+          draggable: false,
+          selectable: false,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "solution-ai-header",
+              activeSolutionTopic.group_id,
+              activeSolutionTopic.ai_suggestions.length,
+              activeSolutionTopic.ai_suggestions.filter((item) => item.status !== "selected").length,
+              solutionSuggestionBusy,
+            ]),
+            label: (
+              <div className="nopan flex h-full items-center justify-between border border-black/10 bg-white px-5 py-4 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">AI 추천 아이디어</p>
+                  <h4 className="mt-1 text-lg font-semibold text-slate-950">참고용 제안</h4>
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    className="nodrag nopan inline-flex cursor-pointer items-center gap-2 border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-70"
+                    disabled={solutionSuggestionBusy}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handleGenerateSolutionSuggestions(activeSolutionTopic.group_id);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    {solutionSuggestionBusy ? (
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" aria-hidden />
+                    ) : null}
+                    {solutionSuggestionBusy ? "생성 중" : "추천 생성"}
+                  </button>
+                  <button
+                    type="button"
+                    className="nodrag nopan inline-flex cursor-pointer items-center border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8]"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void handlePruneSolutionSuggestions(activeSolutionTopic.group_id);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    미채택 정리
+                  </button>
+                  <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                    {activeSolutionTopic.ai_suggestions.length}개
+                  </span>
+                </div>
+              </div>
+            ),
+          },
+        });
+
+        rightBaseY += sectionHeaderHeight + 14;
+        const suggestionEmptyText = solutionSuggestionBusy
+          ? "AI 추천 아이디어를 생성하는 중입니다."
+          : "아직 제안된 AI 추천 아이디어가 없습니다.";
+        const suggestionItems: SolutionAiSuggestionViewModel[] = activeSolutionTopic.ai_suggestions.length > 0
+          ? activeSolutionTopic.ai_suggestions
+          : [
+              makeSolutionAiSuggestion(
+                {
+                  id: "empty",
+                  text: suggestionEmptyText,
+                  status: "draft",
+                },
+                "empty",
+              ),
+            ];
+        const suggestionHeights = suggestionItems.map((suggestion) =>
+          suggestion.id === "empty"
+            ? 120
+            : 142 + Math.min(3, Math.max(0, estimateWrappedLines(suggestion.text, cardLineChars) - 2)) * 18,
+        );
+        const suggestionPositions = buildColumnPositions(
+          suggestionHeights,
+          solutionCanvasColumns,
+          rightGapX,
+          rightGapY,
+          rightBaseX,
+          rightBaseY,
+        );
+        suggestionItems.forEach((suggestion, index) => {
+          const isEmpty = suggestion.id === "empty";
+          rightDescriptors.push({
+            id: isEmpty
+              ? `solution-ai::${activeSolutionTopic.group_id}::empty`
+              : `solution-ai::${activeSolutionTopic.group_id}::${suggestion.id}`,
+            position: suggestionPositions[index],
+            positionSource: "computed",
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+            style: { width: rightCardWidth, minHeight: suggestionHeights[index], padding: 0 },
+            draggable: false,
+            selectable: !isEmpty,
+            data: {
+              contentSignature: buildNodeContentSignature([
+                "solution-ai",
+                activeSolutionTopic.group_id,
+                suggestion.id,
+                suggestion.text,
+                suggestion.status,
+                solutionSuggestionBusy,
+              ]),
+              label: isEmpty ? (
+                <div className="nopan flex h-full min-h-[120px] items-center border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                  {suggestionEmptyText}
+                </div>
+              ) : makeSolutionAiSuggestionNodeLabel(
+                suggestion,
+                index,
+                (event) => {
+                  event.stopPropagation();
+                  adoptSolutionSuggestion(activeSolutionTopic.group_id, suggestion.id);
+                },
+              ),
+            },
+          });
+        });
+
+        const suggestionBottom = suggestionPositions.reduce(
+          (bottom, position, index) => Math.max(bottom, position.y + suggestionHeights[index]),
+          rightBaseY + 120,
+        );
+        rightBaseY = suggestionBottom + 34;
+        rightDescriptors.push({
+          id: `solution-note-header::${activeSolutionTopic.group_id}`,
+          position: { x: rightBaseX, y: rightBaseY },
+          positionSource: "computed",
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: rightContentWidth, minHeight: sectionHeaderHeight, padding: 0 },
+          draggable: false,
+          selectable: false,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "solution-note-header",
+              activeSolutionTopic.group_id,
+              activeSolutionTopic.notes.length,
+            ]),
+            label: (
+              <div className="nopan flex h-full items-center justify-between border border-black/10 bg-white px-5 py-4 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-700">채택 카드</p>
+                  <h4 className="mt-1 text-lg font-semibold text-slate-950">회의에서 남길 해결책</h4>
+                </div>
+                <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+                  {activeSolutionTopic.notes.length}개
+                </span>
+              </div>
+            ),
+          },
+        });
+
+        rightBaseY += sectionHeaderHeight + 14;
+        const noteItems: SolutionNoteViewModel[] = activeSolutionTopic.notes.length > 0 ? activeSolutionTopic.notes : [];
+        const noteHeights = noteItems.map((note) =>
+          note.is_final_candidate
+            ? 240
+            : 146 + Math.min(3, Math.max(0, estimateWrappedLines(note.text, cardLineChars) - 2)) * 18,
+        );
+        const notePositions = buildColumnPositions(noteHeights, solutionCanvasColumns, rightGapX, rightGapY, rightBaseX, rightBaseY);
+        if (noteItems.length === 0) {
+          rightDescriptors.push({
+            id: `solution-note::${activeSolutionTopic.group_id}::empty`,
+            position: { x: rightBaseX, y: rightBaseY },
+            positionSource: "computed",
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+            style: { width: rightContentWidth, minHeight: 120, padding: 0 },
+            draggable: false,
+            selectable: false,
+            data: {
+              contentSignature: buildNodeContentSignature(["solution-note-empty", activeSolutionTopic.group_id]),
+              label: (
+                <div className="nopan flex h-full min-h-[120px] items-center border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                  AI 추천을 채택하거나 사용자 메모를 추가하면 이 영역에 카드로 쌓입니다.
+                </div>
+              ),
+            },
+          });
+        }
+        noteItems.forEach((note, index) => {
+          rightDescriptors.push({
+            id: `solution-note::${activeSolutionTopic.group_id}::${note.id}`,
+            position: notePositions[index],
+            positionSource: "computed",
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+            style: { width: rightCardWidth, minHeight: noteHeights[index], padding: 0 },
+            draggable: false,
+            data: {
+              contentSignature: buildNodeContentSignature([
+                "solution-note",
+                activeSolutionTopic.group_id,
+                note.id,
+                note.text,
+                note.source,
+                note.is_final_candidate,
+                note.final_comment,
+              ]),
+              label: makeSolutionNoteNodeLabel(
+                note,
+                index,
+                (event) => {
+                  event.stopPropagation();
+                  toggleSolutionFinalNote(activeSolutionTopic.group_id, note.id);
+                },
+                (value) => updateSolutionFinalComment(activeSolutionTopic.group_id, note.id, value),
+              ),
+            },
+          });
+        });
+
+        const noteBottom = noteItems.length > 0
+          ? notePositions.reduce((bottom, position, index) => Math.max(bottom, position.y + noteHeights[index]), rightBaseY)
+          : rightBaseY + 120;
+        rightBaseY = noteBottom + 18;
+        rightDescriptors.push({
+          id: `solution-composer::${activeSolutionTopic.group_id}`,
+          position: { x: rightBaseX, y: rightBaseY },
+          positionSource: "computed",
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: rightContentWidth, minHeight: 220, padding: 0 },
+          draggable: false,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "solution-composer",
+              activeSolutionTopic.group_id,
+              solutionNoteDraft,
+            ]),
+            label: makeSolutionComposerNodeLabel(
+              solutionNoteDraft,
+              setSolutionNoteDraft,
+              (event) => {
+                event.stopPropagation();
+                addSolutionUserNote(activeSolutionTopic.group_id);
+              },
+            ),
+          },
+        });
+
+        rightBaseY += 254;
+        rightDescriptors.push({
+          id: `solution-final-header::${activeSolutionTopic.group_id}`,
+          position: { x: rightBaseX, y: rightBaseY },
+          positionSource: "computed",
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: rightContentWidth, minHeight: sectionHeaderHeight, padding: 0 },
+          draggable: false,
+          selectable: false,
+          data: {
+            contentSignature: buildNodeContentSignature([
+              "solution-final-header",
+              activeSolutionTopic.group_id,
+              finalNotes.length,
+            ]),
+            label: (
+              <div className="nopan flex h-full items-center justify-between border border-black/10 bg-white px-5 py-4 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">최종 결론 모음</p>
+                  <h4 className="mt-1 text-lg font-semibold text-slate-950">표시된 해결책</h4>
+                </div>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                  {finalNotes.length}개
+                </span>
+              </div>
+            ),
+          },
+        });
+
+        rightBaseY += sectionHeaderHeight + 14;
+        const finalHeights = finalNotes.length > 0 ? finalNotes.map(() => 150) : [120];
+        const finalPositions = buildColumnPositions(finalHeights, solutionCanvasColumns, rightGapX, rightGapY, rightBaseX, rightBaseY);
+        if (finalNotes.length === 0) {
+          rightDescriptors.push({
+            id: `solution-final::${activeSolutionTopic.group_id}::empty`,
+            position: finalPositions[0],
+            positionSource: "computed",
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+            style: { width: rightContentWidth, minHeight: 120, padding: 0 },
+            draggable: false,
+            selectable: false,
+            data: {
+              contentSignature: buildNodeContentSignature(["solution-final-empty", activeSolutionTopic.group_id]),
+              label: (
+                <div className="nopan flex h-full min-h-[120px] items-center border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                  결론 후보를 최종 결론으로 표시하면 여기에서 전체 모아볼 수 있습니다.
+                </div>
+              ),
+            },
+          });
+        }
+        finalNotes.forEach((note, index) => {
+          rightDescriptors.push({
+            id: `solution-final::${note.topicId}::${note.id}`,
+            position: finalPositions[index],
+            positionSource: "computed",
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+            className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+            style: { width: rightCardWidth, minHeight: finalHeights[index], padding: 0 },
+            draggable: false,
+            data: {
+              contentSignature: buildNodeContentSignature([
+                "solution-final",
+                note.id,
+                note.topicId,
+                note.topicTitle,
+                note.text,
+                note.final_comment,
+                activeSolutionTopic.group_id === note.topicId,
+              ]),
+              label: makeSolutionFinalNoteNodeLabel(
+                note,
+                activeSolutionTopic.group_id === note.topicId,
+                (event) => {
+                  event.stopPropagation();
+                  setSelectedSolutionTopicId(note.topicId);
+                  setSelectedNodeId(`solution-${note.topicId}`);
+                },
+              ),
+            },
+          });
+        });
+      } else {
+        rightDescriptors.push({
+          id: "solution-empty::none",
+          position: { x: 80, y: 80 },
+          positionSource: "computed",
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+          className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
+          style: { width: 420, minHeight: 180, padding: 0 },
+          draggable: false,
+          selectable: false,
+          data: {
+            contentSignature: "solution-empty",
+            label: makeSolutionEmptyNodeLabel(),
+          },
+        });
+      }
 
       return {
         layoutSignature: buildNodeContentSignature([
           stage,
           ...solutionTopics.map((topic) => topic.group_id),
+          activeSolutionTopic?.group_id || "",
+          solutionNoteDraft,
+          solutionRightPaneWidth,
+          isDesktopLayout,
         ]),
-        nodeDescriptors: solutionTopics.map((topic, index) => {
+        nodeDescriptors: [
+          ...solutionTopics.map((topic, index) => {
           const nodeId = `solution-${topic.group_id}`;
           const selected = selectedSolutionTopicId === topic.group_id;
           const positionSource: CanvasNodeDescriptor["positionSource"] = "computed";
@@ -6585,7 +7578,7 @@ export default function MeetingCanvasTab({
             positionSource,
             sourcePosition: Position.Bottom,
             targetPosition: Position.Top,
-            className: "!border-0 !bg-transparent !p-0 !shadow-none",
+            className: "imms-solution-canvas-node !border-0 !bg-transparent !p-0 !shadow-none",
             style: { width: 360, minHeight: heights[index], borderRadius: 22, padding: 0 },
             data: {
               contentSignature: buildNodeContentSignature([
@@ -6613,7 +7606,9 @@ export default function MeetingCanvasTab({
               label: makeSolutionNodeLabel(topic, selected),
             },
           };
-        }),
+          }),
+          ...rightDescriptors,
+        ],
       };
     }
 
@@ -7337,6 +8332,8 @@ export default function MeetingCanvasTab({
     dropProblemGroupId,
     focusedCanvasItemId,
     getTopicCollapsed,
+    handleGenerateSolutionSuggestions,
+    handlePruneSolutionSuggestions,
     handleToggleTopicCollapsed,
     handleAttachPersonalNoteToProblemGroup,
     handleProblemIdeaDragEnd,
@@ -7358,7 +8355,11 @@ export default function MeetingCanvasTab({
     selectedProblemGroupId,
     selectedProblemSourceNodeId,
     selectedSolutionTopicId,
+    solutionNoteDraft,
+    solutionRightPaneWidth,
+    solutionSuggestionBusyTopicId,
     solutionTopics,
+    isDesktopLayout,
   ]);
 
   useEffect(() => {
@@ -10722,6 +11723,9 @@ export default function MeetingCanvasTab({
   const handleEndMeetingClick = async () => {
     await flushIdeaAssimilationBuffer("stage-change");
     await flushProblemDiscussionBuffer("stage-change");
+    if (solutionTopics.some((topic) => topic.ai_suggestions.some((suggestion) => suggestion.status !== "selected"))) {
+      await handlePruneSolutionSuggestions("", true);
+    }
     await onEndMeeting?.();
   };
 
@@ -10982,13 +11986,15 @@ export default function MeetingCanvasTab({
     : "그룹분류를 선택하면 왼쪽 캔버스가 해당 그룹으로 바뀝니다.";
   const solutionSplitNodes = useMemo(() => {
     if (stage !== "solution") {
-      return { left: [] as Node[] };
+      return { left: [] as Node[], right: [] as Node[] };
     }
+    const leftNodeIds = new Set(solutionTopics.map((topic) => `solution-${topic.group_id}`));
 
     return {
-      left: nodes.filter((node) => node.id.startsWith("solution-")),
+      left: nodes.filter((node) => leftNodeIds.has(node.id)),
+      right: nodes.filter((node) => extractSolutionDetailTopicIdFromNodeId(node.id)),
     };
-  }, [nodes, stage]);
+  }, [nodes, solutionTopics, stage]);
   const selectedIdeationSuggestions = selectedRootItemForIdeationCanvas?.ai_suggestions || [];
   const ideationSuggestionBusy =
     Boolean(selectedRootItemForIdeationCanvas) &&
@@ -11326,7 +12332,13 @@ export default function MeetingCanvasTab({
       setSelectedCanvasItemId("");
       setEditingProblemGroupId("");
     }
-    if (node.id.startsWith("solution-")) {
+    const solutionDetailTopicId = extractSolutionDetailTopicIdFromNodeId(node.id);
+    if (solutionDetailTopicId) {
+      setSelectedSolutionTopicId(solutionDetailTopicId);
+      setSelectedProblemGroupId("");
+      setSelectedCanvasItemId("");
+      setEditingSolutionTopicId("");
+    } else if (node.id.startsWith("solution-")) {
       setSelectedSolutionTopicId(node.id.slice("solution-".length));
       setSelectedProblemGroupId("");
       setSelectedCanvasItemId("");
@@ -12684,7 +13696,7 @@ export default function MeetingCanvasTab({
                     </div>
                   </div>
 
-                  <div className="flex min-h-[420px] flex-col overflow-hidden bg-white">
+                  <div ref={solutionRightPaneRef} className="flex min-h-[420px] flex-col overflow-hidden bg-white">
                     <div className="shrink-0 border-b border-black/10 px-5 py-4">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
@@ -12717,201 +13729,33 @@ export default function MeetingCanvasTab({
                       </div>
                     </div>
 
-                    <div className="imms-overlay-scroll min-h-0 flex-1 overflow-y-auto bg-[#f5f6f8] p-[clamp(16px,2vw,28px)]">
-                      {selectedSolutionTopic ? (
-                        <div className="mx-auto flex max-w-[1120px] flex-col gap-5">
-                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-                            <div className="flex items-start justify-between gap-4">
-                              <div className="min-w-0">
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">해결 방향</p>
-                                <h4 className="mt-2 text-xl font-semibold leading-8 text-slate-950">
-                                  {selectedSolutionTopic.topic}
-                                </h4>
-                              </div>
-                              <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${problemGroupStatusTone(selectedSolutionTopic.status)}`}>
-                                {problemGroupStatusLabel(selectedSolutionTopic.status)}
-                              </span>
-                            </div>
-                            <p className="mt-4 text-base leading-7 text-[#4d4d4d]">
-                              {selectedSolutionTopic.conclusion || selectedSolutionTopic.problem_conclusion || "해결 방향이 아직 없습니다."}
-                            </p>
-                          </section>
-
-                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">AI 추천 아이디어</p>
-                                <h4 className="mt-1 text-lg font-semibold text-slate-950">참고용 제안</h4>
-                              </div>
-                              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                                {selectedSolutionTopic.ai_suggestions.length}개
-                              </span>
-                            </div>
-                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                              {selectedSolutionTopic.ai_suggestions.length > 0 ? (
-                                selectedSolutionTopic.ai_suggestions.map((idea, index) => (
-                                  <article
-                                    key={idea.id}
-                                    className={`border px-4 py-4 ${
-                                      idea.status === "selected"
-                                        ? "border-blue-200 bg-blue-50/70"
-                                        : "border-black/10 bg-[#fafafa]"
-                                    }`}
-                                  >
-                                    <div className="flex items-start justify-between gap-3">
-                                      <div className="min-w-0">
-                                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#777]">
-                                          AI 제안 {index + 1}
-                                        </p>
-                                        <p className={`mt-2 text-sm leading-6 ${idea.status === "selected" ? "text-blue-700" : "text-[#4d4d4d]"}`}>
-                                          {idea.text}
-                                        </p>
-                                      </div>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleAdoptAiSuggestion(selectedSolutionTopic.group_id, idea.id)}
-                                        disabled={idea.status === "selected"}
-                                        className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-60"
-                                      >
-                                        {idea.status === "selected" ? "채택됨" : "채택"}
-                                      </button>
-                                    </div>
-                                  </article>
-                                ))
-                              ) : (
-                                <p className="col-span-full border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
-                                  아직 제안된 AI 추천 아이디어가 없습니다.
-                                </p>
-                              )}
-                            </div>
-                          </section>
-
-                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-700">채택 카드</p>
-                                <h4 className="mt-1 text-lg font-semibold text-slate-950">회의에서 남길 해결책</h4>
-                              </div>
-                              <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
-                                {selectedSolutionTopic.notes.length}개
-                              </span>
-                            </div>
-                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                              {selectedSolutionTopic.notes.length > 0 ? (
-                                selectedSolutionTopic.notes.map((note, index) => (
-                                  <article key={note.id} className="border border-amber-100 bg-amber-50/70 px-4 py-4">
-                                    <div className="flex items-start justify-between gap-3">
-                                      <div className="min-w-0">
-                                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">
-                                          {note.source === "ai" ? `채택 메모 ${index + 1}` : `사용자 메모 ${index + 1}`}
-                                        </p>
-                                        <p className="mt-2 text-sm leading-6 text-slate-700">{note.text}</p>
-                                      </div>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleToggleFinalSolutionNote(selectedSolutionTopic.group_id, note.id)}
-                                        className={`shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-                                          note.is_final_candidate
-                                            ? "bg-slate-900 text-white"
-                                            : "border border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
-                                        }`}
-                                      >
-                                        {note.is_final_candidate ? "최종 결론" : "결론 후보"}
-                                      </button>
-                                    </div>
-                                    {note.is_final_candidate ? (
-                                      <textarea
-                                        value={note.final_comment || ""}
-                                        onChange={(event) =>
-                                          handleUpdateFinalSolutionComment(
-                                            selectedSolutionTopic.group_id,
-                                            note.id,
-                                            event.target.value,
-                                          )
-                                        }
-                                        placeholder="최종 결론에 붙일 설명을 입력합니다."
-                                        className="mt-3 min-h-[78px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
-                                      />
-                                    ) : null}
-                                  </article>
-                                ))
-                              ) : (
-                                <p className="col-span-full border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
-                                  AI 추천을 채택하거나 사용자 메모를 추가하면 이 영역에 카드로 쌓입니다.
-                                </p>
-                              )}
-                            </div>
-
-                            <div className="mt-4 border border-black/10 bg-[#fafafa] px-4 py-4">
-                              <p className="text-sm font-semibold text-slate-700">사용자 해결책 추가</p>
-                              <textarea
-                                value={solutionNoteDraft}
-                                onChange={(event) => setSolutionNoteDraft(event.target.value)}
-                                placeholder="직접 해결책 메모를 추가합니다."
-                                className="mt-3 min-h-[96px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
-                              />
-                              <button
-                                type="button"
-                                onClick={handleAddSolutionUserNote}
-                                className="mt-3 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
-                              >
-                                카드 추가
-                              </button>
-                            </div>
-                          </section>
-
-                          <section className="border border-black/10 bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">최종 결론 모음</p>
-                                <h4 className="mt-1 text-lg font-semibold text-slate-950">표시된 해결책</h4>
-                              </div>
-                              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-                                {allSolutionFinalNotes.length}개
-                              </span>
-                            </div>
-                            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-                              {allSolutionFinalNotes.length > 0 ? (
-                                allSolutionFinalNotes.map((note) => (
-                                  <button
-                                    key={note.id}
-                                    type="button"
-                                    onClick={() => {
-                                      setSelectedSolutionTopicId(note.topicId);
-                                      setSelectedNodeId(`solution-${note.topicId}`);
-                                    }}
-                                    className={`border px-4 py-3 text-left transition ${
-                                      note.topicId === selectedSolutionTopic.group_id
-                                        ? "border-slate-900 bg-white"
-                                        : "border-black/10 bg-[#fafafa] hover:bg-white"
-                                    }`}
-                                  >
-                                    <p className="text-sm font-semibold text-slate-700">{note.topicTitle}</p>
-                                    <p className="mt-2 text-sm leading-6 text-slate-700">{note.text}</p>
-                                    {note.final_comment ? (
-                                      <p className="mt-2 text-xs leading-5 text-slate-500">{note.final_comment}</p>
-                                    ) : null}
-                                  </button>
-                                ))
-                              ) : (
-                                <p className="col-span-full border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
-                                  결론 후보를 최종 결론으로 표시하면 여기에서 전체 모아볼 수 있습니다.
-                                </p>
-                              )}
-                            </div>
-                          </section>
-                        </div>
-                      ) : (
-                        <div className="flex h-full items-center justify-center px-6">
-                          <div className="max-w-[420px] border border-dashed border-black/10 bg-white px-6 py-8 text-center">
-                            <p className="text-base font-semibold text-slate-950">해결책 인사이트를 선택해 주세요</p>
-                            <p className="mt-2 text-sm leading-6 text-[#777]">
-                              왼쪽 인사이트를 클릭하면 AI 추천 아이디어와 채택 카드가 오른쪽에 표시됩니다.
-                            </p>
-                          </div>
-                        </div>
-                      )}
+                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
+                      <ReactFlow<Node, Edge>
+                        nodes={solutionSplitNodes.right}
+                        edges={[] as Edge[]}
+                        onInit={(instance) => {
+                          flowRef.current = instance;
+                        }}
+                        onNodeClick={handleCanvasNodeClick}
+                        onPaneClick={handleCanvasPaneClick}
+                        nodesConnectable={false}
+                        nodesDraggable={false}
+                        panOnDrag
+                        noPanClassName="nopan"
+                        minZoom={0.45}
+                        maxZoom={1.6}
+                        proOptions={{ hideAttribution: true }}
+                      >
+                        <MiniMap
+                          zoomable
+                          pannable
+                          maskColor="rgba(15, 23, 42, 0.08)"
+                          nodeColor="#047857"
+                        />
+                        <Controls />
+                      </ReactFlow>
                     </div>
+
                   </div>
                 </div>
               ) : (
