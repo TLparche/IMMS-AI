@@ -2682,7 +2682,14 @@ function makeSolutionNoteNodeLabel(
   note: SolutionNoteViewModel,
   index: number,
   onToggleFinal: (event: React.MouseEvent<HTMLButtonElement>) => void,
-  onCommentChange: (value: string) => void,
+  editing: boolean,
+  textDraft: string,
+  finalCommentDraft: string,
+  onStartEdit: (event: React.MouseEvent<HTMLButtonElement>) => void,
+  onTextDraftChange: (value: string) => void,
+  onFinalCommentDraftChange: (value: string) => void,
+  onSaveEdit: (event: React.MouseEvent<HTMLButtonElement>) => void,
+  onCancelEdit: (event: React.MouseEvent<HTMLButtonElement>) => void,
 ) {
   const sourceLabel = note.source === "ai" ? `AI 채택 카드 ${index + 1}` : `사용자 카드 ${index + 1}`;
   const shellClass = note.is_final_candidate
@@ -2703,28 +2710,70 @@ function makeSolutionNoteNodeLabel(
           <p className={`text-xs font-semibold uppercase tracking-[0.14em] ${labelClass}`}>
             {sourceLabel}
           </p>
-          <p className="mt-2 line-clamp-5 text-sm leading-6 text-slate-700">{note.text}</p>
+          {editing ? (
+            <textarea
+              value={textDraft}
+              onChange={(event) => onTextDraftChange(event.target.value)}
+              onPointerDown={(event) => event.stopPropagation()}
+              placeholder="해결책 카드 내용을 입력합니다."
+              className="nodrag mt-2 min-h-[92px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
+            />
+          ) : (
+            <p className="mt-2 line-clamp-5 text-sm leading-6 text-slate-700">{note.text}</p>
+          )}
         </div>
-        <button
-          type="button"
-          onClick={onToggleFinal}
-          className={`nodrag shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold transition ${
-            note.is_final_candidate
-              ? "bg-slate-900 text-white"
-              : "border border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
-          }`}
-        >
-          {note.is_final_candidate ? "최종 결론" : "결론 후보"}
-        </button>
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <button
+            type="button"
+            onClick={onToggleFinal}
+            className={`nodrag rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+              note.is_final_candidate
+                ? "bg-slate-900 text-white"
+                : "border border-black/10 bg-white text-[#4d4d4d] hover:bg-[#f5f6f8]"
+            }`}
+          >
+            {note.is_final_candidate ? "최종 결론" : "결론 후보"}
+          </button>
+          {editing ? (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={onCancelEdit}
+                className="nodrag rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#777] transition hover:bg-[#f5f6f8]"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={onSaveEdit}
+                className="nodrag rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-800"
+              >
+                저장
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onStartEdit}
+              className="nodrag rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8]"
+            >
+              편집
+            </button>
+          )}
+        </div>
       </div>
-      {note.is_final_candidate ? (
+      {note.is_final_candidate && editing ? (
         <textarea
-          value={note.final_comment || ""}
-          onChange={(event) => onCommentChange(event.target.value)}
+          value={finalCommentDraft}
+          onChange={(event) => onFinalCommentDraftChange(event.target.value)}
           onPointerDown={(event) => event.stopPropagation()}
           placeholder="최종 결론에 붙일 설명을 입력합니다."
           className="nodrag mt-3 min-h-[72px] w-full rounded-xl border border-black/10 bg-white px-3 py-3 text-sm leading-6 text-slate-700 focus:border-black/30 focus:outline-none"
         />
+      ) : note.is_final_candidate ? (
+        <p className="mt-3 rounded-xl border border-black/10 bg-white px-3 py-3 text-xs leading-5 text-slate-500">
+          {note.final_comment || "최종 결론 설명은 편집을 눌러 추가할 수 있습니다."}
+        </p>
       ) : null}
     </article>
   );
@@ -3375,6 +3424,98 @@ function pruneUnselectedSolutionSuggestions(
   return { topics: nextTopics, removedCount };
 }
 
+function makeSolutionNoteEditKey(topicId: string, noteId: string) {
+  return `${topicId}::${noteId}`;
+}
+
+function parseSolutionNoteEditKey(key: string) {
+  const [topicId = "", noteId = ""] = key.split("::");
+  return { topicId, noteId };
+}
+
+function applySolutionNoteDraft(
+  topics: SolutionTopicViewModel[],
+  editKey: string,
+  textDraft: string,
+  finalCommentDraft: string,
+): SolutionTopicViewModel[] {
+  const { topicId, noteId } = parseSolutionNoteEditKey(editKey);
+  if (!topicId || !noteId) return topics;
+
+  return topics.map((topic) =>
+    topic.group_id === topicId
+      ? {
+          ...topic,
+          notes: topic.notes.map((note) =>
+            note.id === noteId
+              ? makeSolutionNote(
+                  {
+                    ...note,
+                    text: textDraft.trim() || note.text,
+                    final_comment: note.is_final_candidate ? finalCommentDraft : note.final_comment,
+                  },
+                  note.id,
+                )
+              : makeSolutionNote(note, note.id),
+          ),
+        }
+      : topic,
+  );
+}
+
+function preserveEditingSolutionNoteDraft(
+  incomingTopics: SolutionTopicViewModel[],
+  currentTopics: SolutionTopicViewModel[],
+  editKey: string,
+  textDraft: string,
+  finalCommentDraft: string,
+): SolutionTopicViewModel[] {
+  const { topicId, noteId } = parseSolutionNoteEditKey(editKey);
+  if (!topicId || !noteId) return incomingTopics;
+
+  const currentTopic = currentTopics.find((topic) => topic.group_id === topicId);
+  const currentNote = currentTopic?.notes.find((note) => note.id === noteId);
+  if (!currentTopic || !currentNote) return incomingTopics;
+
+  let foundTopic = false;
+  let foundNote = false;
+  const draftNote = makeSolutionNote(
+    {
+      ...currentNote,
+      text: textDraft.trim() || currentNote.text,
+      final_comment: currentNote.is_final_candidate ? finalCommentDraft : currentNote.final_comment,
+    },
+    currentNote.id,
+  );
+
+  const nextTopics = incomingTopics.map((topic) => {
+    if (topic.group_id !== topicId) return topic;
+    foundTopic = true;
+    const nextNotes: SolutionNoteViewModel[] = topic.notes.map((note) => {
+      if (note.id !== noteId) return makeSolutionNote(note, note.id);
+      foundNote = true;
+      return makeSolutionNote(note, note.id);
+    });
+
+    return {
+      ...topic,
+      notes: foundNote ? nextNotes : [...nextNotes, draftNote],
+    };
+  });
+
+  if (foundTopic) return nextTopics;
+
+  return [
+    {
+      ...currentTopic,
+      notes: currentTopic.notes.map((note) =>
+        note.id === noteId ? draftNote : makeSolutionNote(note, note.id),
+      ),
+    },
+    ...nextTopics,
+  ];
+}
+
 function serializeSharedSolutionTopics(topics: SolutionTopicViewModel[]) {
   return topics.map((topic) => ({
     group_id: topic.group_id,
@@ -3705,6 +3846,9 @@ export default function MeetingCanvasTab({
   const [solutionTopicDraftConclusion, setSolutionTopicDraftConclusion] = useState("");
   const [solutionTopicDraftIdeas, setSolutionTopicDraftIdeas] = useState("");
   const [solutionNoteDraft, setSolutionNoteDraft] = useState("");
+  const [editingSolutionNoteKey, setEditingSolutionNoteKey] = useState("");
+  const [solutionNoteTextDraft, setSolutionNoteTextDraft] = useState("");
+  const [solutionNoteFinalCommentDraft, setSolutionNoteFinalCommentDraft] = useState("");
   const [importedState, setImportedState] = useState<MeetingState | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedCanvasItemId, setSelectedCanvasItemId] = useState("");
@@ -4050,6 +4194,9 @@ export default function MeetingCanvasTab({
     setEditingAgendaId("");
     setEditingCanvasItemId("");
     setEditingPersonalNoteId("");
+    setEditingSolutionNoteKey("");
+    setSolutionNoteTextDraft("");
+    setSolutionNoteFinalCommentDraft("");
     setSelectedProblemSourceNodeId("");
     setArmedCanvasTool(null);
     setLiveFlowHint("");
@@ -6480,6 +6627,23 @@ export default function MeetingCanvasTab({
       nextIncomingNodePositions = normalizeCanvasNodePositionsForComputedIdeation(nextIncomingNodePositions);
     }
 
+    const nextProblemGroups = hydrateProblemGroups(incomingSharedCanvasSync.problem_groups || [], problemGroups);
+    const incomingSolutionTopics = hydrateSolutionTopics(
+      incomingSharedCanvasSync.solution_topics || [],
+      nextProblemGroups,
+      solutionTopics,
+    );
+    const nextSolutionTopics =
+      incomingStage === "solution" && editingSolutionNoteKey
+        ? preserveEditingSolutionNoteDraft(
+            incomingSolutionTopics,
+            solutionTopics,
+            editingSolutionNoteKey,
+            solutionNoteTextDraft,
+            solutionNoteFinalCommentDraft,
+          )
+        : incomingSolutionTopics;
+
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       meeting_goal: incomingMeetingGoal,
       meeting_goal_context: incomingMeetingGoalContext,
@@ -6488,23 +6652,11 @@ export default function MeetingCanvasTab({
       canvas_items: nextIncomingCanvasItems,
       custom_groups: serializeCustomGroups(incomingCustomGroups),
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
-      solution_topics: serializeSharedSolutionTopics(
-        hydrateSolutionTopics(
-          incomingSharedCanvasSync.solution_topics || [],
-          hydrateProblemGroups(incomingSharedCanvasSync.problem_groups || []),
-        ),
-      ),
+      solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
       node_positions: nextIncomingNodePositions,
       imported_state: incomingSharedCanvasSync.imported_state || null,
     });
     applyingRemoteSharedSyncRef.current = true;
-
-    const nextProblemGroups = hydrateProblemGroups(incomingSharedCanvasSync.problem_groups || [], problemGroups);
-    const nextSolutionTopics = hydrateSolutionTopics(
-      incomingSharedCanvasSync.solution_topics || [],
-      nextProblemGroups,
-      solutionTopics,
-    );
 
     setProblemGroups(nextProblemGroups);
     setSolutionTopics(nextSolutionTopics);
@@ -6579,6 +6731,7 @@ export default function MeetingCanvasTab({
     canvasItemDraftTitle,
     canvasItems,
     editingCanvasItemId,
+    editingSolutionNoteKey,
     incomingSharedCanvasSync,
     meetingId,
     nodePositions,
@@ -6587,6 +6740,8 @@ export default function MeetingCanvasTab({
     problemGroups,
     selectedCanvasItemId,
     sharedSyncEnabled,
+    solutionNoteFinalCommentDraft,
+    solutionNoteTextDraft,
     solutionTopics,
     userId,
   ]);
@@ -6846,6 +7001,68 @@ export default function MeetingCanvasTab({
       stage,
     ],
   );
+
+  const handleStartSolutionNoteEdit = useCallback((topicId: string, note: SolutionNoteViewModel) => {
+    setEditingSolutionNoteKey(makeSolutionNoteEditKey(topicId, note.id));
+    setSolutionNoteTextDraft(note.text);
+    setSolutionNoteFinalCommentDraft(note.final_comment || "");
+  }, []);
+
+  const handleCancelSolutionNoteEdit = useCallback(() => {
+    setEditingSolutionNoteKey("");
+    setSolutionNoteTextDraft("");
+    setSolutionNoteFinalCommentDraft("");
+  }, []);
+
+  const handleSaveSolutionNoteEdit = useCallback(async () => {
+    if (!editingSolutionNoteKey) return;
+
+    const nextSolutionTopics = applySolutionNoteDraft(
+      solutionTopics,
+      editingSolutionNoteKey,
+      solutionNoteTextDraft,
+      solutionNoteFinalCommentDraft,
+    );
+
+    setSolutionTopics(nextSolutionTopics);
+    setEditingSolutionNoteKey("");
+    setSolutionNoteTextDraft("");
+    setSolutionNoteFinalCommentDraft("");
+    latestSharedWorkspaceRef.current = {
+      ...latestSharedWorkspaceRef.current,
+      stage,
+      solutionTopics: nextSolutionTopics,
+      importedState: persistedSharedImportedState,
+    };
+
+    if (sharedSyncEnabled) {
+      forceBroadcastSharedCanvas({
+        solutionTopics: nextSolutionTopics,
+      });
+
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
+          imported_state: persistedSharedImportedState,
+        }).catch((error) => {
+          console.error("Failed to save solution note edit:", error);
+        });
+      }
+    }
+
+    setActivityMessage("해결책 카드를 저장했습니다.");
+  }, [
+    editingSolutionNoteKey,
+    forceBroadcastSharedCanvas,
+    meetingId,
+    persistedSharedImportedState,
+    sharedSyncEnabled,
+    solutionNoteFinalCommentDraft,
+    solutionNoteTextDraft,
+    solutionTopics,
+    stage,
+  ]);
 
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
@@ -7117,28 +7334,6 @@ export default function MeetingCanvasTab({
         setSelectedSolutionTopicId(topicId);
         setSelectedNodeId(`solution-${topicId}`);
       };
-      const updateSolutionFinalComment = (topicId: string, noteId: string, value: string) => {
-        setSolutionTopics((prev) =>
-          prev.map((topic) =>
-            topic.group_id === topicId
-              ? {
-                  ...topic,
-                  notes: topic.notes.map((note) =>
-                    note.id === noteId
-                      ? makeSolutionNote(
-                          {
-                            ...note,
-                            final_comment: value,
-                          },
-                          note.id,
-                        )
-                      : makeSolutionNote(note, note.id),
-                  ),
-                }
-              : topic,
-          ),
-        );
-      };
       const finalNotes = solutionTopics.flatMap((topic) =>
         solutionTopicFinalNotes(topic).map((note) => ({
           id: `${topic.group_id}-${note.id}`,
@@ -7362,11 +7557,13 @@ export default function MeetingCanvasTab({
 
         rightBaseY += sectionHeaderHeight + 14;
         const noteItems: SolutionNoteViewModel[] = activeSolutionTopic.notes.length > 0 ? activeSolutionTopic.notes : [];
-        const noteHeights = noteItems.map((note) =>
-          note.is_final_candidate
+        const noteHeights = noteItems.map((note) => {
+          const editing = editingSolutionNoteKey === makeSolutionNoteEditKey(activeSolutionTopic.group_id, note.id);
+          if (editing) return note.is_final_candidate ? 360 : 282;
+          return note.is_final_candidate
             ? 240
-            : 146 + Math.min(3, Math.max(0, estimateWrappedLines(note.text, cardLineChars) - 2)) * 18,
-        );
+            : 146 + Math.min(3, Math.max(0, estimateWrappedLines(note.text, cardLineChars) - 2)) * 18;
+        });
         const notePositions = buildColumnPositions(noteHeights, solutionCanvasColumns, rightGapX, rightGapY, rightBaseX, rightBaseY);
         if (noteItems.length === 0) {
           rightDescriptors.push({
@@ -7390,6 +7587,8 @@ export default function MeetingCanvasTab({
           });
         }
         noteItems.forEach((note, index) => {
+          const noteEditKey = makeSolutionNoteEditKey(activeSolutionTopic.group_id, note.id);
+          const noteEditing = editingSolutionNoteKey === noteEditKey;
           rightDescriptors.push({
             id: `solution-note::${activeSolutionTopic.group_id}::${note.id}`,
             position: notePositions[index],
@@ -7408,6 +7607,9 @@ export default function MeetingCanvasTab({
                 note.source,
                 note.is_final_candidate,
                 note.final_comment,
+                noteEditing,
+                noteEditing ? solutionNoteTextDraft : "",
+                noteEditing ? solutionNoteFinalCommentDraft : "",
               ]),
               label: makeSolutionNoteNodeLabel(
                 note,
@@ -7416,7 +7618,23 @@ export default function MeetingCanvasTab({
                   event.stopPropagation();
                   toggleSolutionFinalNote(activeSolutionTopic.group_id, note.id);
                 },
-                (value) => updateSolutionFinalComment(activeSolutionTopic.group_id, note.id, value),
+                noteEditing,
+                noteEditing ? solutionNoteTextDraft : note.text,
+                noteEditing ? solutionNoteFinalCommentDraft : note.final_comment || "",
+                (event) => {
+                  event.stopPropagation();
+                  handleStartSolutionNoteEdit(activeSolutionTopic.group_id, note);
+                },
+                setSolutionNoteTextDraft,
+                setSolutionNoteFinalCommentDraft,
+                (event) => {
+                  event.stopPropagation();
+                  void handleSaveSolutionNoteEdit();
+                },
+                (event) => {
+                  event.stopPropagation();
+                  handleCancelSolutionNoteEdit();
+                },
               ),
             },
           });
@@ -8333,7 +8551,10 @@ export default function MeetingCanvasTab({
     focusedCanvasItemId,
     getTopicCollapsed,
     handleGenerateSolutionSuggestions,
+    handleCancelSolutionNoteEdit,
     handlePruneSolutionSuggestions,
+    handleSaveSolutionNoteEdit,
+    handleStartSolutionNoteEdit,
     handleToggleTopicCollapsed,
     handleAttachPersonalNoteToProblemGroup,
     handleProblemIdeaDragEnd,
@@ -8355,7 +8576,10 @@ export default function MeetingCanvasTab({
     selectedProblemGroupId,
     selectedProblemSourceNodeId,
     selectedSolutionTopicId,
+    editingSolutionNoteKey,
     solutionNoteDraft,
+    solutionNoteFinalCommentDraft,
+    solutionNoteTextDraft,
     solutionRightPaneWidth,
     solutionSuggestionBusyTopicId,
     solutionTopics,
@@ -11669,29 +11893,6 @@ export default function MeetingCanvasTab({
     );
   };
 
-  const handleUpdateFinalSolutionComment = (topicId: string, noteId: string, value: string) => {
-    setSolutionTopics((prev) =>
-      prev.map((topic) =>
-        topic.group_id === topicId
-          ? {
-              ...topic,
-              notes: topic.notes.map((note) =>
-                note.id === noteId
-                  ? makeSolutionNote(
-                      {
-                        ...note,
-                        final_comment: value,
-                      },
-                      note.id,
-                    )
-                  : makeSolutionNote(note, note.id),
-              ),
-            }
-          : topic,
-      ),
-    );
-  };
-
   const startPanelResize = (side: "left" | "right") => (event: React.MouseEvent<HTMLButtonElement>) => {
     if (!isDesktopLayout) return;
     resizeStateRef.current = {
@@ -12863,43 +13064,87 @@ export default function MeetingCanvasTab({
           </div>
           <div className="mt-4 space-y-3">
             {selectedSolutionTopic.notes.length > 0 ? (
-              selectedSolutionTopic.notes.map((note, index) => (
-                <div key={note.id} className="rounded-xl border border-amber-100 bg-amber-50/70 px-4 py-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-amber-700">
-                        {note.source === "ai" ? `채택 메모 ${index + 1}` : `사용자 메모 ${index + 1}`}
-                      </p>
-                      <p className="mt-2 text-base leading-7 text-slate-700">{note.text}</p>
+              selectedSolutionTopic.notes.map((note, index) => {
+                const noteEditKey = makeSolutionNoteEditKey(selectedSolutionTopic.group_id, note.id);
+                const noteEditing = editingSolutionNoteKey === noteEditKey;
+                return (
+                  <div key={note.id} className="rounded-xl border border-amber-100 bg-amber-50/70 px-4 py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-amber-700">
+                          {note.source === "ai" ? `채택 메모 ${index + 1}` : `사용자 메모 ${index + 1}`}
+                        </p>
+                        {noteEditing ? (
+                          <textarea
+                            value={solutionNoteTextDraft}
+                            onChange={(event) => setSolutionNoteTextDraft(event.target.value)}
+                            placeholder="해결책 카드 내용을 입력합니다."
+                            className="mt-2 min-h-[92px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-base leading-7 text-slate-700"
+                          />
+                        ) : (
+                          <p className="mt-2 text-base leading-7 text-slate-700">{note.text}</p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleFinalSolutionNote(selectedSolutionTopic.group_id, note.id)}
+                          className={`rounded-xl px-3 py-2 text-sm font-medium ${
+                            note.is_final_candidate
+                              ? "bg-slate-900 text-white"
+                              : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                          }`}
+                        >
+                          {note.is_final_candidate ? "최종 결론" : "결론 후보"}
+                        </button>
+                        {noteEditing ? (
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleCancelSolutionNoteEdit}
+                              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                            >
+                              취소
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleSaveSolutionNoteEdit()}
+                              className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                            >
+                              저장
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleStartSolutionNoteEdit(
+                                selectedSolutionTopic.group_id,
+                                makeSolutionNote(note, note.id),
+                              )
+                            }
+                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                          >
+                            편집
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => handleToggleFinalSolutionNote(selectedSolutionTopic.group_id, note.id)}
-                      className={`shrink-0 rounded-xl px-3 py-2 text-sm font-medium ${
-                        note.is_final_candidate
-                          ? "bg-slate-900 text-white"
-                          : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                      }`}
-                    >
-                      {note.is_final_candidate ? "최종 결론" : "결론 후보"}
-                    </button>
+                    {note.is_final_candidate && noteEditing ? (
+                      <textarea
+                        value={solutionNoteFinalCommentDraft}
+                        onChange={(event) => setSolutionNoteFinalCommentDraft(event.target.value)}
+                        placeholder="추가 설명을 입력할 수 있습니다."
+                        className="mt-3 min-h-[84px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700"
+                      />
+                    ) : note.is_final_candidate ? (
+                      <p className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-500">
+                        {note.final_comment || "최종 결론 설명은 편집을 눌러 추가할 수 있습니다."}
+                      </p>
+                    ) : null}
                   </div>
-                  {note.is_final_candidate ? (
-                    <textarea
-                      value={note.final_comment || ""}
-                      onChange={(event) =>
-                        handleUpdateFinalSolutionComment(
-                          selectedSolutionTopic.group_id,
-                          note.id,
-                          event.target.value,
-                        )
-                      }
-                      placeholder="추가 설명을 입력할 수 있습니다."
-                      className="mt-3 min-h-[84px] w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-700"
-                    />
-                  ) : null}
-                </div>
-              ))
+                );
+              })
             ) : (
               <p className="text-base leading-7 text-slate-500">아직 채택된 메모가 없습니다. AI 초안이나 사용자 메모를 추가해 보세요.</p>
             )}
