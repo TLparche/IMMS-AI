@@ -2899,6 +2899,7 @@ export default function MeetingCanvasTab({
   const [ideaCreateStack, setIdeaCreateStack] = useState(0);
   const [ideationSuggestionBusyRootId, setIdeationSuggestionBusyRootId] = useState("");
   const [ideationSuggestionCollapsedByRootId, setIdeationSuggestionCollapsedByRootId] = useState<Record<string, boolean>>({});
+  const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(false);
   const [showTranscriptCollection, setShowTranscriptCollection] = useState(false);
   const [sharedSyncEnabled, setSharedSyncEnabled] = useState(true);
   const [importOverrideActive, setImportOverrideActive] = useState(false);
@@ -10409,9 +10410,9 @@ export default function MeetingCanvasTab({
   };
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
-  const workspaceGridColumns = `clamp(200px, ${(leftPanelRatio * 100).toFixed(
-    2,
-  )}vw, 360px) minmax(0, 1fr) clamp(220px, ${(rightPanelRatio * 100).toFixed(2)}vw, 400px)`;
+  const workspaceGridColumns = rightDrawerCollapsed
+    ? "minmax(0, 1fr) clamp(2.75rem, 3.4vw, 3.25rem)"
+    : `minmax(0, 1fr) clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
   const selectedAgendaForIdeationCanvas = selectedAgendaId || agendaModels[0]?.id || "";
   const selectedRootItemForIdeationCanvas = useMemo(() => {
     if (stage !== "ideation" || !selectedCanvasItemId) return null;
@@ -11118,19 +11119,27 @@ export default function MeetingCanvasTab({
             </div>
 
         <div
-          className="grid flex-1 min-h-0 grid-cols-1 overflow-y-auto bg-black/10 xl:overflow-hidden xl:gap-px xl:border-x xl:border-b xl:border-black/10"
+          className="grid flex-1 min-h-0 grid-cols-1 overflow-y-auto bg-black/10 xl:grid-rows-[minmax(0,1fr)_minmax(0,1fr)] xl:overflow-hidden xl:gap-px xl:border-x xl:border-b xl:border-black/10"
           style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
-          <aside className="imms-side-panel imms-left-panel relative min-h-[min(34vh,420px)] border-b border-black/10 bg-[#f9f9f9] shadow-[inset_-1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:border-b-0">
+          <aside className={`imms-side-panel imms-left-panel relative order-2 min-h-[min(34vh,420px)] border-b border-black/10 bg-[#f9f9f9] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-start-1 xl:min-h-0 ${rightDrawerCollapsed ? "overflow-hidden" : "xl:border-b"}`}>
+            <button
+              type="button"
+              aria-label={rightDrawerCollapsed ? "오른쪽 패널 열기" : "오른쪽 패널 접기"}
+              onClick={() => setRightDrawerCollapsed((prev) => !prev)}
+              className={`absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center border border-black/10 bg-white text-sm font-bold text-[#4d4d4d] shadow-sm transition hover:bg-[#f5f6f8] ${rightDrawerCollapsed ? "left-2 right-auto" : ""}`}
+            >
+              {rightDrawerCollapsed ? "‹" : "›"}
+            </button>
             <button
               type="button"
               aria-label="왼쪽 패널 너비 조절"
               onMouseDown={startPanelResize("left")}
-              className="absolute right-[-12px] top-0 z-10 hidden h-full w-5 cursor-ew-resize xl:block"
+              className="hidden"
             >
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
-            <div className="imms-overlay-scroll h-full max-h-[min(48vh,500px)] overflow-y-auto px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] xl:max-h-none xl:overflow-y-auto">
+            <div className={`${rightDrawerCollapsed ? "hidden" : "imms-overlay-scroll h-full max-h-[min(48vh,500px)] overflow-y-auto px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] xl:max-h-none xl:overflow-y-auto"}`}>
             <div className="imms-side-panel-surface p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -12176,7 +12185,7 @@ export default function MeetingCanvasTab({
             </div>
           </aside>
 
-          <section ref={canvasSurfaceRef} className="relative flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:h-full xl:min-h-0 xl:border-b-0">
+          <section ref={canvasSurfaceRef} className="relative order-1 flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:col-start-1 xl:row-span-2 xl:row-start-1 xl:h-full xl:min-h-0 xl:border-b-0">
             <div className="relative grid min-h-[clamp(88px,12vh,135px)] shrink-0 grid-cols-1 divide-y divide-black/10 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] md:grid-cols-3 md:divide-x md:divide-y-0">
               <div className="pointer-events-none absolute left-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap gap-2">
                 <span className="rounded-full border border-blue-100 bg-blue-50/95 px-3 py-1 text-xs font-semibold text-blue-700 shadow-sm">
@@ -12216,7 +12225,7 @@ export default function MeetingCanvasTab({
               }}
             >
               {stage === "ideation" ? (
-                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(280px,0.38fr)_minmax(0,1fr)]">
+                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]">
                   <div
                     ref={ideationLeftPaneRef}
                     className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r"
@@ -12386,7 +12395,7 @@ export default function MeetingCanvasTab({
                                   );
                                 })
                               ) : (
-                                <div className="min-w-[280px] border border-dashed border-black/10 bg-[#fafafa] px-4 py-3 text-sm leading-6 text-[#777]">
+                                <div className="min-w-[min(17.5rem,80vw)] border border-dashed border-black/10 bg-[#fafafa] px-4 py-3 text-sm leading-6 text-[#777]">
                                   아직 추천 아이디어가 없습니다. `추천 생성`을 누르면 이 영역에 참고용 제안이 표시됩니다.
                                 </div>
                               )}
@@ -12429,7 +12438,7 @@ export default function MeetingCanvasTab({
                   </div>
                 </div>
               ) : stage === "solution" ? (
-                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(280px,0.36fr)_minmax(0,1fr)]">
+                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,36%)_minmax(0,1fr)]">
                   <div className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
                     <div className="shrink-0 border-b border-black/10 px-5 py-4">
                       <div className="flex items-start justify-between gap-3">
@@ -12922,7 +12931,7 @@ export default function MeetingCanvasTab({
             </div>
           </section>
 
-          <aside className="imms-side-panel imms-right-panel imms-overlay-scroll relative min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] overflow-y-auto bg-[#f9f9f9] px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:min-h-0 xl:max-h-none xl:overflow-y-auto">
+          <aside className={`imms-side-panel imms-right-panel relative order-3 min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] bg-[#f9f9f9] shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-start-2 xl:min-h-0 xl:max-h-none ${rightDrawerCollapsed ? "overflow-hidden px-0 py-0" : "imms-overlay-scroll overflow-y-auto px-[clamp(14px,1.5vw,20px)] py-[clamp(16px,2vh,24px)] xl:overflow-y-auto"}`}>
             <button
               type="button"
               aria-label="오른쪽 패널 너비 조절"
@@ -12931,6 +12940,12 @@ export default function MeetingCanvasTab({
             >
               <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-black/10" />
             </button>
+            {rightDrawerCollapsed ? (
+              <div className="flex h-full items-start justify-center pt-12">
+                <span className="[writing-mode:vertical-rl] text-xs font-semibold text-[#4d4d4d]">패널 열기</span>
+              </div>
+            ) : null}
+            <div className={rightDrawerCollapsed ? "hidden" : ""}>
             <section className="imms-side-panel-surface p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
@@ -13161,6 +13176,7 @@ export default function MeetingCanvasTab({
                 )}
               </div>
             </section>
+            </div>
           </aside>
         </div>
       </section>
