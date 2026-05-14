@@ -218,6 +218,7 @@ export interface CanvasProblemDefinitionGroup {
   conclusion_user_edited?: boolean;
   source_signature?: string;
   source_agenda_signatures?: Record<string, string>;
+  source_idea_signatures?: Record<string, string>;
 }
 
 export interface CanvasProblemDiscussionItem {
@@ -250,7 +251,10 @@ export interface CanvasProblemDefinitionResponse {
 
 export interface CanvasPersonalNote {
   id: string;
+  project_id?: string;
   agenda_id: string;
+  linked_canvas_item_id?: string;
+  linked_canvas_item_title?: string;
   kind: string;
   title: string;
   body: string;
@@ -266,11 +270,18 @@ export interface CanvasProblemConclusionResponse {
   conclusion: string;
 }
 
+export interface CanvasIdeationSuggestion {
+  id: string;
+  text: string;
+  status?: "draft" | "selected" | "dismissed" | string;
+}
+
 export interface CanvasWorkspaceItem {
   id: string;
   agenda_id: string;
   point_id?: string;
   kind: string;
+  status?: "discussion" | "confirmed" | "closed" | string;
   title: string;
   body: string;
   keywords?: string[];
@@ -291,6 +302,7 @@ export interface CanvasWorkspaceItem {
   ai_generated?: boolean;
   user_edited?: boolean;
   ai_pending?: boolean;
+  ai_suggestions?: CanvasIdeationSuggestion[];
   x?: number;
   y?: number;
 }
@@ -371,6 +383,7 @@ export interface CanvasWorkspaceProblemGroup {
   status?: "draft" | "review" | "final" | string;
   source_signature?: string;
   source_agenda_signatures?: Record<string, string>;
+  source_idea_signatures?: Record<string, string>;
 }
 
 export interface CanvasNodePosition {
@@ -402,6 +415,7 @@ export interface CanvasWorkspaceStateResponse {
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
   idea_create_stack?: number;
   idea_processed_utterance_ids?: string[];
@@ -427,6 +441,7 @@ export interface CanvasWorkspacePatchRequest {
   custom_groups?: CanvasCustomGroup[];
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
 }
@@ -448,6 +463,7 @@ export interface CanvasLocalState {
   stage?: "ideation" | "problem-definition" | "solution";
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
   import_override_active?: boolean;
@@ -482,8 +498,41 @@ export interface CanvasRealtimeSyncPayload {
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
+}
+
+export interface CanvasFinalSolutionSummaryItem {
+  id: string;
+  topic_id: string;
+  topic_no: number;
+  topic_title: string;
+  problem_topic: string;
+  problem_conclusion: string;
+  solution_conclusion: string;
+  note_id: string;
+  note_text: string;
+  final_comment: string;
+  source: "ai" | "user" | string;
+  source_ai_id?: string;
+  agenda_titles: string[];
+}
+
+export interface CanvasFinalSolutionSummaryTopic {
+  topic_id: string;
+  topic_no: number;
+  topic_title: string;
+  problem_topic: string;
+  solution_conclusion: string;
+  final_notes: CanvasFinalSolutionSummaryItem[];
+}
+
+export interface CanvasFinalSolutionSummary {
+  final_count: number;
+  topics: CanvasFinalSolutionSummaryTopic[];
+  items: CanvasFinalSolutionSummaryItem[];
+  markdown: string;
 }
 
 export interface MeetingGoalSuggestionResponse {
@@ -547,4 +596,12 @@ export interface CanvasSolutionStageResponse {
   warning?: string;
   generated_at: string;
   topics: CanvasSolutionTopicResponse[];
+}
+
+export interface CanvasIdeationSuggestionResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  suggestions: CanvasIdeationSuggestion[];
 }

@@ -114,11 +114,53 @@
   opacity: 0.72;
 }
 
+.react-flow__node.imms-solution-canvas-node {
+  text-align: left;
+}
+
+.react-flow__node.imms-solution-canvas-node .react-flow__handle {
+  display: none !important;
+}
+
 .imms-side-panel-surface {
   border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 16px;
   background: #ffffff;
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.imms-workspace-grid {
+  transition: grid-template-columns 430ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.imms-drawer-pane {
+  will-change: transform, opacity;
+  transition:
+    opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 430ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 215ms ease,
+    border-color 215ms ease;
+}
+
+.imms-drawer-rail-content {
+  will-change: transform, opacity;
+  transition:
+    opacity 240ms ease,
+    transform 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.imms-drawer-body {
+  will-change: transform, opacity;
+  scrollbar-width: none;
+  transition:
+    opacity 280ms ease,
+    transform 430ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.imms-drawer-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .imms-left-panel-detail > section {

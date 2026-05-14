@@ -781,6 +781,12 @@ async def websocket_endpoint(
                 'custom_groups': current_workspace.get('custom_groups') or [],
                 'problem_groups': current_workspace.get('problem_groups') or [],
                 'solution_topics': current_workspace.get('solution_topics') or [],
+                'final_solution_summary': current_workspace.get('final_solution_summary') or {
+                    'final_count': 0,
+                    'topics': [],
+                    'items': [],
+                    'markdown': '',
+                },
                 'node_positions': current_workspace.get('node_positions') or {},
                 'imported_state': current_workspace.get('imported_state'),
                 'meeting_goal': current_workspace.get('meeting_goal') or '',
