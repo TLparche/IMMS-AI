@@ -12070,11 +12070,6 @@ export default function MeetingCanvasTab({
     if (meetingId) {
       const finalSolutionSummary = buildFinalSolutionSummaryPayload(endingSolutionTopics);
       try {
-        console.info("[canvas final summary save]", {
-          meetingId,
-          finalCount: finalSolutionSummary.final_count,
-          topicCount: finalSolutionSummary.topics.length,
-        });
         await saveCanvasWorkspacePatch({
           meeting_id: meetingId,
           solution_topics: serializeSharedSolutionTopics(endingSolutionTopics),

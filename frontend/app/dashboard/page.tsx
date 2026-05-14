@@ -198,6 +198,7 @@ export default function DashboardPage() {
   const [selectedResultMeeting, setSelectedResultMeeting] = useState<Meeting | null>(null);
   const [resultSummaries, setResultSummaries] = useState<Record<string, CanvasFinalSolutionSummary | null>>({});
   const [resultSolutionTopics, setResultSolutionTopics] = useState<Record<string, CanvasSolutionTopicResponse[]>>({});
+  const [resultSavedAt, setResultSavedAt] = useState<Record<string, string>>({});
   const [resultErrors, setResultErrors] = useState<Record<string, string>>({});
   const [resultRebuildMessages, setResultRebuildMessages] = useState<Record<string, string>>({});
   const [resultLoadingMeetingId, setResultLoadingMeetingId] = useState<string | null>(null);
@@ -309,6 +310,7 @@ export default function DashboardPage() {
       const summary = workspace.final_solution_summary || null;
       setResultSummaries((prev) => ({ ...prev, [meeting.id]: summary }));
       setResultSolutionTopics((prev) => ({ ...prev, [meeting.id]: workspace.solution_topics || [] }));
+      setResultSavedAt((prev) => ({ ...prev, [meeting.id]: workspace.saved_at || "" }));
     } catch (error) {
       console.error("Failed to load meeting final result:", error);
       setResultSummaries((prev) => ({ ...prev, [meeting.id]: null }));
@@ -358,6 +360,7 @@ export default function DashboardPage() {
 
         if (hasFinalResult(workspace.final_solution_summary)) {
           setResultSummaries((prev) => ({ ...prev, [meeting.id]: workspace.final_solution_summary || null }));
+          setResultSavedAt((prev) => ({ ...prev, [meeting.id]: workspace.saved_at || "" }));
           setResultRebuildMessages((prev) => ({ ...prev, [meeting.id]: "이미 저장된 최종 결과를 다시 불러왔습니다." }));
           return;
         }
@@ -372,11 +375,12 @@ export default function DashboardPage() {
         return;
       }
 
-      await saveCanvasWorkspacePatch({
+      const savedWorkspace = await saveCanvasWorkspacePatch({
         meeting_id: meeting.id,
         final_solution_summary: rebuiltSummary,
       });
       setResultSummaries((prev) => ({ ...prev, [meeting.id]: rebuiltSummary }));
+      setResultSavedAt((prev) => ({ ...prev, [meeting.id]: savedWorkspace.saved_at || new Date().toISOString() }));
       setResultRebuildMessages((prev) => ({
         ...prev,
         [meeting.id]: `최종 결과 ${rebuiltSummary.final_count}개를 재구성해 저장했습니다.`,
@@ -426,6 +430,7 @@ export default function DashboardPage() {
   const selectedResultSummary = selectedResultMeeting ? resultSummaries[selectedResultMeeting.id] : null;
   const selectedResultError = selectedResultMeeting ? resultErrors[selectedResultMeeting.id] : "";
   const selectedResultRebuildMessage = selectedResultMeeting ? resultRebuildMessages[selectedResultMeeting.id] : "";
+  const selectedResultSavedAt = selectedResultMeeting ? resultSavedAt[selectedResultMeeting.id] : "";
   const selectedResultLoading = selectedResultMeeting ? resultLoadingMeetingId === selectedResultMeeting.id : false;
   const selectedResultRebuilding = selectedResultMeeting ? resultRebuildingMeetingId === selectedResultMeeting.id : false;
   const selectedResultTopics = getFinalResultTopics(selectedResultSummary);
@@ -617,6 +622,7 @@ export default function DashboardPage() {
                   <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-white/70">
                     <span>생성 {formatDashboardDateTime(selectedResultMeeting.created_at)}</span>
                     <span>종료 {formatDashboardDateTime(selectedResultMeeting.ended_at)}</span>
+                    <span>결과 저장 {formatDashboardDateTime(selectedResultSavedAt)}</span>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
