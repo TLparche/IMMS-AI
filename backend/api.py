@@ -393,6 +393,9 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
         "custom_groups": copy.deepcopy(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(
+            workspace.get("final_solution_summary")
+        ),
         "node_positions": _normalize_canvas_node_positions(workspace.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
@@ -430,6 +433,9 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         "custom_groups": copy.deepcopy(shared_state.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(
+            shared_state.get("final_solution_summary")
+        ),
         "node_positions": _normalize_canvas_node_positions(shared_state.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(shared_state.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
@@ -567,6 +573,81 @@ def _normalize_canvas_workspace_solution_topics(
         for topic in (topics or [])
         if _safe_text(topic.group_id) and _safe_text(topic.topic)
     ]
+
+
+def _normalize_canvas_final_solution_summary(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {
+            "final_count": 0,
+            "topics": [],
+            "items": [],
+            "markdown": "",
+        }
+
+    def normalize_item(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        note_text = _safe_text(item.get("note_text") or item.get("text"))
+        note_id = _safe_text(item.get("note_id") or item.get("id"))
+        topic_id = _safe_text(item.get("topic_id") or item.get("topicId"))
+        if not note_text and not note_id:
+            return None
+        return {
+            "id": _safe_text(item.get("id") or f"{topic_id}::{note_id}"),
+            "topic_id": topic_id,
+            "topic_no": _safe_nonnegative_int(item.get("topic_no") or item.get("topicNo")),
+            "topic_title": _safe_text(item.get("topic_title") or item.get("topicTitle")),
+            "problem_topic": _safe_text(item.get("problem_topic") or item.get("problemTopic")),
+            "problem_conclusion": _safe_text(item.get("problem_conclusion") or item.get("problemConclusion")),
+            "solution_conclusion": _safe_text(item.get("solution_conclusion") or item.get("solutionConclusion")),
+            "note_id": note_id,
+            "note_text": note_text,
+            "final_comment": _safe_text(item.get("final_comment") or item.get("finalComment")),
+            "source": _safe_text(item.get("source"), "user"),
+            "source_ai_id": _safe_text(item.get("source_ai_id") or item.get("sourceAiId")),
+            "agenda_titles": [
+                _safe_text(value)
+                for value in (item.get("agenda_titles") or item.get("agendaTitles") or [])
+                if _safe_text(value)
+            ][:30],
+        }
+
+    topics: list[dict[str, Any]] = []
+    flat_items: list[dict[str, Any]] = []
+    for topic in raw.get("topics") or []:
+        if not isinstance(topic, dict):
+            continue
+        final_notes = [
+            normalized
+            for normalized in (normalize_item(item) for item in (topic.get("final_notes") or topic.get("finalNotes") or []))
+            if normalized
+        ]
+        topic_id = _safe_text(topic.get("topic_id") or topic.get("topicId"))
+        topic_payload = {
+            "topic_id": topic_id,
+            "topic_no": _safe_nonnegative_int(topic.get("topic_no") or topic.get("topicNo")),
+            "topic_title": _safe_text(topic.get("topic_title") or topic.get("topicTitle")),
+            "problem_topic": _safe_text(topic.get("problem_topic") or topic.get("problemTopic")),
+            "solution_conclusion": _safe_text(topic.get("solution_conclusion") or topic.get("solutionConclusion")),
+            "final_notes": final_notes,
+        }
+        if final_notes or topic_payload["topic_title"]:
+            topics.append(topic_payload)
+            flat_items.extend(final_notes)
+
+    explicit_items = [
+        normalized
+        for normalized in (normalize_item(item) for item in (raw.get("items") or []))
+        if normalized
+    ]
+    items = explicit_items or flat_items
+
+    return {
+        "final_count": len(items),
+        "topics": topics,
+        "items": items,
+        "markdown": _safe_text(raw.get("markdown")),
+    }
 
 
 def _normalize_refined_utterances(
@@ -833,6 +914,9 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
         normalized["stage"] = _normalize_canvas_stage(payload.get("stage"))
         normalized["problem_groups"] = copy.deepcopy(payload.get("problem_groups") or [])
         normalized["solution_topics"] = copy.deepcopy(payload.get("solution_topics") or [])
+        normalized["final_solution_summary"] = _normalize_canvas_final_solution_summary(
+            payload.get("final_solution_summary")
+        )
         normalized["node_positions"] = _normalize_canvas_node_positions(payload.get("node_positions") or {})
         normalized["imported_state"] = (
             copy.deepcopy(payload.get("imported_state"))
@@ -855,6 +939,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
         "custom_groups": _normalize_canvas_custom_groups(source.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(source.get("final_solution_summary")),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(source.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
@@ -889,6 +974,9 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "custom_groups": _normalize_canvas_custom_groups(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(
+            workspace.get("final_solution_summary")
+        ),
         "node_positions": _normalize_canvas_node_positions(workspace.get("node_positions") or {}),
         "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
         "idea_processed_utterance_ids": [
@@ -1104,6 +1192,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     workspace.setdefault("custom_groups", [])
     workspace.setdefault("problem_groups", [])
     workspace.setdefault("solution_topics", [])
+    workspace.setdefault("final_solution_summary", _normalize_canvas_final_solution_summary({}))
     workspace.setdefault("node_positions", {})
     workspace.setdefault("idea_create_stack", 0)
     workspace.setdefault("idea_processed_utterance_ids", [])
@@ -1994,6 +2083,7 @@ class CanvasWorkspaceStateInput(BaseModel):
     custom_groups: list[CanvasCustomGroupInput] = Field(default_factory=list)
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
+    final_solution_summary: dict[str, Any] = Field(default_factory=dict)
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
     imported_state: dict[str, Any] | None = None
 
@@ -2008,6 +2098,7 @@ class CanvasWorkspacePatchInput(BaseModel):
     custom_groups: list[CanvasCustomGroupInput] | None = None
     problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
+    final_solution_summary: dict[str, Any] | None = None
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
     imported_state: dict[str, Any] | None = None
 
@@ -9204,6 +9295,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
     workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
+    workspace["final_solution_summary"] = _normalize_canvas_final_solution_summary(payload.final_solution_summary)
     workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
     workspace["imported_state"] = (
         copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
@@ -9255,6 +9347,10 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
     if "solution_topics" in provided_fields:
         workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
+    if "final_solution_summary" in provided_fields:
+        workspace["final_solution_summary"] = _normalize_canvas_final_solution_summary(
+            payload.final_solution_summary
+        )
     if "node_positions" in provided_fields:
         workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions or {})
     if "imported_state" in provided_fields:

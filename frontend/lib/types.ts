@@ -415,6 +415,7 @@ export interface CanvasWorkspaceStateResponse {
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
   idea_create_stack?: number;
   idea_processed_utterance_ids?: string[];
@@ -440,6 +441,7 @@ export interface CanvasWorkspacePatchRequest {
   custom_groups?: CanvasCustomGroup[];
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
 }
@@ -461,6 +463,7 @@ export interface CanvasLocalState {
   stage?: "ideation" | "problem-definition" | "solution";
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
   import_override_active?: boolean;
@@ -495,8 +498,41 @@ export interface CanvasRealtimeSyncPayload {
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
   solution_topics: CanvasSolutionTopicResponse[];
+  final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
+}
+
+export interface CanvasFinalSolutionSummaryItem {
+  id: string;
+  topic_id: string;
+  topic_no: number;
+  topic_title: string;
+  problem_topic: string;
+  problem_conclusion: string;
+  solution_conclusion: string;
+  note_id: string;
+  note_text: string;
+  final_comment: string;
+  source: "ai" | "user" | string;
+  source_ai_id?: string;
+  agenda_titles: string[];
+}
+
+export interface CanvasFinalSolutionSummaryTopic {
+  topic_id: string;
+  topic_no: number;
+  topic_title: string;
+  problem_topic: string;
+  solution_conclusion: string;
+  final_notes: CanvasFinalSolutionSummaryItem[];
+}
+
+export interface CanvasFinalSolutionSummary {
+  final_count: number;
+  topics: CanvasFinalSolutionSummaryTopic[];
+  items: CanvasFinalSolutionSummaryItem[];
+  markdown: string;
 }
 
 export interface MeetingGoalSuggestionResponse {

@@ -41,6 +41,7 @@ import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
   CanvasCustomGroup,
+  CanvasFinalSolutionSummary,
   CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
@@ -147,6 +148,7 @@ type WorkspaceFieldSignatures = {
   custom_groups: string;
   problem_groups: string;
   solution_topics: string;
+  final_solution_summary: string;
   node_positions: string;
   imported_state: string;
 };
@@ -230,6 +232,7 @@ function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
     custom_groups: "",
     problem_groups: "",
     solution_topics: "",
+    final_solution_summary: "",
     node_positions: "",
     imported_state: "",
   };
@@ -272,6 +275,55 @@ function buildWorkspaceSolutionTopicsPayload(topics: SolutionTopicViewModel[]) {
     ai_suggestions: topic.ai_suggestions,
     notes: topic.notes,
   }));
+}
+
+function buildFinalSolutionSummaryPayload(topics: SolutionTopicViewModel[]): CanvasFinalSolutionSummary {
+  const summaryTopics = topics
+    .map((topic) => {
+      const finalNotes = solutionTopicFinalNotes(topic).map((note) => ({
+        id: `${topic.group_id}::${note.id}`,
+        topic_id: topic.group_id,
+        topic_no: topic.topic_no,
+        topic_title: topic.topic,
+        problem_topic: topic.problem_topic || "",
+        problem_conclusion: topic.problem_conclusion || "",
+        solution_conclusion: topic.conclusion || "",
+        note_id: note.id,
+        note_text: note.text,
+        final_comment: note.final_comment || "",
+        source: note.source || "user",
+        source_ai_id: note.source_ai_id || "",
+        agenda_titles: topic.agenda_titles || [],
+      }));
+
+      return {
+        topic_id: topic.group_id,
+        topic_no: topic.topic_no,
+        topic_title: topic.topic,
+        problem_topic: topic.problem_topic || "",
+        solution_conclusion: topic.conclusion || "",
+        final_notes: finalNotes,
+      };
+    })
+    .filter((topic) => topic.final_notes.length > 0);
+  const items = summaryTopics.flatMap((topic) => topic.final_notes);
+  const markdown = summaryTopics
+    .map((topic) => {
+      const title = topic.topic_title || `해결책 ${topic.topic_no}`;
+      const lines = topic.final_notes.map((note) => {
+        const comment = note.final_comment ? `\n  - 설명: ${note.final_comment}` : "";
+        return `- ${note.note_text}${comment}`;
+      });
+      return [`## ${title}`, ...lines].join("\n");
+    })
+    .join("\n\n");
+
+  return {
+    final_count: items.length,
+    topics: summaryTopics,
+    items,
+    markdown,
+  };
 }
 
 function normalizeRefinedUtterances(
@@ -372,6 +424,7 @@ function buildWorkspaceFieldSignatures(input: {
     custom_groups: JSON.stringify(serializeCustomGroups(input.customGroups)),
     problem_groups: JSON.stringify(buildWorkspaceProblemGroupsPayload(input.problemGroups)),
     solution_topics: JSON.stringify(buildWorkspaceSolutionTopicsPayload(input.solutionTopics)),
+    final_solution_summary: JSON.stringify(buildFinalSolutionSummaryPayload(input.solutionTopics)),
     node_positions: JSON.stringify(normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions)),
     imported_state: JSON.stringify(input.importedState || null),
   };
@@ -400,6 +453,7 @@ function buildFullWorkspacePatchPayload(input: {
     custom_groups: serializeCustomGroups(input.customGroups),
     problem_groups: buildWorkspaceProblemGroupsPayload(input.problemGroups),
     solution_topics: buildWorkspaceSolutionTopicsPayload(input.solutionTopics),
+    final_solution_summary: buildFinalSolutionSummaryPayload(input.solutionTopics),
     node_positions: normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions),
     imported_state: input.importedState,
   };
@@ -3543,6 +3597,7 @@ function buildSharedCanvasSignature(payload: {
   custom_groups?: unknown[];
   problem_groups: unknown[];
   solution_topics: unknown[];
+  final_solution_summary?: unknown;
   node_positions: CanvasNodePositionsByStage;
   imported_state: MeetingState | null;
 }) {
@@ -4469,6 +4524,7 @@ export default function MeetingCanvasTab({
           custom_groups: serializeCustomGroups(nextCustomGroups),
           problem_groups: nextGroups,
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
+          final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
           node_positions: nextNodePositions,
           imported_state: nextImportedState,
         });
@@ -4534,6 +4590,7 @@ export default function MeetingCanvasTab({
           custom_groups: [],
           problem_groups: [],
           solution_topics: [],
+          final_solution_summary: buildFinalSolutionSummaryPayload([]),
           node_positions: {},
           imported_state: null,
         });
@@ -4752,6 +4809,7 @@ export default function MeetingCanvasTab({
         custom_groups: serializeCustomGroups(overrides?.customGroups ?? customGroups),
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
+        final_solution_summary: buildFinalSolutionSummaryPayload(overrides?.solutionTopics ?? solutionTopics),
         node_positions: normalizeCanvasNodePositionsForComputedIdeation(overrides?.nodePositions ?? nodePositions),
         imported_state:
           overrides && "importedState" in overrides
@@ -4773,6 +4831,7 @@ export default function MeetingCanvasTab({
         custom_groups: snapshot.custom_groups,
         problem_groups: snapshot.problem_groups,
         solution_topics: snapshot.solution_topics,
+        final_solution_summary: snapshot.final_solution_summary,
         node_positions: snapshot.node_positions,
         imported_state: snapshot.imported_state,
       });
@@ -6028,6 +6087,7 @@ export default function MeetingCanvasTab({
       custom_groups?: ReturnType<typeof serializeCustomGroups>;
       problem_groups?: ReturnType<typeof buildWorkspaceProblemGroupsPayload>;
       solution_topics?: ReturnType<typeof buildWorkspaceSolutionTopicsPayload>;
+      final_solution_summary?: CanvasFinalSolutionSummary;
       node_positions?: CanvasNodePositionsByStage;
       imported_state?: MeetingState | null;
     } = {
@@ -6067,6 +6127,7 @@ export default function MeetingCanvasTab({
     }
     if (sharedSyncEnabled && nextSignatures.solution_topics !== previousSignatures.solution_topics) {
       patch.solution_topics = nextSolutionTopicsPayload;
+      patch.final_solution_summary = buildFinalSolutionSummaryPayload(solutionTopics);
       hasChanges = true;
     }
     if (sharedSyncEnabled && nextSignatures.node_positions !== previousSignatures.node_positions) {
@@ -6151,6 +6212,7 @@ export default function MeetingCanvasTab({
             stage,
             problem_groups: serializeSharedProblemGroups(problemGroups),
             solution_topics: serializeSharedSolutionTopics(solutionTopics),
+            final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics),
             node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
             imported_state: persistedSharedImportedState,
             import_override_active: importOverrideActive,
@@ -6218,6 +6280,7 @@ export default function MeetingCanvasTab({
       custom_groups: serializeCustomGroups(customGroups),
       problem_groups: serializeSharedProblemGroups(problemGroups),
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
+      final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics),
       node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       imported_state: persistedSharedImportedState,
     }),
@@ -6653,6 +6716,7 @@ export default function MeetingCanvasTab({
       custom_groups: serializeCustomGroups(incomingCustomGroups),
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
       solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
+      final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
       node_positions: nextIncomingNodePositions,
       imported_state: incomingSharedCanvasSync.imported_state || null,
     });
@@ -6815,6 +6879,7 @@ export default function MeetingCanvasTab({
         custom_groups: sharedCanvasSnapshot.custom_groups,
         problem_groups: sharedCanvasSnapshot.problem_groups,
         solution_topics: sharedCanvasSnapshot.solution_topics,
+        final_solution_summary: sharedCanvasSnapshot.final_solution_summary,
         node_positions: sharedCanvasSnapshot.node_positions,
         imported_state: sharedCanvasSnapshot.imported_state,
       });
@@ -6977,6 +7042,7 @@ export default function MeetingCanvasTab({
           const patch = {
             meeting_id: meetingId,
             solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
+            final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
             imported_state: persistedSharedImportedState,
           };
           if (persistImmediately) {
@@ -7044,6 +7110,7 @@ export default function MeetingCanvasTab({
         void saveCanvasWorkspacePatch({
           meeting_id: meetingId,
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
+          final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
           imported_state: persistedSharedImportedState,
         }).catch((error) => {
           console.error("Failed to save solution note edit:", error);
@@ -7063,6 +7130,22 @@ export default function MeetingCanvasTab({
     solutionTopics,
     stage,
   ]);
+
+  const handleCopyFinalSolutionMarkdown = useCallback(async () => {
+    const markdown = buildFinalSolutionSummaryPayload(solutionTopics).markdown.trim();
+    if (!markdown) {
+      setActivityMessage("복사할 최종 해결책 결론이 없습니다.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setActivityMessage("최종 해결책 결론을 마크다운으로 복사했습니다.");
+    } catch (error) {
+      console.error("Failed to copy final solution markdown:", error);
+      setActivityMessage("브라우저 권한 문제로 마크다운 복사에 실패했습니다.");
+    }
+  }, [solutionTopics]);
 
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
@@ -8745,6 +8828,10 @@ export default function MeetingCanvasTab({
   const selectedSolutionTopic = useMemo(
     () => solutionTopics.find((topic) => topic.group_id === selectedSolutionTopicId) || solutionTopics[0] || null,
     [selectedSolutionTopicId, solutionTopics],
+  );
+  const finalSolutionSummary = useMemo(
+    () => buildFinalSolutionSummaryPayload(solutionTopics),
+    [solutionTopics],
   );
   const allSolutionFinalNotes = useMemo(
     () =>
@@ -11924,8 +12011,21 @@ export default function MeetingCanvasTab({
   const handleEndMeetingClick = async () => {
     await flushIdeaAssimilationBuffer("stage-change");
     await flushProblemDiscussionBuffer("stage-change");
+    let endingSolutionTopics = solutionTopics;
     if (solutionTopics.some((topic) => topic.ai_suggestions.some((suggestion) => suggestion.status !== "selected"))) {
-      await handlePruneSolutionSuggestions("", true);
+      endingSolutionTopics = await handlePruneSolutionSuggestions("", true);
+    }
+    if (meetingId && sharedSyncEnabled) {
+      try {
+        await saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          solution_topics: serializeSharedSolutionTopics(endingSolutionTopics),
+          final_solution_summary: buildFinalSolutionSummaryPayload(endingSolutionTopics),
+          imported_state: persistedSharedImportedState,
+        });
+      } catch (error) {
+        console.error("Failed to save final solution summary before ending meeting:", error);
+      }
     }
     await onEndMeeting?.();
   };
@@ -13170,10 +13270,25 @@ export default function MeetingCanvasTab({
 
         <section className="border-b border-slate-200/80 py-6">
           <div className="flex items-center justify-between gap-3">
-            <h4 className="text-lg font-semibold text-slate-900">최종 결론 모음</h4>
-            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-              {allSolutionFinalNotes.length}개
-            </span>
+            <div>
+              <h4 className="text-lg font-semibold text-slate-900">최종 결론 모음</h4>
+              <p className="mt-1 text-sm leading-6 text-slate-500">
+                회의 종료 시 이 내용이 결과 요약으로 저장됩니다.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleCopyFinalSolutionMarkdown()}
+                disabled={finalSolutionSummary.final_count === 0}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                마크다운 복사
+              </button>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
+                {finalSolutionSummary.final_count}개
+              </span>
+            </div>
           </div>
           <div className="mt-4 space-y-3">
             {allSolutionFinalNotes.length > 0 ? (
@@ -13633,6 +13748,7 @@ export default function MeetingCanvasTab({
                             custom_groups: [],
                             problem_groups: [],
                             solution_topics: [],
+                            final_solution_summary: buildFinalSolutionSummaryPayload([]),
                             node_positions: {},
                             imported_state: result.state,
                           }).catch((error) => {
