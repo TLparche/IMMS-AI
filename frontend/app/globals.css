@@ -87,8 +87,23 @@
   display: none;
 }
 
+.react-flow__node.dragging {
+  opacity: 0.35 !important;
+}
+
+.react-flow__node .react-flow__handle {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.react-flow__node[data-id^="problem-source\\:\\:"] .react-flow__handle-bottom {
+  bottom: 0 !important;
+  left: 50% !important;
+  transform: translate(-50%, 50%) !important;
+}
+
 .react-flow__node.imms-agenda-node.dragging {
-  opacity: 0.42;
+  opacity: 0.35 !important;
   filter: saturate(0.75);
 }
 
