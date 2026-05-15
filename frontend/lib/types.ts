@@ -213,6 +213,7 @@ export interface CanvasProblemDefinitionGroup {
     body: string;
   }>;
   discussion_items?: CanvasProblemDiscussionItem[];
+  linked_group_ids?: string[];
   source_summary_items: string[];
   conclusion: string;
   conclusion_user_edited?: boolean;
