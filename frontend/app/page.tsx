@@ -1,18 +1,33 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useRouter, useSearchParams } from "next/navigation";
 import { WebSocketClient } from "@/lib/websocket";
-import { AudioRecorder } from "@/lib/audio-recorder";
+import { AudioRecorder, type RecordedAudioChunk } from "@/lib/audio-recorder";
 import { supabase } from "@/lib/supabase";
+import { getAudioImportJobStatus, getCanvasWorkspaceState, startAudioImportJob, syncTranscript } from "@/lib/api";
+import type { AudioImportJobStatusResponse, CanvasRealtimeSyncPayload, MeetingState } from "@/lib/types";
+import MeetingCanvasTab, { type MeetingAgenda as CanvasAgenda, type MeetingTranscript as CanvasTranscript } from "@/components/MeetingCanvasTab";
 
 interface Transcript {
   id: string;
   speaker: string;
   text: string;
   timestamp: string;
+  canvas_stage?: "ideation" | "problem-definition" | "solution" | string;
+  canvas_target_id?: string;
 }
+
+type LoadedTranscriptRow = {
+  id: unknown;
+  speaker?: string | null;
+  text?: string | null;
+  timestamp?: string | null;
+  created_at?: string | null;
+  canvas_stage?: string | null;
+  canvas_target_id?: string | null;
+};
 
 interface Agenda {
   id: string;
@@ -20,372 +35,1096 @@ interface Agenda {
   status: string;
 }
 
-interface Decision {
+type CalibrationState = "idle" | "running" | "done";
+
+interface CalibrationAccumulator {
+  chunks: number;
+  sumRms: number;
+  sumPeak: number;
+  sumSpeechRatio: number;
+  sumNoiseFloor: number;
+}
+
+interface SpeechDetectionProfile {
+  rms: number;
+  peak: number;
+  speechRatio: number;
+  noiseFloor: number;
+  sampleCount: number;
+}
+
+interface SpeechDetectionDecision {
+  likely: boolean;
+  snr: number;
+  thresholds: {
+    rms: number;
+    peak: number;
+    speechRatio: number;
+    noiseFloor: number;
+  };
+}
+
+export interface LiveSpeechPreview {
+  speaker: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface SttFlowSummaryItem {
   id: string;
   text: string;
-  status: string;
+  timestamp: string;
+  stage?: "ideation" | "problem-definition" | "solution" | string;
 }
 
-interface ActionItem {
-  id: string;
-  task: string;
-  owner: string;
-  due_date: string;
-  status: string;
+interface CanvasStageContext {
+  stage: "ideation" | "problem-definition" | "solution";
+  targetId?: string;
+  selectedNodeId?: string;
 }
 
-export default function Home() {
+function createCalibrationAccumulator(): CalibrationAccumulator {
+  return {
+    chunks: 0,
+    sumRms: 0,
+    sumPeak: 0,
+    sumSpeechRatio: 0,
+    sumNoiseFloor: 0,
+  };
+}
+
+function dedupeTranscripts(rows: Transcript[]) {
+  const seen = new Set<string>();
+  const deduped = rows.filter((row) => {
+    const key = `${row.speaker}|${row.text}|${row.timestamp}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return sortTranscriptsByTime(deduped);
+}
+
+function buildTranscriptSyncSignature(meetingGoal: string, rows: Transcript[]) {
+  return [
+    meetingGoal,
+    ...rows.map((row) =>
+      `${row.speaker}\u0001${row.text}\u0001${row.timestamp}\u0001${row.canvas_stage || ""}\u0001${row.canvas_target_id || ""}`,
+    ),
+  ].join("\u0002");
+}
+
+function buildSttContext(goal: string, context: string, fallbackTitle: string) {
+  const cleanGoal = goal.trim() || fallbackTitle.trim();
+  const cleanContext = context.trim();
+  return [cleanGoal ? `회의 목표: ${cleanGoal}` : "", cleanContext ? `관련 맥락: ${cleanContext}` : ""]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function getTranscriptTime(row: Transcript) {
+  const parsed = Date.parse(row.timestamp || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortTranscriptsByTime(rows: Transcript[]) {
+  return [...rows].sort((a, b) => {
+    const timeDelta = getTranscriptTime(a) - getTranscriptTime(b);
+    if (timeDelta !== 0) return timeDelta;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function mapMeetingStateToTranscriptRows(state: MeetingState): Transcript[] {
+  return dedupeTranscripts(
+    (state.transcript || []).map((row, index) => ({
+      id: `import-${index}-${row.timestamp || Date.now()}`,
+      speaker: row.speaker || "알 수 없음",
+      text: row.text || "",
+      timestamp: row.timestamp || new Date().toISOString(),
+      canvas_stage: "ideation",
+      canvas_target_id: "",
+    })),
+  );
+}
+
+async function loadTranscriptRows(meetingId: string): Promise<{
+  data: LoadedTranscriptRow[] | null;
+  error: unknown;
+}> {
+  const withStage = await supabase
+    .from("transcripts")
+    .select("id, speaker, text, timestamp, created_at, canvas_stage, canvas_target_id")
+    .eq("meeting_id", meetingId)
+    .order("timestamp", { ascending: true });
+
+  if (!withStage.error) {
+    return withStage as unknown as { data: LoadedTranscriptRow[] | null; error: unknown };
+  }
+
+  const message = `${withStage.error.message || ""} ${withStage.error.details || ""}`;
+  if (!message.includes("canvas_stage") && !message.includes("canvas_target_id")) {
+    return withStage as unknown as { data: LoadedTranscriptRow[] | null; error: unknown };
+  }
+
+  console.warn("[STT] transcripts table has no canvas stage columns; falling back to base transcript load");
+  const fallback = await supabase
+    .from("transcripts")
+    .select("id, speaker, text, timestamp, created_at")
+    .eq("meeting_id", meetingId)
+    .order("timestamp", { ascending: true });
+  return fallback as unknown as { data: LoadedTranscriptRow[] | null; error: unknown };
+}
+
+function mapAnalysisToUi(state: MeetingState) {
+  const outcomes = state.analysis?.agenda_outcomes || [];
+  const agendas: Agenda[] = outcomes.map((outcome, index) => ({
+    id: outcome.agenda_id || `agenda-${index + 1}`,
+    title: outcome.agenda_title || `안건 ${index + 1}`,
+    status: outcome.agenda_state || "PROPOSED",
+  }));
+
+  return { agendas };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function getMessagePayload(message: unknown) {
+  if (!isRecord(message)) return message;
+  return message.data ?? message;
+}
+
+function readString(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function readNumber(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function getSpeechDetectionDecision(
+  metrics: RecordedAudioChunk["metrics"],
+  profile: SpeechDetectionProfile | null,
+): SpeechDetectionDecision {
+  const noiseFloor = Math.max(metrics.noiseFloor || 0, profile?.noiseFloor || 0, 0.0005);
+  const baselineRms = Math.max(profile?.rms || noiseFloor, noiseFloor);
+  const baselinePeak = Math.max(profile?.peak || noiseFloor * 6, noiseFloor * 6);
+  const baselineSpeechRatio = Math.max(profile?.speechRatio || 0, 0);
+
+  const rmsThreshold = Math.max(0.0018, Math.min(0.0045, Math.max(noiseFloor * 2.6, baselineRms * 1.8)));
+  const peakThreshold = Math.max(0.012, Math.min(0.04, Math.max(noiseFloor * 8, baselinePeak * 1.6)));
+  const speechRatioThreshold = Math.max(0.012, Math.min(0.045, baselineSpeechRatio * 1.8));
+  const snr = metrics.rms / noiseFloor;
+
+  return {
+    likely:
+      metrics.rms >= rmsThreshold ||
+      metrics.peak >= peakThreshold ||
+      metrics.speechRatio >= speechRatioThreshold ||
+      (snr >= 2.4 && metrics.peak >= 0.01),
+    snr,
+    thresholds: {
+      rms: rmsThreshold,
+      peak: peakThreshold,
+      speechRatio: speechRatioThreshold,
+      noiseFloor,
+    },
+  };
+}
+
+function HomeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, loading: authLoading } = useAuth();
-  const meetingId = searchParams.get('meeting_id');
+  const meetingId = searchParams.get("meeting_id");
 
+  const [meetingTitle, setMeetingTitle] = useState("회의 워크스페이스");
+  const [meetingGoal, setMeetingGoal] = useState("");
+  const [meetingGoalContext, setMeetingGoalContext] = useState("");
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [agendas, setAgendas] = useState<Agenda[]>([]);
-  const [decisions, setDecisions] = useState<Decision[]>([]);
-  const [actionItems, setActionItems] = useState<ActionItem[]>([]);
+  const [analysisState, setAnalysisState] = useState<MeetingState | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
+  const [loadingMeeting, setLoadingMeeting] = useState(true);
+  const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
+  const [autoSyncing] = useState(false);
+  const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
+  const [incomingCanvasStateRequestId, setIncomingCanvasStateRequestId] = useState("");
+  const [calibrationState, setCalibrationState] = useState<CalibrationState>("idle");
+  const [calibrationSecondsLeft, setCalibrationSecondsLeft] = useState(0);
+  const [fusionSelectedUserId, setFusionSelectedUserId] = useState<string | null>(null);
+  const [fusionSelectedSpeaker, setFusionSelectedSpeaker] = useState<string>("");
+  const [liveSpeechPreview, setLiveSpeechPreview] = useState<LiveSpeechPreview | null>(null);
+  const [sttProgressText, setSttProgressText] = useState("");
+  const [sttFlowSummaries, setSttFlowSummaries] = useState<SttFlowSummaryItem[]>([]);
+  const [audioImportJob, setAudioImportJob] = useState<AudioImportJobStatusResponse | null>(null);
+  const [audioImportRevision, setAudioImportRevision] = useState(0);
+  const [canvasStageContext, setCanvasStageContext] = useState<CanvasStageContext>({ stage: "ideation" });
 
   const wsClientRef = useRef<WebSocketClient | null>(null);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
+  const isRecordingRef = useRef(isRecording);
+  const meetingTitleRef = useRef(meetingTitle);
+  const meetingGoalRef = useRef(meetingGoal);
+  const meetingGoalContextRef = useRef(meetingGoalContext);
+  const transcriptsRef = useRef(transcripts);
+  const canvasStageContextRef = useRef<CanvasStageContext>(canvasStageContext);
+  const autoSyncTimerRef = useRef<number | null>(null);
+  const autoSyncInFlightRef = useRef(false);
+  const queuedSyncSignatureRef = useRef("");
+  const lastSyncedSignatureRef = useRef("");
+  const calibrationFinishTimerRef = useRef<number | null>(null);
+  const calibrationCountdownTimerRef = useRef<number | null>(null);
+  const calibrationAccumulatorRef = useRef<CalibrationAccumulator>(createCalibrationAccumulator());
+  const calibrationActiveRef = useRef(false);
+  const deviceCalibratedRef = useRef(false);
+  const speechDetectionProfileRef = useRef<SpeechDetectionProfile | null>(null);
+  const liveSpeechClearTimerRef = useRef<number | null>(null);
+  const audioImportPollTimerRef = useRef<number | null>(null);
+  const lastSttStatusLogAtRef = useRef(0);
+  const lastGatewayChunkLogAtRef = useRef(0);
 
-  // 인증 및 회의 ID 체크 - 모두 useEffect 안에서 처리
+  useEffect(() => {
+    meetingTitleRef.current = meetingTitle;
+  }, [meetingTitle]);
+
+  useEffect(() => {
+    meetingGoalRef.current = meetingGoal;
+  }, [meetingGoal]);
+
+  useEffect(() => {
+    meetingGoalContextRef.current = meetingGoalContext;
+  }, [meetingGoalContext]);
+
+  useEffect(() => {
+    transcriptsRef.current = transcripts;
+  }, [transcripts]);
+
+  useEffect(() => {
+    canvasStageContextRef.current = canvasStageContext;
+  }, [canvasStageContext]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  const showLiveSpeechPreview = useCallback((speaker: string, text: string, timestamp: string) => {
+    const trimmedText = text.trim();
+    if (!trimmedText) return;
+
+    setLiveSpeechPreview({
+      speaker: speaker || "알 수 없음",
+      text: trimmedText,
+      timestamp,
+    });
+
+    if (liveSpeechClearTimerRef.current !== null) {
+      window.clearTimeout(liveSpeechClearTimerRef.current);
+    }
+
+    liveSpeechClearTimerRef.current = window.setTimeout(() => {
+      setLiveSpeechPreview(null);
+      liveSpeechClearTimerRef.current = null;
+    }, 5200);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (calibrationFinishTimerRef.current !== null) {
+        window.clearTimeout(calibrationFinishTimerRef.current);
+      }
+      if (calibrationCountdownTimerRef.current !== null) {
+        window.clearInterval(calibrationCountdownTimerRef.current);
+      }
+      if (liveSpeechClearTimerRef.current !== null) {
+        window.clearTimeout(liveSpeechClearTimerRef.current);
+      }
+      if (audioImportPollTimerRef.current !== null) {
+        window.clearTimeout(audioImportPollTimerRef.current);
+      }
+      audioRecorderRef.current?.cleanup();
+    };
+  }, []);
+
+  const stopAudioImportPolling = useCallback(() => {
+    if (audioImportPollTimerRef.current !== null) {
+      window.clearTimeout(audioImportPollTimerRef.current);
+      audioImportPollTimerRef.current = null;
+    }
+  }, []);
+
+  const applyMeetingStateToUi = useCallback((state: MeetingState) => {
+    const mapped = mapAnalysisToUi(state);
+    setAnalysisState(state);
+    setAgendas(mapped.agendas);
+  }, []);
+
   useEffect(() => {
     if (!authLoading) {
       if (!user) {
-        router.push('/login');
+        router.push("/login");
       } else if (!meetingId) {
-        router.push('/dashboard');
+        router.push("/dashboard");
       }
     }
   }, [user, authLoading, meetingId, router]);
 
-  // WebSocket 초기화
   useEffect(() => {
     if (!user || !meetingId) return;
-    
+
+    lastSyncedSignatureRef.current = "";
+    queuedSyncSignatureRef.current = "";
+    autoSyncInFlightRef.current = false;
+    setIncomingCanvasSync(null);
+    setMeetingGoal("");
+    setMeetingGoalContext("");
+    setIncomingCanvasStateRequestId("");
+    setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
+    setSttProgressText("");
+    setSttFlowSummaries([]);
+    setAudioImportJob(null);
+    setAudioImportRevision(0);
+    stopAudioImportPolling();
+
+    const loadMeeting = async () => {
+      setLoadingMeeting(true);
+      try {
+        const [
+          { data: meetingData, error: meetingError },
+          { data: transcriptData, error: transcriptError },
+          workspaceState,
+        ] = await Promise.all([
+          supabase.from("meetings").select("title").eq("id", meetingId).single(),
+          loadTranscriptRows(meetingId),
+          getCanvasWorkspaceState(meetingId).catch(() => null),
+        ]);
+
+        if (meetingError) throw meetingError;
+        if (transcriptError) throw transcriptError;
+
+        const nextMeetingTitle = meetingData?.title || "회의 워크스페이스";
+        const nextTranscripts = dedupeTranscripts(
+          (transcriptData || []).map((row) => ({
+            id: String(row.id),
+            speaker: row.speaker || "알 수 없음",
+            text: row.text || "",
+            timestamp: row.timestamp || row.created_at || new Date().toISOString(),
+            canvas_stage: row.canvas_stage || "ideation",
+            canvas_target_id: row.canvas_target_id || "",
+          })),
+        );
+
+        setMeetingTitle(nextMeetingTitle);
+        setMeetingGoal(workspaceState?.meeting_goal || "");
+        setMeetingGoalContext(workspaceState?.meeting_goal_context || "");
+        setTranscripts(nextTranscripts);
+
+        if (workspaceState?.imported_state) {
+          applyMeetingStateToUi(workspaceState.imported_state);
+          lastSyncedSignatureRef.current = buildTranscriptSyncSignature(workspaceState?.meeting_goal || nextMeetingTitle, nextTranscripts);
+        } else {
+          setAnalysisState(null);
+          setAgendas([]);
+          lastSyncedSignatureRef.current = "";
+        }
+      } catch (error) {
+        console.error("Failed to load meeting context:", error);
+      } finally {
+        setLoadingMeeting(false);
+      }
+    };
+
+    void loadMeeting();
+  }, [user, meetingId, stopAudioImportPolling]);
+
+  useEffect(() => {
+    if (!user || !meetingId) return;
+
     const wsClient = new WebSocketClient(meetingId, user.id);
     wsClientRef.current = wsClient;
+    setWsConnected(false);
 
-    // 전사 결과 수신
-    wsClient.on('transcript', (data: any) => {
-      console.log('📝 Received transcript:', data);
-      setTranscripts(prev => [...prev, {
-        id: Date.now().toString() + Math.random(),
-        speaker: data.speaker || '알 수 없음',
-        text: data.text || '',
-        timestamp: data.timestamp || new Date().toISOString()
-      }]);
+    wsClient.onConnectionStateChange((connected) => {
+      setWsConnected(connected);
     });
 
-    // 분석 결과 수신
-    wsClient.on('analysis_update', (data: any) => {
-      console.log('📊 Received analysis:', data);
-      if (data.agendas) setAgendas(data.agendas);
-      if (data.decisions) setDecisions(data.decisions);
-      if (data.actions) setActionItems(data.actions);
+    wsClient.on("transcript_created", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      const transcriptPayload = isRecord(payload.transcript) ? payload.transcript : payload;
+      const speaker = readString(transcriptPayload.speaker, "알 수 없음");
+      const text = readString(transcriptPayload.text);
+      if (!text.trim()) return;
+      const nextTimestamp = readString(
+        transcriptPayload.timestamp || transcriptPayload.created_at,
+        new Date().toISOString(),
+      );
+      const transcriptId = readString(transcriptPayload.id, `${nextTimestamp}-${speaker}-${text}`);
+      const audioMetaPayload = isRecord(payload.audio_meta) ? payload.audio_meta : {};
+      const audioStartedAt = readString(transcriptPayload.audio_started_at || audioMetaPayload.started_at);
+      const audioEndedAt = readString(transcriptPayload.audio_ended_at || audioMetaPayload.ended_at);
+      const chunkIndex = readNumber(transcriptPayload.audio_chunk_index || audioMetaPayload.chunk_index, -1);
+      const canvasStage = readString(transcriptPayload.canvas_stage || payload.canvas_stage, "ideation");
+      const canvasTargetId = readString(transcriptPayload.canvas_target_id || payload.canvas_target_id);
+      const recordingNow = isRecordingRef.current || Boolean(audioRecorderRef.current?.isRecording());
+      console.info("[STT] 서버 전사 수신", {
+        id: transcriptId,
+        speaker,
+        text,
+        timestamp: nextTimestamp,
+        audioStartedAt,
+        audioEndedAt,
+        chunkIndex,
+        canvasStage,
+        canvasTargetId,
+        recording: recordingNow,
+        elapsedMs: payload.stt_elapsed_ms,
+        backendElapsedMs: payload.backend_elapsed_ms,
+        originalDurationMs: audioMetaPayload.original_duration_ms,
+        removedSilenceMs: audioMetaPayload.removed_silence_ms,
+        combinedChunkCount: audioMetaPayload.combined_chunk_count,
+      });
+      setTranscripts((prev) =>
+        dedupeTranscripts([
+          ...prev,
+          {
+            id: transcriptId,
+            speaker,
+            text,
+            timestamp: nextTimestamp,
+            canvas_stage: canvasStage,
+            canvas_target_id: canvasTargetId,
+          },
+        ]),
+      );
+      showLiveSpeechPreview(speaker, text, nextTimestamp);
+    });
+
+    wsClient.on("meeting_goal_updated", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      setMeetingGoal(readString(payload.meeting_goal));
+      setMeetingGoalContext(readString(payload.meeting_goal_context));
+    });
+
+    wsClient.on("stt_flow_summaries_updated", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      const rawSummaries = Array.isArray(payload.summaries) ? payload.summaries : [];
+      const nextSummaries = rawSummaries
+        .filter(isRecord)
+        .map((item, index) => ({
+          id: readString(item.id, `stt-flow-summary-${index}`),
+          text: readString(item.text).slice(0, 30),
+          timestamp: readString(item.timestamp, new Date().toISOString()),
+          stage: readString(item.stage, "ideation"),
+        }))
+        .filter((item) => item.text.trim())
+        .slice(-3);
+      setSttFlowSummaries(nextSummaries);
+    });
+
+    wsClient.on("stt_summary_updated", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (readString(payload.meeting_id) && readString(payload.meeting_id) !== meetingId) return;
+      const summary = isRecord(payload.summary) ? payload.summary : {};
+      const text = readString(summary.text || payload.summary_text);
+      if (!text.trim()) return;
+      setSttProgressText(text);
+    });
+
+    wsClient.on("stt_debug", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      const stage = readString(payload.stage);
+      const now = Date.now();
+
+      if (stage === "audio_chunk_received" || stage === "audio_chunk_queued") {
+        if (now - lastGatewayChunkLogAtRef.current < 5000) return;
+        lastGatewayChunkLogAtRef.current = now;
+        console.info("[STT] gateway가 오디오를 받는 중", {
+          stage,
+          bytes: readNumber(payload.bytes),
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "audio_candidate_selected") {
+        console.info("[STT] gateway 후보 선택 완료", {
+          bucketId: payload.bucket_id,
+          candidateCount: payload.candidate_count,
+          bytes: payload.bytes,
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "audio_candidate_dropped") {
+        console.warn("[STT] gateway가 오디오를 음성 아님으로 버림", {
+          reason: payload.reason,
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
+          thresholds: payload.thresholds,
+          candidates: payload.candidates,
+        });
+        return;
+      }
+
+      if (stage === "transcription_audio_prepared") {
+        const audioMeta = isRecord(payload.audio_meta) ? payload.audio_meta : {};
+        console.info("[STT] STT WAV 청크 준비 완료", {
+          bucketId: payload.bucket_id,
+          bytes: payload.bytes,
+          audioMime: payload.audio_mime,
+          fusionWaitMs: readNumber(payload.fusion_wait_ms),
+          originalDurationMs: audioMeta.original_duration_ms,
+          removedSilenceMs: audioMeta.removed_silence_ms,
+          combinedChunkCount: audioMeta.combined_chunk_count,
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "transcription_audio_buffered") {
+        return;
+      }
+
+      if (stage === "transcription_started") {
+        console.info("[STT] backend Whisper 전사 시작", {
+          bucketId: payload.bucket_id,
+          backendUrl: payload.backend_url,
+        });
+        return;
+      }
+
+      if (stage === "transcription_empty") {
+        console.warn("[STT] backend 전사 결과가 비어 있음", {
+          status: payload.status,
+          statusCode: payload.status_code,
+          error: payload.error,
+          bytes: payload.bytes,
+          elapsedMs: payload.elapsed_ms,
+          backendElapsedMs: payload.backend_elapsed_ms,
+          audioMeta: payload.audio_meta,
+        });
+        return;
+      }
+
+      if (stage === "transcript_saved") {
+        console.info("[STT] 전사 저장 완료", {
+          preview: payload.text_preview,
+          length: payload.text_length,
+          elapsedMs: payload.elapsed_ms,
+          backendElapsedMs: payload.backend_elapsed_ms,
+        });
+        return;
+      }
+
+      if (stage === "transcript_save_failed") {
+        console.warn("[STT] 전사 DB 저장 실패", {
+          preview: payload.text_preview,
+          length: payload.text_length,
+          bucketId: payload.bucket_id,
+        });
+      }
+    });
+
+    wsClient.on("analysis_update", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload)) return;
+      if (payload.agenda_outcomes || payload.analysis) {
+        const normalizedState = payload.analysis ? (payload as unknown as MeetingState) : ({ analysis: payload } as unknown as MeetingState);
+        applyMeetingStateToUi(normalizedState);
+      }
+    });
+
+    wsClient.on("canvas_sync", (message) => {
+      const payload = (message.data ?? message.workspace ?? message) as CanvasRealtimeSyncPayload | null;
+      if (!payload || payload.meeting_id !== meetingId) return;
+      setIncomingCanvasSync(payload);
+    });
+
+    wsClient.on("canvas_state_request", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload) || payload.meeting_id !== meetingId) return;
+      if (payload.requested_by === user.id) return;
+      setIncomingCanvasStateRequestId(String(payload.request_id || Date.now()));
+    });
+
+    wsClient.on("audio_selection", (message) => {
+      const payload = getMessagePayload(message);
+      if (!isRecord(payload) || payload.meeting_id !== meetingId) return;
+      setFusionSelectedUserId(readString(payload.selected_user_id) || null);
+      setFusionSelectedSpeaker(readString(payload.speaker));
     });
 
     wsClient.connect();
-    setWsConnected(true);
 
     return () => {
       wsClient.disconnect();
       setWsConnected(false);
     };
-  }, [user, meetingId]);
+  }, [user, meetingId, showLiveSpeechPreview, applyMeetingStateToUi]);
 
-  // 로딩 중이거나 인증되지 않은 경우
-  if (authLoading || !user || !meetingId) {
+  const finishCalibration = useCallback(() => {
+    if (!user) return;
+
+    if (calibrationFinishTimerRef.current !== null) {
+      window.clearTimeout(calibrationFinishTimerRef.current);
+      calibrationFinishTimerRef.current = null;
+    }
+    if (calibrationCountdownTimerRef.current !== null) {
+      window.clearInterval(calibrationCountdownTimerRef.current);
+      calibrationCountdownTimerRef.current = null;
+    }
+
+    const stats = calibrationAccumulatorRef.current;
+    calibrationActiveRef.current = false;
+    const sampleCount = Math.max(stats.chunks, 1);
+    const avgRms = stats.chunks > 0 ? stats.sumRms / sampleCount : 0.0045;
+    const avgPeak = stats.chunks > 0 ? stats.sumPeak / sampleCount : 0.04;
+    const avgSpeechRatio = stats.chunks > 0 ? stats.sumSpeechRatio / sampleCount : 0.045;
+    const avgNoiseFloor = stats.chunks > 0 ? stats.sumNoiseFloor / sampleCount : 0.0015;
+    const profile: SpeechDetectionProfile = {
+      rms: avgRms,
+      peak: avgPeak,
+      speechRatio: avgSpeechRatio,
+      noiseFloor: avgNoiseFloor,
+      sampleCount: stats.chunks,
+    };
+    speechDetectionProfileRef.current = profile;
+
+    if (stats.chunks === 0) {
+      console.info("[STT] mic calibration finished before first audio chunk; using fallback profile");
+    }
+
+    if (wsClientRef.current?.isConnected()) {
+      console.info("[STT] mic calibration finished", {
+        rms: profile.rms,
+        peak: profile.peak,
+        speechRatio: profile.speechRatio,
+        noiseFloor: profile.noiseFloor,
+        sampleCount: profile.sampleCount,
+      });
+      wsClientRef.current.sendMessage("mic_calibration", {
+        profile: {
+          rms: profile.rms,
+          peak: profile.peak,
+          speech_ratio: profile.speechRatio,
+          noise_floor: profile.noiseFloor,
+          sample_count: profile.sampleCount,
+        },
+      });
+    }
+    deviceCalibratedRef.current = true;
+
+    setCalibrationState("done");
+    setCalibrationSecondsLeft(0);
+  }, [user]);
+
+  const beginCalibration = useCallback(() => {
+    if (calibrationFinishTimerRef.current !== null) {
+      window.clearTimeout(calibrationFinishTimerRef.current);
+    }
+    if (calibrationCountdownTimerRef.current !== null) {
+      window.clearInterval(calibrationCountdownTimerRef.current);
+    }
+
+    calibrationAccumulatorRef.current = createCalibrationAccumulator();
+    calibrationActiveRef.current = true;
+    deviceCalibratedRef.current = false;
+    setCalibrationState("running");
+    setCalibrationSecondsLeft(4);
+
+    calibrationCountdownTimerRef.current = window.setInterval(() => {
+      setCalibrationSecondsLeft((prev) => {
+        if (prev <= 1) {
+          if (calibrationCountdownTimerRef.current !== null) {
+            window.clearInterval(calibrationCountdownTimerRef.current);
+            calibrationCountdownTimerRef.current = null;
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    calibrationFinishTimerRef.current = window.setTimeout(() => {
+      finishCalibration();
+    }, 4000);
+  }, [finishCalibration]);
+
+  const accumulateCalibrationMetrics = useCallback((metrics: RecordedAudioChunk["metrics"]) => {
+    if (!calibrationActiveRef.current && deviceCalibratedRef.current) {
+      return;
+    }
+    calibrationAccumulatorRef.current.chunks += 1;
+    calibrationAccumulatorRef.current.sumRms += metrics.rms;
+    calibrationAccumulatorRef.current.sumPeak += metrics.peak;
+    calibrationAccumulatorRef.current.sumSpeechRatio += metrics.speechRatio;
+    calibrationAccumulatorRef.current.sumNoiseFloor += metrics.noiseFloor;
+  }, []);
+
+  const syncBackendFromMeeting = async (analyze = true) => {
+    const currentMeetingGoal = meetingGoalRef.current || meetingTitleRef.current;
+    const currentTranscripts = transcriptsRef.current;
+    const state = await syncTranscript({
+      meeting_goal: currentMeetingGoal,
+      window_size: 12,
+      reset_state: true,
+      auto_analyze: analyze,
+      transcript: currentTranscripts.map((row) => ({
+        speaker: row.speaker,
+        text: row.text,
+        timestamp: row.timestamp,
+      })),
+    });
+    applyMeetingStateToUi(state);
+    return state;
+  };
+
+  const pollAudioImportJob = useCallback(
+    async (jobId: string) => {
+      try {
+        const result = await getAudioImportJobStatus(jobId);
+        setAudioImportJob(result);
+
+        if (result.status === "completed") {
+          stopAudioImportPolling();
+          if (result.state) {
+            const nextTranscripts = mapMeetingStateToTranscriptRows(result.state);
+            setTranscripts(nextTranscripts);
+            applyMeetingStateToUi(result.state);
+            lastSyncedSignatureRef.current = buildTranscriptSyncSignature(meetingGoalRef.current || meetingTitleRef.current, nextTranscripts);
+            queuedSyncSignatureRef.current = "";
+            setAudioImportRevision((prev) => prev + 1);
+            setCanvasSyncStatus(
+              `오디오 파일을 불러왔습니다. 발화 ${result.transcript_count || nextTranscripts.length}개가 반영되었습니다.`,
+            );
+          }
+          return;
+        }
+
+        if (result.status === "error") {
+          stopAudioImportPolling();
+          setCanvasSyncStatus(result.error || "오디오 파일 처리에 실패했습니다.");
+          return;
+        }
+
+        setCanvasSyncStatus(
+          result.detail || `오디오 파일 처리 중입니다. ${Math.round(result.progress || 0)}%`,
+        );
+        audioImportPollTimerRef.current = window.setTimeout(() => {
+          void pollAudioImportJob(jobId);
+        }, 1500);
+      } catch (error) {
+        console.error("Failed to poll audio import job:", error);
+        stopAudioImportPolling();
+        setCanvasSyncStatus("오디오 파일 처리 상태를 가져오지 못했습니다.");
+      }
+    },
+    [applyMeetingStateToUi, stopAudioImportPolling],
+  );
+
+  const handleAudioImport = useCallback(
+    async (file: File) => {
+      if (!user || !meetingId) return;
+      if (audioImportJob && (audioImportJob.status === "queued" || audioImportJob.status === "processing")) {
+        setCanvasSyncStatus("이미 다른 오디오 파일을 처리 중입니다. 완료 후 다시 시도해 주세요.");
+        return;
+      }
+
+      stopAudioImportPolling();
+      setAudioImportJob(null);
+      setCanvasSyncStatus(`오디오 파일을 업로드했습니다. ${file.name} 처리 작업을 시작합니다.`);
+
+      const started = await startAudioImportJob({
+        meeting_id: meetingId,
+        meeting_goal: buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
+        user_id: user.id,
+        file,
+        reset_state: true,
+        window_size: 12,
+      });
+
+      setAudioImportJob({
+        ok: true,
+        job_id: started.job_id,
+        meeting_id: started.meeting_id,
+        filename: started.filename,
+        status: started.status,
+        progress: 1,
+        step: "queued",
+        created_at: started.created_at,
+        updated_at: started.created_at,
+      });
+      audioImportPollTimerRef.current = window.setTimeout(() => {
+        void pollAudioImportJob(started.job_id);
+      }, 600);
+    },
+    [audioImportJob, meetingId, pollAudioImportJob, stopAudioImportPolling, user],
+  );
+
+  useEffect(() => {
+    if (autoSyncTimerRef.current !== null) {
+      window.clearTimeout(autoSyncTimerRef.current);
+      autoSyncTimerRef.current = null;
+    }
+
+    return () => {
+      if (autoSyncTimerRef.current !== null) {
+        window.clearTimeout(autoSyncTimerRef.current);
+        autoSyncTimerRef.current = null;
+      }
+    };
+  }, [meetingId]);
+
+  const toggleRecording = async () => {
+    if (!user) return;
+
+    if (isRecording) {
+      const recorder = audioRecorderRef.current;
+      audioRecorderRef.current = null;
+      await recorder?.stopAndCleanup();
+      finishCalibration();
+      setIsRecording(false);
+      return;
+    }
+
+    if (!audioRecorderRef.current) {
+      const recorder = new AudioRecorder();
+      const initialized = await recorder.initialize();
+      if (!initialized) {
+        alert("마이크 접근 권한이 필요합니다.");
+        return;
+      }
+      recorder.setRecordingInterval(7000);
+      recorder.setMeterCallback(accumulateCalibrationMetrics);
+      audioRecorderRef.current = recorder;
+    } else {
+      audioRecorderRef.current.setRecordingInterval(7000);
+      audioRecorderRef.current.setMeterCallback(accumulateCalibrationMetrics);
+    }
+
+    beginCalibration();
+    console.info("[STT] 녹음 파이프라인 시작", {
+      intervalMs: 7000,
+      mode: "pcm-wav-chunk",
+      wsConnected: wsClientRef.current?.isConnected() || false,
+    });
+    audioRecorderRef.current.start(({ blob, metrics }: RecordedAudioChunk) => {
+      const calibrated = deviceCalibratedRef.current;
+      console.info("[STT] STT WAV 청크 생성", {
+        bytes: blob.size,
+        chunkIndex: metrics.chunkIndex,
+        durationMs: metrics.durationMs,
+        originalDurationMs: metrics.originalDurationMs,
+        removedSilenceMs: metrics.removedSilenceMs,
+        combinedChunkCount: metrics.combinedChunkCount,
+        trimmedFromSilence: metrics.trimmedFromSilence,
+        rms: metrics.rms,
+        peak: metrics.peak,
+        speechRatio: metrics.speechRatio,
+        calibrated,
+        calibrationActive: calibrationActiveRef.current,
+      });
+      if (calibrationActiveRef.current || !calibrated) {
+        return;
+      }
+      const speechDecision = getSpeechDetectionDecision(metrics, speechDetectionProfileRef.current);
+      if (!speechDecision.likely) {
+        const now = Date.now();
+        if (now - lastSttStatusLogAtRef.current > 5000) {
+          lastSttStatusLogAtRef.current = now;
+          console.info("[STT] 듣는 중 - 무음으로 판단해서 전송하지 않음", {
+            rms: metrics.rms,
+            peak: metrics.peak,
+            speechRatio: metrics.speechRatio,
+            snr: speechDecision.snr,
+            thresholds: speechDecision.thresholds,
+            profile: speechDetectionProfileRef.current,
+          });
+        }
+        return;
+      }
+      if (wsClientRef.current?.isConnected()) {
+        const canvasContext = canvasStageContextRef.current;
+        console.info("[STT] 음성 감지 - 전사 요청 전송", {
+          rms: metrics.rms,
+          peak: metrics.peak,
+          speechRatio: metrics.speechRatio,
+          snr: speechDecision.snr,
+          thresholds: speechDecision.thresholds,
+          chunkIndex: metrics.chunkIndex,
+          durationMs: metrics.durationMs,
+          originalDurationMs: metrics.originalDurationMs,
+          removedSilenceMs: metrics.removedSilenceMs,
+          combinedChunkCount: metrics.combinedChunkCount,
+          bytes: blob.size,
+          canvasStage: canvasContext.stage,
+          canvasTargetId: canvasContext.targetId || "",
+        });
+        wsClientRef.current.sendAudioChunk(
+          blob,
+          user.email || "Unknown",
+          metrics,
+          buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
+          {
+            stage: canvasContext.stage,
+            targetId: canvasContext.targetId,
+            selectedNodeId: canvasContext.selectedNodeId,
+          },
+        );
+      } else {
+        console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
+          bytes: blob.size,
+          metrics,
+        });
+      }
+    });
+    setIsRecording(true);
+  };
+
+  const endMeeting = async () => {
+    if (!meetingId) return;
+
+    if (isRecording) {
+      const recorder = audioRecorderRef.current;
+      audioRecorderRef.current = null;
+      await recorder?.stopAndCleanup();
+      setIsRecording(false);
+    }
+
+    wsClientRef.current?.disconnect();
+
+    try {
+      const { error } = await supabase
+        .from("meetings")
+        .update({
+          status: "completed",
+          ended_at: new Date().toISOString(),
+        })
+        .eq("id", meetingId);
+
+      if (error) throw error;
+      router.push("/dashboard");
+    } catch (error) {
+      console.error("Failed to end meeting:", error);
+      alert("회의 종료에 실패했습니다.");
+    }
+  };
+
+  const canvasTranscripts = useMemo<CanvasTranscript[]>(
+    () => transcripts.map((item) => ({ ...item })),
+    [transcripts],
+  );
+  const canvasAgendas = useMemo<CanvasAgenda[]>(
+    () => agendas.map((item) => ({ ...item })),
+    [agendas],
+  );
+
+  const broadcastCanvasSync = useCallback((payload: CanvasRealtimeSyncPayload) => {
+    wsClientRef.current?.sendMessage("canvas_sync", {
+      workspace: payload,
+    });
+  }, []);
+  const broadcastMeetingGoalSync = useCallback((goal: string, context = meetingGoalContextRef.current) => {
+    wsClientRef.current?.sendMessage("meeting_goal_sync", {
+      meeting_goal: goal,
+      meeting_goal_context: context,
+    });
+  }, []);
+  const audioImportBusy = audioImportJob?.status === "queued" || audioImportJob?.status === "processing";
+  const audioImportStatusText = audioImportJob
+    ? audioImportJob.status === "completed"
+      ? `오디오 불러오기 완료 · 발화 ${audioImportJob.transcript_count || 0}개`
+      : audioImportJob.status === "error"
+      ? `오디오 불러오기 실패 · ${audioImportJob.error || "처리 중 오류"}`
+      : `${audioImportJob.detail || "오디오 파일 처리 중"} · ${Math.round(audioImportJob.progress || 0)}%`
+    : "";
+
+  if (authLoading || !user || !meetingId || loadingMeeting) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">로딩 중...</p>
+      <div className="flex min-h-screen items-center justify-center bg-[#eaf0f7]">
+        <div className="rounded-[28px] border border-white/70 bg-white/85 px-8 py-7 text-center shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+          <div className="mx-auto h-12 w-12 animate-spin rounded-full border-[3px] border-cyan-100 border-t-[#10243f]" />
+          <p className="mt-4 text-sm font-medium text-slate-600">로딩 중...</p>
         </div>
       </div>
     );
   }
 
-  // 녹음 토글
-  const toggleRecording = async () => {
-    if (!user) return;
-
-    if (isRecording) {
-      audioRecorderRef.current?.stop();
-      setIsRecording(false);
-      console.log('⏹️ 녹음 중지');
-    } else {
-      // AudioRecorder 초기화 (처음 시작 시)
-      if (!audioRecorderRef.current) {
-        const recorder = new AudioRecorder();
-        const initialized = await recorder.initialize();
-        
-        if (!initialized) {
-          alert('마이크 접근 권한이 필요합니다.');
-          return;
-        }
-        
-        audioRecorderRef.current = recorder;
-      }
-
-      // 녹음 시작
-      audioRecorderRef.current.start((audioBlob: Blob) => {
-        // 오디오 청크를 WebSocket으로 전송
-        if (wsClientRef.current?.isConnected()) {
-          wsClientRef.current.sendAudioChunk(audioBlob, user.email || 'Unknown');
-          console.log('🎤 Sent audio chunk');
-        }
-      });
-      
-      setIsRecording(true);
-      console.log('녹음 시작');
-    }
-  };
-
-  // 분석 요청
-  const requestAnalysis = () => {
-    if (wsClientRef.current?.isConnected()) {
-      wsClientRef.current.sendMessage('request_analysis', {});
-      console.log('Requested analysis');
-      alert('분석이 요청되었습니다. 잠시 후 결과가 표시됩니다.');
-    } else {
-      alert('WebSocket이 연결되지 않았습니다.');
-    }
-  };
-
-  // 회의 종료
-  const endMeeting = async () => {
-    if (!meetingId) return;
-    
-    if (!confirm('회의를 종료하시겠습니까?')) return;
-
-    // 녹음 중지
-    if (isRecording) {
-      audioRecorderRef.current?.stop();
-      setIsRecording(false);
-    }
-
-    // WebSocket 연결 종료
-    wsClientRef.current?.disconnect();
-
-    try {
-      // Supabase에서 회의 상태 업데이트
-      const { error } = await supabase
-        .from('meetings')
-        .update({ 
-          status: 'completed',
-          ended_at: new Date().toISOString() 
-        })
-        .eq('id', meetingId);
-
-      if (error) throw error;
-
-      alert('회의가 종료되었습니다.');
-      router.push('/dashboard');
-    } catch (error) {
-      console.error('Failed to end meeting:', error);
-      alert('회의 종료에 실패했습니다.');
-    }
-  };
-
-  // 리포트 생성
-  const generateReport = async () => {
-    if (!meetingId) return;
-
-    try {
-      const response = await fetch(`http://localhost:8001/gateway/reports/${meetingId}`, {
-        method: 'POST'
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        alert('리포트가 생성되었습니다!');
-        console.log('Report:', data);
-      } else {
-        alert('리포트 생성에 실패했습니다.');
-      }
-    } catch (error) {
-      console.error('Failed to generate report:', error);
-      alert('리포트 생성에 실패했습니다.');
-    }
-  };
-
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">회의 워크스페이스</h1>
-              <div className="flex items-center gap-3 mt-1">
-                <p className="text-sm text-gray-600">Meeting ID: {meetingId.substring(0, 8)}...</p>
-                <span className={`inline-block w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}></span>
-                <span className="text-xs text-gray-500">
-                  {wsConnected ? 'WebSocket 연결됨' : 'WebSocket 연결 안 됨'}
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={() => router.push('/dashboard')}
-              className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg transition font-medium"
-            >
-              대시보드로 돌아가기
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Left: 실시간 전사 */}
-          <div className="lg:col-span-1 bg-white rounded-xl shadow-md border border-gray-200 p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">실시간 전사</h2>
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              {transcripts.length === 0 ? (
-                <p className="text-gray-500 text-sm">녹음을 시작하면 전사 내용이 여기에 표시됩니다.</p>
-              ) : (
-                transcripts.map(t => (
-                  <div key={t.id} className="bg-blue-50 p-3 rounded-lg">
-                    <p className="text-sm text-gray-700">
-                      <span className="font-semibold">{t.speaker}:</span> {t.text}
-                    </p>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {new Date(t.timestamp).toLocaleTimeString('ko-KR')}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
-            
-            {/* 마이크 컨트롤 */}
-            <div className="mt-6 pt-6 border-t border-gray-200">
-              <button
-                onClick={toggleRecording}
-                className={`w-full px-4 py-3 rounded-lg font-semibold transition ${
-                  isRecording 
-                    ? 'bg-red-600 hover:bg-red-700 text-white' 
-                    : 'bg-blue-600 hover:bg-blue-700 text-white'
-                }`}
-              >
-                {isRecording ? '녹음 중지' : '녹음 시작'}
-              </button>
-            </div>
-          </div>
-
-          {/* Center: 안건 분석 */}
-          <div className="lg:col-span-1 bg-white rounded-xl shadow-md border border-gray-200 p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">안건 분석</h2>
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              {agendas.length === 0 ? (
-                <p className="text-gray-500 text-sm">분석 요청 버튼을 눌러 AI가 안건을 분석하도록 할 수 있습니다.</p>
-              ) : (
-                agendas.map((agenda, idx) => (
-                  <div key={agenda.id} className="border-l-4 border-blue-500 pl-3 py-2">
-                    <h3 className="font-semibold text-gray-900">{idx + 1}. {agenda.title}</h3>
-                    <div className="mt-2">
-                      <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                        agenda.status === 'ACTIVE' ? 'bg-yellow-100 text-yellow-800' :
-                        agenda.status === 'CLOSED' ? 'bg-green-100 text-green-800' :
-                        'bg-gray-100 text-gray-600'
-                      }`}>
-                        {agenda.status === 'ACTIVE' ? '진행 중' :
-                         agenda.status === 'CLOSED' ? '종료됨' : '대기 중'}
-                      </span>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          {/* Right: 의사결정 & 액션 */}
-          <div className="lg:col-span-1 space-y-6">
-            
-            {/* 의사결정 */}
-            <div className="bg-white rounded-xl shadow-md border border-gray-200 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">의사결정</h2>
-              <div className="space-y-3 max-h-48 overflow-y-auto">
-                {decisions.length === 0 ? (
-                  <p className="text-gray-500 text-sm">AI 분석 후 의사결정 내용이 표시됩니다.</p>
-                ) : (
-                  decisions.map(decision => (
-                    <div key={decision.id} className="bg-green-50 p-3 rounded-lg border border-green-200">
-                      <p className="text-sm text-gray-700">{decision.text}</p>
-                      <div className="mt-2">
-                        <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                          decision.status === 'approved' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
-                        }`}>
-                          {decision.status === 'approved' ? '✓ 승인' : '대기 중'}
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* 액션 아이템 */}
-            <div className="bg-white rounded-xl shadow-md border border-gray-200 p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">액션 아이템</h2>
-              <div className="space-y-3 max-h-48 overflow-y-auto">
-                {actionItems.length === 0 ? (
-                  <p className="text-gray-500 text-sm">AI 분석 후 액션 아이템이 표시됩니다.</p>
-                ) : (
-                  actionItems.map(item => (
-                    <div key={item.id} className="p-3 border border-gray-200 rounded-lg">
-                      <p className="text-sm text-gray-700 font-medium">{item.task}</p>
-                      <p className="text-xs text-gray-500 mt-1">담당: {item.owner}</p>
-                      <p className="text-xs text-gray-500">기한: {item.due_date}</p>
-                      <div className="mt-2">
-                        <span className={`inline-block px-2 py-1 text-xs rounded-full ${
-                          item.status === 'in_progress' ? 'bg-blue-100 text-blue-800' :
-                          item.status === 'completed' ? 'bg-green-100 text-green-800' :
-                          'bg-gray-100 text-gray-600'
-                        }`}>
-                          {item.status === 'in_progress' ? '진행 중' :
-                           item.status === 'completed' ? '완료' : '대기 중'}
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* Bottom: 회의 컨트롤 */}
-        <div className="mt-6 bg-white rounded-xl shadow-md border border-gray-200 p-6">
-          <div className="flex justify-center gap-4">
-            <button
-              onClick={requestAnalysis}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition"
-            >
-              분석 요청
-            </button>
-            <button
-              onClick={endMeeting}
-              className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold transition"
-            >
-              회의 종료
-            </button>
-            <button
-              onClick={generateReport}
-              className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-semibold transition"
-            >
-              리포트 생성
-            </button>
-          </div>
-        </div>
-
-      </main>
+    <div className="h-screen overflow-hidden bg-white">
+      <MeetingCanvasTab
+        userId={user.id}
+        meetingId={meetingId}
+        meetingTitle={meetingTitle}
+        meetingGoal={meetingGoal}
+        meetingGoalContext={meetingGoalContext}
+        onMeetingGoalChange={setMeetingGoal}
+        onMeetingGoalContextChange={setMeetingGoalContext}
+        onMeetingGoalSync={broadcastMeetingGoalSync}
+        transcripts={canvasTranscripts}
+        agendas={canvasAgendas}
+        analysisState={analysisState}
+        onSyncFromMeeting={syncBackendFromMeeting}
+        incomingSharedCanvasSync={incomingCanvasSync}
+        onSharedCanvasSync={broadcastCanvasSync}
+        incomingCanvasStateRequestId={incomingCanvasStateRequestId}
+        syncStatusText={canvasSyncStatus}
+        autoSyncing={autoSyncing}
+        liveSpeechPreview={liveSpeechPreview}
+        sttFlowSummaries={sttFlowSummaries}
+        onImportAudioFile={handleAudioImport}
+        audioImportBusy={audioImportBusy}
+        audioImportStatusText={audioImportStatusText}
+        audioImportRevision={audioImportRevision}
+        isRecording={isRecording}
+        onToggleRecording={toggleRecording}
+        onStopRecording={toggleRecording}
+        onEndMeeting={endMeeting}
+        sttProgressText={sttProgressText}
+        onCanvasStageContextChange={setCanvasStageContext}
+        recordingStatusText={
+          calibrationState === "running"
+            ? `마이크 캘리브레이션 ${calibrationSecondsLeft}s`
+            : fusionSelectedUserId === user.id
+            ? "내 마이크가 현재 선택됨"
+            : fusionSelectedUserId
+            ? `${fusionSelectedSpeaker || "다른 화자"} 마이크 선택 중`
+            : wsConnected
+            ? "WebSocket 연결됨"
+            : "WebSocket 연결 안 됨"
+        }
+      />
     </div>
+  );
+}
+
+function HomeFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#eaf0f7]">
+      <div className="rounded-[28px] border border-white/70 bg-white/85 px-8 py-7 text-center shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+        <div className="mx-auto h-12 w-12 animate-spin rounded-full border-[3px] border-cyan-100 border-t-[#10243f]" />
+        <p className="mt-4 text-sm font-medium text-slate-600">워크스페이스를 불러오는 중...</p>
+      </div>
+    </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={<HomeFallback />}>
+      <HomeContent />
+    </Suspense>
   );
 }

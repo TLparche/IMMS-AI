@@ -149,22 +149,20 @@ npm install
 cd ..
 ```
 
-### 4. 서비스 실행 (3개 터미널)
+### 4. 서비스 실행
 
-**터미널 1: AI Module**
+**권장: 한 번에 실행**
+```bash
+python run_dev.py
+```
+
+이 스크립트는 `backend + gateway + frontend`를 함께 실행하고, 포트가 이미 사용 중이면 가능한 포트를 찾아 자동으로 연결합니다.
+
+**수동 실행이 필요할 때만**
 ```bash
 python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
-```
-
-**터미널 2: Gateway**
-```bash
 python -m uvicorn gateway.main:app --host 0.0.0.0 --port 8001 --reload
-```
-
-**터미널 3: Frontend**
-```bash
-cd frontend
-npm run dev
+cd frontend && npm run dev
 ```
 
 ### 5. 접속
@@ -203,9 +201,20 @@ npm run dev
 - [ ] 리포트 생성 및 PDF 다운로드 테스트
 
 ### 예정
-- [ ] 프로덕션 배포 (Vercel Frontend + Railway Backend)
+- [ ] 2차 배포 구조 고도화 (도메인/리버스 프록시/운영 최적화)
 - [ ] 성능 최적화 및 실전 테스트
 - [ ] 사용자 피드백 반영
+
+## 배포
+
+1차 프로토 배포용 파일과 자세한 가이드는 [deploy/README.md](/E:/AI/IMMS-AI/deploy/README.md)에 분리해 두었습니다.
+
+배포 관련 파일 위치:
+- [deploy/docker-compose.prod.yml](/E:/AI/IMMS-AI/deploy/docker-compose.prod.yml)
+- [deploy/.env.production.example](/E:/AI/IMMS-AI/deploy/.env.production.example)
+- [deploy/backend.Dockerfile](/E:/AI/IMMS-AI/deploy/backend.Dockerfile)
+- [deploy/gateway.Dockerfile](/E:/AI/IMMS-AI/deploy/gateway.Dockerfile)
+- [deploy/frontend.Dockerfile](/E:/AI/IMMS-AI/deploy/frontend.Dockerfile)
 
 ## 기여자
 

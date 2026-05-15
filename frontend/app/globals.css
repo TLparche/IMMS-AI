@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   --bg-start: #f8fbff;
   --bg-end: #f6f8fb;
@@ -13,10 +15,259 @@
   --radius-pill: 999px;
   --shadow-soft: 0 10px 28px rgba(15, 23, 42, 0.05);
   --section-gap: 12px;
+  --scrollbar-track: rgba(226, 232, 240, 0.55);
+  --scrollbar-thumb: rgba(148, 163, 184, 0.75);
+  --scrollbar-thumb-hover: rgba(100, 116, 139, 0.9);
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.react-flow__controls {
+  overflow: hidden !important;
+  border: 1px solid rgba(148, 163, 184, 0.35) !important;
+  border-radius: 18px !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.14) !important;
+}
+
+.react-flow__controls-button {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92) !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  color: #10243f !important;
+}
+
+.react-flow__controls-button:hover {
+  background: #ecfeff !important;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor !important;
+}
+
+.react-flow__minimap {
+  overflow: hidden !important;
+  border: 1px solid rgba(148, 163, 184, 0.28) !important;
+  border-radius: 22px !important;
+  background: rgba(255, 255, 255, 0.86) !important;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.12) !important;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__node.dragging {
+  opacity: 0.35 !important;
+}
+
+.react-flow__node .react-flow__handle {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.react-flow__node[data-id^="problem-source\\:\\:"] .react-flow__handle-bottom {
+  bottom: 0 !important;
+  left: 50% !important;
+  transform: translate(-50%, 50%) !important;
+}
+
+.react-flow__node.imms-agenda-node.dragging {
+  opacity: 0.35 !important;
+  filter: saturate(0.75);
+}
+
+.react-flow__node.imms-agenda-node.dragging::after {
+  content: "드롭하면 묶음 전체 이동";
+  position: absolute;
+  left: 50%;
+  top: -34px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.92);
+  color: #ffffff;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 12px 26px rgba(37, 99, 235, 0.18);
+}
+
+.react-flow__node.imms-agenda-drag-placeholder {
+  pointer-events: none;
+  opacity: 0.72;
+}
+
+.react-flow__node.imms-solution-canvas-node {
+  text-align: left;
+}
+
+.react-flow__node.imms-solution-canvas-node .react-flow__handle {
+  display: none !important;
+}
+
+.imms-side-panel-surface {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.imms-workspace-grid {
+  transition: grid-template-columns 430ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.imms-drawer-pane {
+  will-change: transform, opacity;
+  transition:
+    opacity 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 430ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 215ms ease,
+    border-color 215ms ease;
+}
+
+.imms-drawer-rail-content {
+  will-change: transform, opacity;
+  transition:
+    opacity 240ms ease,
+    transform 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.imms-drawer-body {
+  will-change: transform, opacity;
+  scrollbar-width: none;
+  transition:
+    opacity 280ms ease,
+    transform 430ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.imms-drawer-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.imms-left-panel-detail > section {
+  margin-top: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.1) !important;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 14px !important;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.imms-left-panel-detail > section:first-child {
+  margin-top: 0;
+}
+
+.imms-left-panel-detail > p {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.imms-problem-source-card {
+  position: relative;
+}
+
+.imms-problem-source-card.imms-problem-source-drop-active {
+  transform: scale(1.02);
+  border-color: #2563eb !important;
+  background: #eff6ff !important;
+  box-shadow:
+    0 0 0 4px rgba(37, 99, 235, 0.18),
+    0 18px 36px rgba(37, 99, 235, 0.18) !important;
+}
+
+.imms-problem-source-card.imms-problem-source-drop-active::after {
+  content: "여기에 의견 추가";
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  border-radius: 999px;
+  background: #2563eb;
+  color: #ffffff;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.imms-side-panel input,
+.imms-side-panel textarea,
+.imms-side-panel select {
+  background-color: #ffffff;
+}
+
+.imms-side-panel input:focus,
+.imms-side-panel textarea:focus,
+.imms-side-panel select:focus {
+  border-color: rgba(27, 89, 248, 0.45) !important;
+  box-shadow: 0 0 0 3px rgba(27, 89, 248, 0.08);
+}
+
+.imms-overlay-scroll {
+  scrollbar-gutter: auto;
+}
+
+@supports (overflow: overlay) {
+  .imms-overlay-scroll {
+    overflow-y: overlay !important;
+  }
+}
+
+.imms-overlay-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.imms-overlay-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.imms-overlay-scroll::-webkit-scrollbar-thumb {
+  background: rgba(77, 77, 77, 0.22);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.imms-overlay-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(77, 77, 77, 0.38);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 body {
@@ -35,6 +286,16 @@ input,
 select {
   font: inherit;
   color: inherit;
+}
+
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:disabled,
+[role="button"][aria-disabled="true"] {
+  cursor: not-allowed;
 }
 
 .workspaceShell {

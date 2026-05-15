@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT / "frontend"
+GATEWAY_DIR = ROOT / "gateway"
 HOST = "127.0.0.1"
 RUN_LOCK = ROOT / ".run_dev.lock"
 
@@ -129,9 +130,8 @@ def _pick_port(host: str, preferred: int, avoid: set[int], scan: int = 100) -> i
         return port
 
 
-def _wait_backend_ready(proc: subprocess.Popen, host: str, port: int, timeout_sec: float = 20.0) -> bool:
+def _wait_http_ready(proc: subprocess.Popen, url: str, timeout_sec: float = 20.0) -> bool:
     deadline = time.time() + timeout_sec
-    url = f"http://{host}:{port}/api/health"
     while time.time() < deadline:
         if proc.poll() is not None:
             return False
@@ -161,11 +161,44 @@ def _start_backend_with_retry(python_exe: str, root: Path, host: str, preferred_
             str(port),
         ]
         proc = _spawn(cmd, root)
-        if _wait_backend_ready(proc, host, port):
+        if _wait_http_ready(proc, f"http://{host}:{port}/api/health"):
             return proc, port
         _terminate(proc)
 
     raise RuntimeError("백엔드 포트 바인딩에 실패했습니다. 관리자 권한/보안 소프트웨어/포트 점유 상태를 확인하세요.")
+
+
+def _start_gateway_with_retry(
+    python_exe: str,
+    root: Path,
+    host: str,
+    preferred_port: int,
+    env: dict[str, str],
+) -> tuple[subprocess.Popen, int]:
+    tried: set[int] = set()
+    for _ in range(8):
+        port = _pick_port(host, preferred_port, avoid=tried)
+        tried.add(port)
+        cmd = [
+            python_exe,
+            "-m",
+            "uvicorn",
+            "gateway.main:app",
+            "--reload",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        gateway_env = env.copy()
+        gateway_env["GATEWAY_PORT"] = str(port)
+        gateway_env["GATEWAY_HOST"] = host
+        proc = _spawn(cmd, root, env=gateway_env)
+        if _wait_http_ready(proc, f"http://{host}:{port}/docs"):
+            return proc, port
+        _terminate(proc)
+
+    raise RuntimeError("Gateway 포트 바인딩에 실패했습니다. gateway/.env와 포트 점유 상태를 확인하세요.")
 
 
 def main() -> int:
@@ -185,6 +218,10 @@ def main() -> int:
             print(f"frontend 디렉터리가 없습니다: {FRONTEND_DIR}", file=sys.stderr)
             return 1
 
+        if not GATEWAY_DIR.exists():
+            print(f"gateway 디렉터리가 없습니다: {GATEWAY_DIR}", file=sys.stderr)
+            return 1
+
         next_dev_lock = FRONTEND_DIR / ".next" / "dev" / "lock"
         if next_dev_lock.exists():
             print(
@@ -201,6 +238,7 @@ def main() -> int:
             _run_checked([npm_exe, "install"], FRONTEND_DIR)
 
         preferred_backend = int(os.environ.get("BACKEND_PORT", "8000"))
+        preferred_gateway = int(os.environ.get("GATEWAY_PORT", "8001"))
         preferred_frontend = int(os.environ.get("FRONTEND_PORT", "5173"))
 
         try:
@@ -215,6 +253,30 @@ def main() -> int:
             return 1
 
         frontend_port = _pick_port(HOST, preferred_frontend, avoid={backend_port})
+        gateway_env = os.environ.copy()
+        gateway_env["AI_MODULE_URL"] = f"http://{HOST}:{backend_port}"
+        gateway_env["CORS_ORIGINS"] = (
+            f"[\"http://localhost:{frontend_port}\","
+            f"\"http://127.0.0.1:{frontend_port}\","
+            "\"http://localhost:3000\"]"
+        )
+
+        try:
+            gateway_proc, gateway_port = _start_gateway_with_retry(
+                sys.executable,
+                ROOT,
+                HOST,
+                preferred_gateway,
+                gateway_env,
+            )
+        except Exception as exc:
+            _terminate(backend_proc)
+            print(f"[error] gateway 시작 실패: {exc}", file=sys.stderr)
+            return 1
+
+        if frontend_port == gateway_port:
+            frontend_port = _pick_port(HOST, preferred_frontend, avoid={backend_port, gateway_port})
+
         frontend_cmd = [
             npm_exe,
             "run",
@@ -227,8 +289,11 @@ def main() -> int:
         ]
         frontend_env = os.environ.copy()
         frontend_env["NEXT_PUBLIC_API_BASE_URL"] = f"http://{HOST}:{backend_port}"
+        frontend_env["NEXT_PUBLIC_GATEWAY_URL"] = f"http://{HOST}:{gateway_port}/gateway"
+        frontend_env["NEXT_PUBLIC_GATEWAY_WS_URL"] = f"ws://{HOST}:{gateway_port}/gateway/ws"
 
         print(f"[run] backend  : http://{HOST}:{backend_port}")
+        print(f"[run] gateway  : http://{HOST}:{gateway_port}")
         print(f"[run] frontend : http://{HOST}:{frontend_port}")
         print("[run] 종료는 Ctrl+C")
 
@@ -236,22 +301,27 @@ def main() -> int:
             frontend_proc = _spawn(frontend_cmd, FRONTEND_DIR, env=frontend_env)
         except Exception:
             _terminate(backend_proc)
+            _terminate(gateway_proc)
             raise
 
         try:
             while True:
                 b_code = backend_proc.poll()
+                g_code = gateway_proc.poll()
                 f_code = frontend_proc.poll()
-                if b_code is not None or f_code is not None:
+                if b_code is not None or g_code is not None or f_code is not None:
                     if b_code is None:
                         _terminate(backend_proc)
+                    if g_code is None:
+                        _terminate(gateway_proc)
                     if f_code is None:
                         _terminate(frontend_proc)
-                    return b_code or f_code or 0
+                    return b_code or g_code or f_code or 0
                 time.sleep(0.3)
         except KeyboardInterrupt:
             print("\n[stop] 종료 신호 수신. 프로세스를 정리합니다...")
             _terminate(backend_proc)
+            _terminate(gateway_proc)
             _terminate(frontend_proc)
             return 0
     finally:

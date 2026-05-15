@@ -5,29 +5,56 @@ import os
 import platform
 import queue
 import re
+import subprocess
 import tempfile
 import threading
 import time
+import wave
 import importlib.util
 import copy
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+from supabase import Client, create_client
 
 from llm_client import get_client
+from security_utils import extract_client_ip, is_ip_allowed, parse_ip_whitelist
 
 ROOT = Path(__file__).resolve().parent.parent
-WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "large")
+load_dotenv(ROOT / ".env", override=False)
+load_dotenv(ROOT / "gateway" / ".env", override=False)
+WHISPER_MODEL_NAME = os.environ.get("WHISPER_MODEL", "turbo")
+PYANNOTE_DIARIZATION_MODEL = os.environ.get("PYANNOTE_DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1")
 SUMMARY_INTERVAL = 4
 SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
 LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
+CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
+CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
+CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
+CANVAS_TOPIC_CLUSTER_MAX_PASSES_PER_JOB = 3
+RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
+RUNTIME_USER_STATE_TABLE = "meeting_user_states"
+IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
+AUDIO_IMPORT_ALLOWED_SUFFIXES = {".wav", ".mp3", ".m4a", ".webm"}
+
+_SUPABASE_CLIENT: Client | None = None
+_SUPABASE_CLIENT_INITIALIZED = False
+_SUPABASE_CLIENT_LOCK = threading.Lock()
+_SUPABASE_REQUEST_LOCK = threading.Lock()
+_RUNTIME_DB_DISABLED_TABLES: set[str] = set()
+_RUNTIME_DB_LOGGED_ERRORS: dict[str, float] = {}
+_RUNTIME_DB_STATE_LOCK = threading.Lock()
 
 STOPWORDS = {
     "그냥",
@@ -172,6 +199,12 @@ DECISION_PAT = re.compile(r"(결정|확정|합의|채택|의결|하기로|정리
 ACTION_PAT = re.compile(r"(담당|까지|하겠습니다|진행하겠습니다|준비하겠습니다|검토하겠습니다|공유하겠습니다|작성하겠습니다)")
 DUE_PAT = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{1,2}월\s*\d{1,2}일|오늘|내일|이번주|다음주|월요일|화요일|수요일|목요일|금요일|토요일|일요일)")
 TRANSITION_PAT = re.compile(r"(다음|한편|반면|이제|정리하면|다시|또 하나|두 번째|세 번째|마지막으로)")
+LEADING_TIMESTAMP_RE = re.compile(
+    r"^\s*\[?\s*(?:"
+    r"\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+    r"|\d{1,2}:\d{2}(?::\d{2})?"
+    r")\s*\]?\s*"
+)
 
 
 def _now_ts() -> str:
@@ -181,6 +214,18 @@ def _now_ts() -> str:
 def _safe_text(raw: Any, fallback: str = "") -> str:
     s = str(raw or "").strip()
     return s if s else fallback
+
+
+def _safe_nonnegative_int(raw: Any, fallback: int = 0) -> int:
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return fallback
+    return max(0, value)
+
+
+def _strip_leading_timestamp(raw: Any) -> str:
+    return LEADING_TIMESTAMP_RE.sub("", _safe_text(raw)).strip()
 
 
 def _boolify(raw: Any, default: bool) -> bool:
@@ -260,10 +305,1075 @@ def _normalize_flow_type(raw: Any) -> str:
     return "discussion"
 
 
+def _normalize_canvas_stage(raw: Any) -> str:
+    s = _safe_text(raw, "ideation").lower()
+    if s in {"ideation", "problem-definition", "solution"}:
+        return s
+    return "ideation"
+
+
+def _utc_iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _env_first(*keys: str) -> str:
+    for key in keys:
+        value = _safe_text(os.environ.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _get_supabase_service_client() -> Client | None:
+    global _SUPABASE_CLIENT, _SUPABASE_CLIENT_INITIALIZED
+
+    with _SUPABASE_CLIENT_LOCK:
+        if _SUPABASE_CLIENT_INITIALIZED:
+            return _SUPABASE_CLIENT
+
+        _SUPABASE_CLIENT_INITIALIZED = True
+        supabase_url = _env_first("SUPABASE_URL", "supabase_url", "NEXT_PUBLIC_SUPABASE_URL")
+        supabase_service_role_key = _env_first(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            "supabase_service_role_key",
+        )
+        if not supabase_url or not supabase_service_role_key:
+            return None
+
+        try:
+            _SUPABASE_CLIENT = create_client(supabase_url, supabase_service_role_key)
+        except Exception as exc:
+            print(f"❌ Failed to initialize Supabase client: {exc}")
+            _SUPABASE_CLIENT = None
+        return _SUPABASE_CLIENT
+
+
+def _runtime_db_table_is_disabled(table_name: str) -> bool:
+    with _RUNTIME_DB_STATE_LOCK:
+        return table_name in _RUNTIME_DB_DISABLED_TABLES
+
+
+def _log_runtime_db_error(key: str, message: str, cooldown_sec: float = 10.0) -> None:
+    now = time.time()
+    with _RUNTIME_DB_STATE_LOCK:
+        last_logged_at = _RUNTIME_DB_LOGGED_ERRORS.get(key, 0.0)
+        if now - last_logged_at < cooldown_sec:
+            return
+        _RUNTIME_DB_LOGGED_ERRORS[key] = now
+    print(message)
+
+
+def _handle_runtime_db_exception(table_name: str, action: str, exc: Exception) -> None:
+    raw = str(exc)
+    if "PGRST205" in raw and table_name in raw:
+        with _RUNTIME_DB_STATE_LOCK:
+            _RUNTIME_DB_DISABLED_TABLES.add(table_name)
+        _log_runtime_db_error(
+            f"{table_name}:missing",
+            f"⚠️ Supabase 테이블 `{table_name}` 이 없어 runtime DB 저장을 비활성화합니다. "
+            "supabase_schema.sql 적용 후 backend를 재시작하세요.",
+            cooldown_sec=3600.0,
+        )
+        return
+
+    _log_runtime_db_error(
+        f"{table_name}:{action}:{raw}",
+        f"❌ Failed to {action} using Supabase table `{table_name}`: {raw}",
+        cooldown_sec=15.0,
+    )
+
+
+def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "meeting_goal": _safe_text(workspace.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context")),
+        "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
+        "custom_groups": copy.deepcopy(workspace.get("custom_groups") or []),
+        "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(
+            workspace.get("final_solution_summary")
+        ),
+        "node_positions": _normalize_canvas_node_positions(workspace.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
+        "idea_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (workspace.get("idea_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "problem_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (workspace.get("problem_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "imported_state": copy.deepcopy(workspace.get("imported_state"))
+        if isinstance(workspace.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(workspace.get("saved_at")),
+    }
+
+
+def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    shared_state = row.get("shared_state")
+    if not isinstance(shared_state, dict):
+        shared_state = {}
+    llm_cache = row.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        llm_cache = {}
+
+    return {
+        "meeting_id": _safe_text(meeting_id),
+        "meeting_goal": _safe_text(shared_state.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(shared_state.get("meeting_goal_context")),
+        "stage": _normalize_canvas_stage(shared_state.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(shared_state.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(shared_state.get("canvas_items") or []),
+        "custom_groups": copy.deepcopy(shared_state.get("custom_groups") or []),
+        "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(
+            shared_state.get("final_solution_summary")
+        ),
+        "node_positions": _normalize_canvas_node_positions(shared_state.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(shared_state.get("idea_create_stack")),
+        "idea_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (shared_state.get("idea_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "problem_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (shared_state.get("problem_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "imported_state": copy.deepcopy(shared_state.get("imported_state"))
+        if isinstance(shared_state.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(shared_state.get("saved_at") or row.get("updated_at")),
+        "llm_cache": copy.deepcopy(llm_cache),
+    }
+
+
+def _normalize_canvas_workspace_problem_groups(
+    groups: list[CanvasWorkspaceProblemGroupInput] | None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "group_id": _safe_text(group.group_id),
+            "topic": _safe_text(group.topic),
+            "insight_lens": _safe_text(group.insight_lens),
+            "insight_user_edited": bool(group.insight_user_edited),
+            "keywords": [_safe_text(item) for item in (group.keywords or []) if _safe_text(item)],
+            "agenda_ids": [_safe_text(item) for item in (group.agenda_ids or []) if _safe_text(item)],
+            "agenda_titles": [_safe_text(item) for item in (group.agenda_titles or []) if _safe_text(item)],
+            "ideas": [
+                {
+                    "id": _safe_text(idea.id),
+                    "kind": _safe_text(idea.kind, "note"),
+                    "title": _safe_text(idea.title),
+                    "body": _safe_text(idea.body),
+                }
+                for idea in (group.ideas or [])
+                if _safe_text(idea.id) or _safe_text(idea.title) or _safe_text(idea.body)
+            ],
+            "discussion_items": [
+                {
+                    "id": _safe_text(item.id),
+                    "parent_group_id": _safe_text(item.parent_group_id or group.group_id),
+                    "target_node_id": _safe_text(item.target_node_id),
+                    "target_node_label": _safe_text(item.target_node_label),
+                    "target_node_kind": _safe_text(item.target_node_kind),
+                    "title": _safe_text(item.title),
+                    "body": _safe_text(item.body),
+                    "keywords": [_safe_text(value) for value in (item.keywords or []) if _safe_text(value)][:8],
+                    "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:8],
+                    "refined_utterances": [
+                        {
+                            "utterance_id": _safe_text(value.utterance_id),
+                            "speaker": _safe_text(value.speaker, "참가자"),
+                            "text": _safe_text(value.text),
+                            "timestamp": _safe_text(value.timestamp),
+                        }
+                        for value in (item.refined_utterances or [])
+                        if _safe_text(value.text)
+                    ],
+                    "evidence_utterance_ids": [
+                        _safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)
+                    ][:400],
+                    "ignored_utterance_ids": [
+                        _safe_text(value) for value in (item.ignored_utterance_ids or []) if _safe_text(value)
+                    ][:400],
+                    "ai_pending": bool(item.ai_pending),
+                    "ai_generated": bool(item.ai_generated),
+                    "user_edited": bool(item.user_edited),
+                    "created_by": _safe_text(item.created_by),
+                    "created_at": _safe_text(item.created_at),
+                }
+                for item in (group.discussion_items or [])
+                if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
+            ],
+            "source_summary_items": [
+                _safe_text(item) for item in (group.source_summary_items or []) if _safe_text(item)
+            ],
+            "conclusion": _safe_text(group.conclusion),
+            "conclusion_user_edited": bool(group.conclusion_user_edited),
+            "status": _safe_text(group.status, "draft"),
+            "source_signature": _safe_text(group.source_signature),
+            "source_agenda_signatures": {
+                _safe_text(key): _safe_text(value)
+                for key, value in (group.source_agenda_signatures or {}).items()
+                if _safe_text(key) and _safe_text(value)
+            },
+        }
+        for group in (groups or [])
+        if _safe_text(group.group_id) and _safe_text(group.topic)
+    ]
+
+
+def _normalize_canvas_workspace_solution_topics(
+    topics: list[CanvasWorkspaceSolutionTopicInput] | None,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "group_id": _safe_text(topic.group_id),
+            "topic_no": int(topic.topic_no or 0),
+            "topic": _safe_text(topic.topic),
+            "conclusion": _safe_text(topic.conclusion),
+            "ideas": [_safe_text(item) for item in (topic.ideas or []) if _safe_text(item)],
+            "status": _safe_text(topic.status, "draft"),
+            "problem_topic": _safe_text(topic.problem_topic),
+            "problem_insight": _safe_text(topic.problem_insight),
+            "problem_conclusion": _safe_text(topic.problem_conclusion),
+            "problem_keywords": [_safe_text(item) for item in (topic.problem_keywords or []) if _safe_text(item)],
+            "agenda_titles": [_safe_text(item) for item in (topic.agenda_titles or []) if _safe_text(item)],
+            "ai_suggestions": [
+                {
+                    "id": _safe_text(item.get("id")),
+                    "text": _safe_text(item.get("text")),
+                    "status": _safe_text(item.get("status"), "draft"),
+                }
+                for item in (topic.ai_suggestions or [])
+                if isinstance(item, dict) and (_safe_text(item.get("id")) or _safe_text(item.get("text")))
+            ],
+            "notes": [
+                {
+                    "id": _safe_text(item.get("id")),
+                    "text": _safe_text(item.get("text")),
+                    "source": _safe_text(item.get("source"), "user"),
+                    "source_ai_id": _safe_text(item.get("source_ai_id")),
+                    "is_final_candidate": bool(item.get("is_final_candidate")),
+                    "final_comment": _safe_text(item.get("final_comment")),
+                }
+                for item in (topic.notes or [])
+                if isinstance(item, dict) and (_safe_text(item.get("id")) or _safe_text(item.get("text")))
+            ],
+        }
+        for topic in (topics or [])
+        if _safe_text(topic.group_id) and _safe_text(topic.topic)
+    ]
+
+
+def _normalize_canvas_final_solution_summary(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {
+            "final_count": 0,
+            "topics": [],
+            "items": [],
+            "markdown": "",
+        }
+
+    def normalize_item(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        note_text = _safe_text(item.get("note_text") or item.get("text"))
+        note_id = _safe_text(item.get("note_id") or item.get("id"))
+        topic_id = _safe_text(item.get("topic_id") or item.get("topicId"))
+        if not note_text and not note_id:
+            return None
+        return {
+            "id": _safe_text(item.get("id") or f"{topic_id}::{note_id}"),
+            "topic_id": topic_id,
+            "topic_no": _safe_nonnegative_int(item.get("topic_no") or item.get("topicNo")),
+            "topic_title": _safe_text(item.get("topic_title") or item.get("topicTitle")),
+            "problem_topic": _safe_text(item.get("problem_topic") or item.get("problemTopic")),
+            "problem_conclusion": _safe_text(item.get("problem_conclusion") or item.get("problemConclusion")),
+            "solution_conclusion": _safe_text(item.get("solution_conclusion") or item.get("solutionConclusion")),
+            "note_id": note_id,
+            "note_text": note_text,
+            "final_comment": _safe_text(item.get("final_comment") or item.get("finalComment")),
+            "source": _safe_text(item.get("source"), "user"),
+            "source_ai_id": _safe_text(item.get("source_ai_id") or item.get("sourceAiId")),
+            "agenda_titles": [
+                _safe_text(value)
+                for value in (item.get("agenda_titles") or item.get("agendaTitles") or [])
+                if _safe_text(value)
+            ][:30],
+        }
+
+    topics: list[dict[str, Any]] = []
+    flat_items: list[dict[str, Any]] = []
+    for topic in raw.get("topics") or []:
+        if not isinstance(topic, dict):
+            continue
+        final_notes = [
+            normalized
+            for normalized in (normalize_item(item) for item in (topic.get("final_notes") or topic.get("finalNotes") or []))
+            if normalized
+        ]
+        topic_id = _safe_text(topic.get("topic_id") or topic.get("topicId"))
+        topic_payload = {
+            "topic_id": topic_id,
+            "topic_no": _safe_nonnegative_int(topic.get("topic_no") or topic.get("topicNo")),
+            "topic_title": _safe_text(topic.get("topic_title") or topic.get("topicTitle")),
+            "problem_topic": _safe_text(topic.get("problem_topic") or topic.get("problemTopic")),
+            "solution_conclusion": _safe_text(topic.get("solution_conclusion") or topic.get("solutionConclusion")),
+            "final_notes": final_notes,
+        }
+        if final_notes or topic_payload["topic_title"]:
+            topics.append(topic_payload)
+            flat_items.extend(final_notes)
+
+    explicit_items = [
+        normalized
+        for normalized in (normalize_item(item) for item in (raw.get("items") or []))
+        if normalized
+    ]
+    items = explicit_items or flat_items
+
+    return {
+        "final_count": len(items),
+        "topics": topics,
+        "items": items,
+        "markdown": _safe_text(raw.get("markdown")),
+    }
+
+
+def _normalize_refined_utterances(
+    raw_rows: Any,
+    limit: int = 120,
+    allowed_ids: set[str] | None = None,
+    min_relevance_score: float | None = None,
+) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for idx, raw in enumerate(raw_rows or []):
+        if isinstance(raw, dict):
+            utterance_id = _safe_text(raw.get("utterance_id") or raw.get("utteranceId") or raw.get("id"))
+            speaker = _safe_text(raw.get("speaker"), "참가자")
+            text = _strip_leading_timestamp(_safe_text(raw.get("text") or raw.get("refined_text") or raw.get("refinedText")))
+            timestamp = _safe_text(raw.get("timestamp"))
+            raw_score = raw.get("relevanceScore") or raw.get("relevance_score")
+        else:
+            utterance_id = _safe_text(
+                getattr(raw, "utterance_id", "") or getattr(raw, "utteranceId", "") or getattr(raw, "id", "")
+            )
+            speaker = _safe_text(getattr(raw, "speaker", ""), "참가자")
+            text = _strip_leading_timestamp(
+                _safe_text(
+                    getattr(raw, "text", "")
+                    or getattr(raw, "refined_text", "")
+                    or getattr(raw, "refinedText", "")
+                )
+            )
+            timestamp = _safe_text(getattr(raw, "timestamp", ""))
+            raw_score = getattr(raw, "relevanceScore", None) or getattr(raw, "relevance_score", None)
+
+        if allowed_ids is not None and (not utterance_id or utterance_id not in allowed_ids):
+            continue
+        if min_relevance_score is not None:
+            try:
+                relevance_score = float(raw_score)
+            except (TypeError, ValueError):
+                relevance_score = 0.0
+            if relevance_score < min_relevance_score:
+                continue
+
+        text = _to_summary_point(
+            re.sub(r"\s+", " ", text).strip().strip(" .,!?:;/|"),
+            max_len=72,
+        )
+        if not text:
+            continue
+        utterance_id = utterance_id or f"refined-{idx}"
+        key = utterance_id or f"{speaker}:{text}"
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "utterance_id": utterance_id,
+                "speaker": speaker,
+                "text": text,
+                "timestamp": timestamp,
+            }
+        )
+        if len(normalized) >= limit:
+            break
+
+    return normalized
+
+
+def _normalize_canvas_merged_children(raw_children: Any, limit: int = 80, depth: int = 0) -> list[dict[str, Any]]:
+    if depth >= 4:
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in raw_children or []:
+        if not isinstance(raw, dict):
+            continue
+        child_id = _safe_text(raw.get("id"))
+        title = _safe_text(raw.get("title"))
+        body = _safe_text(raw.get("body") or raw.get("summary"))
+        if not child_id and not (title or body):
+            continue
+        child = {
+            "id": child_id,
+            "agenda_id": _safe_text(raw.get("agenda_id")),
+            "point_id": _safe_text(raw.get("point_id")),
+            "kind": _safe_text(raw.get("kind"), "note"),
+            "status": _safe_text(raw.get("status"), "discussion"),
+            "title": title,
+            "body": body,
+            "keywords": [_safe_text(keyword) for keyword in (raw.get("keywords") or []) if _safe_text(keyword)][:8],
+            "key_evidence": [_safe_text(value) for value in (raw.get("key_evidence") or []) if _safe_text(value)][:8],
+            "refined_utterances": _normalize_refined_utterances(raw.get("refined_utterances") or [], limit=40),
+            "evidence_utterance_ids": [
+                _safe_text(value) for value in (raw.get("evidence_utterance_ids") or []) if _safe_text(value)
+            ][:400],
+            "ignored_utterance_ids": [
+                _safe_text(value) for value in (raw.get("ignored_utterance_ids") or []) if _safe_text(value)
+            ][:400],
+            "merged_children": _normalize_canvas_merged_children(raw.get("merged_children") or [], limit=40, depth=depth + 1),
+            "compacted_from_ids": [
+                _safe_text(value) for value in (raw.get("compacted_from_ids") or []) if _safe_text(value)
+            ][:400],
+            "compaction_level": _safe_nonnegative_int(raw.get("compaction_level")),
+            "ai_generated": bool(raw.get("ai_generated")),
+            "user_edited": bool(raw.get("user_edited")),
+        }
+        normalized.append(child)
+        if len(normalized) >= limit:
+            break
+
+    return normalized
+
+
+def _normalize_canvas_ideation_suggestions(raw_suggestions: Any, limit: int = 8) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for index, raw in enumerate(raw_suggestions or []):
+        if hasattr(raw, "model_dump"):
+            item = raw.model_dump()
+        elif isinstance(raw, dict):
+            item = raw
+        else:
+            continue
+        text = _safe_text(item.get("text"))
+        if not text:
+            continue
+        status = _safe_text(item.get("status"), "draft")
+        if status not in {"draft", "selected", "dismissed"}:
+            status = "draft"
+        suggestion_id = _safe_text(item.get("id")) or f"ideation-suggestion-{index + 1}"
+        normalized.append({
+            "id": suggestion_id,
+            "text": text,
+            "status": status,
+        })
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def _normalize_canvas_workspace_items(
+    items: list[CanvasWorkspaceCanvasItemInput] | None,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+
+    for item in (items or []):
+        item_id = _safe_text(item.id)
+        if not item_id or not (_safe_text(item.title) or _safe_text(item.body)):
+            continue
+
+        payload: dict[str, Any] = {
+            "id": item_id,
+            "agenda_id": _safe_text(item.agenda_id),
+            "point_id": _safe_text(item.point_id),
+            "kind": _safe_text(item.kind, "note"),
+            "status": _safe_text(item.status, "discussion"),
+            "title": _safe_text(item.title),
+            "body": _safe_text(item.body),
+            "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
+            "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:6],
+            "refined_utterances": _normalize_refined_utterances(item.refined_utterances),
+            "evidence_utterance_ids": [_safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)][:400],
+            "ignored_utterance_ids": [_safe_text(value) for value in (item.ignored_utterance_ids or []) if _safe_text(value)][:400],
+            "merged_children": _normalize_canvas_merged_children(item.merged_children),
+            "compacted_from_ids": [_safe_text(value) for value in (item.compacted_from_ids or []) if _safe_text(value)][:400],
+            "compaction_level": _safe_nonnegative_int(item.compaction_level),
+            "parent_topic_id": _safe_text(item.parent_topic_id),
+            "parent_topic_source": _safe_text(item.parent_topic_source)
+            if _safe_text(item.parent_topic_source) in {"ai", "user"}
+            else "",
+            "parent_topic_locked": bool(item.parent_topic_locked),
+            "child_item_ids": [_safe_text(value) for value in (item.child_item_ids or []) if _safe_text(value)][:400],
+            "topic_collapsed": bool(item.topic_collapsed),
+            "created_by": _safe_text(item.created_by) if _safe_text(item.created_by) in {"ai", "user"} else "",
+            "manual_position": False,
+            "ai_generated": bool(item.ai_generated),
+            "user_edited": bool(item.user_edited),
+            "ai_pending": bool(getattr(item, "ai_pending", False)),
+            "ai_suggestions": _normalize_canvas_ideation_suggestions(item.ai_suggestions),
+        }
+
+        normalized.append(payload)
+
+    return normalized
+
+
+def _normalize_canvas_custom_groups(groups: Any) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+
+    for group in (groups or []):
+        if hasattr(group, "model_dump"):
+            raw_group = group.model_dump()
+        elif isinstance(group, dict):
+            raw_group = group
+        else:
+            continue
+
+        group_id = _safe_text(raw_group.get("id"))
+        title = _safe_text(raw_group.get("title"))
+        if not group_id or not title:
+            continue
+
+        normalized.append(
+            {
+                "id": group_id,
+                "title": title,
+                "description": _safe_text(raw_group.get("description")),
+                "keywords": [
+                    _safe_text(keyword)
+                    for keyword in (raw_group.get("keywords") or [])
+                    if _safe_text(keyword)
+                ][:8],
+                "color": _safe_text(raw_group.get("color")),
+                "created_by": _safe_text(raw_group.get("created_by")),
+                "created_at": _safe_text(raw_group.get("created_at")),
+            }
+        )
+
+    return normalized
+
+
+def _normalize_canvas_agenda_overrides(
+    overrides: Any,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    if not isinstance(overrides, dict):
+        return normalized
+
+    for raw_agenda_id, raw_override in overrides.items():
+        agenda_id = _safe_text(raw_agenda_id)
+        if not agenda_id or not isinstance(raw_override, dict):
+            continue
+
+        title = _safe_text(raw_override.get("title"))
+        keywords = [_safe_text(item) for item in (raw_override.get("keywords") or []) if _safe_text(item)]
+        summary_bullets = [
+            _safe_text(item) for item in (raw_override.get("summaryBullets") or []) if _safe_text(item)
+        ]
+
+        if title or keywords or summary_bullets:
+            normalized[agenda_id] = {
+                "title": title,
+                "keywords": keywords,
+                "summaryBullets": summary_bullets,
+            }
+
+    return normalized
+
+
+def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+
+    shared_sync_enabled = _boolify(payload.get("shared_sync_enabled"), True)
+    normalized: dict[str, Any] = {
+        "shared_sync_enabled": shared_sync_enabled,
+        "meeting_goal": _safe_text(payload.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(payload.get("meeting_goal_context")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(payload.get("canvas_items") or []),
+        "custom_groups": _normalize_canvas_custom_groups(payload.get("custom_groups") or []),
+    }
+
+    if not shared_sync_enabled:
+        normalized["stage"] = _normalize_canvas_stage(payload.get("stage"))
+        normalized["problem_groups"] = copy.deepcopy(payload.get("problem_groups") or [])
+        normalized["solution_topics"] = copy.deepcopy(payload.get("solution_topics") or [])
+        normalized["final_solution_summary"] = _normalize_canvas_final_solution_summary(
+            payload.get("final_solution_summary")
+        )
+        normalized["node_positions"] = _normalize_canvas_node_positions(payload.get("node_positions") or {})
+        normalized["imported_state"] = (
+            copy.deepcopy(payload.get("imported_state"))
+            if isinstance(payload.get("imported_state"), dict)
+            else None
+        )
+        normalized["import_override_active"] = bool(payload.get("import_override_active"))
+
+    return normalized
+
+
+def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], saved_at: str) -> dict[str, Any]:
+    return {
+        "meeting_id": _safe_text(meeting_id),
+        "meeting_goal": _safe_text(source.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(source.get("meeting_goal_context")),
+        "stage": _normalize_canvas_stage(source.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(source.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
+        "custom_groups": _normalize_canvas_custom_groups(source.get("custom_groups") or []),
+        "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(source.get("final_solution_summary")),
+        "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(source.get("idea_create_stack")),
+        "idea_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (source.get("idea_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "problem_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (source.get("problem_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "imported_state": copy.deepcopy(source.get("imported_state"))
+        if isinstance(source.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(saved_at),
+        "llm_cache": copy.deepcopy(source.get("llm_cache") or {})
+        if isinstance(source.get("llm_cache"), dict)
+        else {},
+    }
+
+
+def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "meeting_id": _safe_text(workspace.get("meeting_id")),
+        "meeting_goal": _safe_text(workspace.get("meeting_goal")),
+        "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context")),
+        "stage": _normalize_canvas_stage(workspace.get("stage")),
+        "agenda_overrides": _normalize_canvas_agenda_overrides(workspace.get("agenda_overrides")),
+        "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
+        "custom_groups": _normalize_canvas_custom_groups(workspace.get("custom_groups") or []),
+        "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
+        "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
+        "final_solution_summary": _normalize_canvas_final_solution_summary(
+            workspace.get("final_solution_summary")
+        ),
+        "node_positions": _normalize_canvas_node_positions(workspace.get("node_positions") or {}),
+        "idea_create_stack": _safe_nonnegative_int(workspace.get("idea_create_stack")),
+        "idea_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (workspace.get("idea_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "problem_processed_utterance_ids": [
+            _safe_text(item)
+            for item in (workspace.get("problem_processed_utterance_ids") or [])
+            if _safe_text(item)
+        ][:1000],
+        "imported_state": copy.deepcopy(workspace.get("imported_state"))
+        if isinstance(workspace.get("imported_state"), dict)
+        else None,
+        "saved_at": _safe_text(workspace.get("saved_at")),
+    }
+
+
+def _load_canvas_workspace_from_db(meeting_id: str) -> dict[str, Any] | None:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    if client is None or not normalized_meeting_id:
+        return None
+    if _runtime_db_table_is_disabled(RUNTIME_SHARED_STATE_TABLE):
+        return None
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            response = (
+                client.table(RUNTIME_SHARED_STATE_TABLE)
+                .select("meeting_id,shared_state,llm_cache,updated_at")
+                .eq("meeting_id", normalized_meeting_id)
+                .limit(1)
+                .execute()
+            )
+        rows = response.data or []
+        if not rows:
+            return None
+        first_row = rows[0] if isinstance(rows[0], dict) else {}
+        if not isinstance(first_row, dict):
+            return None
+        return _workspace_from_storage_row(normalized_meeting_id, first_row)
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_SHARED_STATE_TABLE, "load", exc)
+        return None
+
+
+def _save_canvas_workspace_to_db(meeting_id: str, workspace: dict[str, Any]) -> bool:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    if client is None or not normalized_meeting_id:
+        return False
+    if _runtime_db_table_is_disabled(RUNTIME_SHARED_STATE_TABLE):
+        return False
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            client.table(RUNTIME_SHARED_STATE_TABLE).upsert(
+                {
+                    "meeting_id": normalized_meeting_id,
+                    "shared_state": _workspace_payload_from_runtime_workspace(workspace),
+                    "llm_cache": copy.deepcopy(workspace.get("llm_cache") or {}),
+                    "updated_at": _utc_iso_now(),
+                },
+                on_conflict="meeting_id",
+            ).execute()
+        return True
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_SHARED_STATE_TABLE, "save", exc)
+        return False
+
+
+def _load_canvas_personal_notes_from_db(
+    meeting_id: str,
+    user_id: str,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return None, None
+    if _runtime_db_table_is_disabled(RUNTIME_USER_STATE_TABLE):
+        return None, None
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            response = (
+                client.table(RUNTIME_USER_STATE_TABLE)
+                .select("meeting_id,user_id,personal_state,updated_at")
+                .eq("meeting_id", normalized_meeting_id)
+                .eq("user_id", normalized_user_id)
+                .limit(1)
+                .execute()
+            )
+        rows = response.data or []
+        if not rows:
+            return None, None
+        first_row = rows[0] if isinstance(rows[0], dict) else {}
+        if not isinstance(first_row, dict):
+            return None, None
+        personal_state = first_row.get("personal_state")
+        if not isinstance(personal_state, dict):
+            personal_state = {}
+        notes = personal_state.get("personal_notes")
+        if not isinstance(notes, list):
+            notes = []
+        local_canvas_state = personal_state.get("local_canvas_state")
+        if not isinstance(local_canvas_state, dict):
+            local_canvas_state = None
+        return (
+            copy.deepcopy([item for item in notes if isinstance(item, dict)]),
+            copy.deepcopy(local_canvas_state) if isinstance(local_canvas_state, dict) else None,
+        )
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_USER_STATE_TABLE, "load", exc)
+        return None, None
+
+
+def _save_canvas_personal_notes_to_db(
+    meeting_id: str,
+    user_id: str,
+    personal_notes: list[dict[str, Any]],
+    local_canvas_state: dict[str, Any] | None = None,
+) -> bool:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return False
+    if _runtime_db_table_is_disabled(RUNTIME_USER_STATE_TABLE):
+        return False
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            client.table(RUNTIME_USER_STATE_TABLE).upsert(
+                {
+                    "meeting_id": normalized_meeting_id,
+                    "user_id": normalized_user_id,
+                    "personal_state": {
+                        "personal_notes": copy.deepcopy(personal_notes or []),
+                        "local_canvas_state": copy.deepcopy(local_canvas_state)
+                        if isinstance(local_canvas_state, dict)
+                        else {},
+                    },
+                    "updated_at": _utc_iso_now(),
+                },
+                on_conflict="meeting_id,user_id",
+            ).execute()
+        return True
+    except Exception as exc:
+        _handle_runtime_db_exception(RUNTIME_USER_STATE_TABLE, "save", exc)
+        return False
+
+
+def _warm_canvas_workspace_cache(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return {}
+
+    with rt.lock:
+        cached = copy.deepcopy(rt.canvas_workspace_by_meeting.get(normalized_meeting_id) or {})
+        if cached:
+            return cached
+
+    loaded = _load_canvas_workspace_from_db(normalized_meeting_id)
+    if loaded:
+        with rt.lock:
+            rt.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(loaded)
+        return copy.deepcopy(loaded)
+
+    with rt.lock:
+        return copy.deepcopy(_ensure_canvas_workspace_entry(rt, normalized_meeting_id))
+
+
+def _payload_to_primitive(payload: Any) -> Any:
+    if hasattr(payload, "model_dump"):
+        try:
+            return payload.model_dump()
+        except Exception:
+            pass
+    if hasattr(payload, "dict"):
+        try:
+            return payload.dict()
+        except Exception:
+            pass
+    return payload
+
+
+def _canvas_llm_signature(payload: Any) -> str:
+    return json.dumps(
+        _payload_to_primitive(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return {}
+
+    workspace = rt.canvas_workspace_by_meeting.get(normalized_meeting_id)
+    if not isinstance(workspace, dict):
+        workspace = {}
+    workspace.setdefault("meeting_id", normalized_meeting_id)
+    workspace.setdefault("meeting_goal", "")
+    workspace.setdefault("meeting_goal_context", "")
+    workspace.setdefault("stage", "ideation")
+    workspace.setdefault("agenda_overrides", {})
+    workspace.setdefault("canvas_items", [])
+    workspace.setdefault("custom_groups", [])
+    workspace.setdefault("problem_groups", [])
+    workspace.setdefault("solution_topics", [])
+    workspace.setdefault("final_solution_summary", _normalize_canvas_final_solution_summary({}))
+    workspace.setdefault("node_positions", {})
+    workspace.setdefault("idea_create_stack", 0)
+    workspace.setdefault("idea_processed_utterance_ids", [])
+    workspace.setdefault("imported_state", None)
+    workspace.setdefault("saved_at", "")
+    workspace.setdefault("llm_cache", {})
+    rt.canvas_workspace_by_meeting[normalized_meeting_id] = workspace
+    return workspace
+
+
+def _get_canvas_llm_cached_result(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+) -> dict[str, Any] | None:
+    workspace = _ensure_canvas_workspace_entry(rt, meeting_id)
+    if not workspace:
+        return None
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        return None
+    cached = llm_cache.get(cache_key)
+    if not isinstance(cached, dict):
+        return None
+    if _safe_text(cached.get("signature")) != _safe_text(signature):
+        return None
+    result = cached.get("result")
+    if not isinstance(result, dict):
+        return None
+    return copy.deepcopy(result)
+
+
+def _set_canvas_llm_cached_result(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    result: dict[str, Any],
+) -> None:
+    workspace = _ensure_canvas_workspace_entry(rt, meeting_id)
+    if not workspace:
+        return
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        llm_cache = {}
+        workspace["llm_cache"] = llm_cache
+    llm_cache[cache_key] = {
+        "signature": _safe_text(signature),
+        "generated_at": _now_ts(),
+        "result": copy.deepcopy(result),
+    }
+
+
+def _get_canvas_llm_inflight_entry(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    meeting_entries = rt.canvas_llm_inflight_by_meeting.get(_safe_text(meeting_id))
+    if not isinstance(meeting_entries, dict):
+        return None
+    entry = meeting_entries.get(_safe_text(cache_key))
+    return entry if isinstance(entry, dict) else None
+
+
+def _run_canvas_llm_cached_request(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    compute: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_cache_key = _safe_text(cache_key)
+    normalized_signature = _safe_text(signature)
+    if not normalized_meeting_id or not normalized_cache_key or not normalized_signature:
+        return compute()
+
+    _warm_canvas_workspace_cache(rt, normalized_meeting_id)
+
+    while True:
+        wait_event: threading.Event | None = None
+        wait_error = ""
+        should_compute = False
+
+        with rt.lock:
+            cached = _get_canvas_llm_cached_result(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+            )
+            if cached:
+                return cached
+
+            meeting_entries = rt.canvas_llm_inflight_by_meeting.setdefault(normalized_meeting_id, {})
+            inflight = meeting_entries.get(normalized_cache_key)
+            if (
+                isinstance(inflight, dict)
+                and _safe_text(inflight.get("signature")) == normalized_signature
+                and isinstance(inflight.get("event"), threading.Event)
+            ):
+                wait_event = inflight["event"]
+                wait_error = _safe_text(inflight.get("error"))
+            else:
+                wait_event = threading.Event()
+                meeting_entries[normalized_cache_key] = {
+                    "signature": normalized_signature,
+                    "event": wait_event,
+                    "error": "",
+                }
+                should_compute = True
+
+        if not should_compute and wait_event is not None:
+            wait_event.wait(timeout=90.0)
+            with rt.lock:
+                cached = _get_canvas_llm_cached_result(
+                    rt,
+                    normalized_meeting_id,
+                    normalized_cache_key,
+                    normalized_signature,
+                )
+                if cached:
+                    return cached
+
+                inflight = _get_canvas_llm_inflight_entry(rt, normalized_meeting_id, normalized_cache_key)
+                if (
+                    isinstance(inflight, dict)
+                    and _safe_text(inflight.get("signature")) == normalized_signature
+                    and isinstance(inflight.get("event"), threading.Event)
+                    and not inflight["event"].is_set()
+                ):
+                    continue
+                wait_error = _safe_text((inflight or {}).get("error"), wait_error)
+
+            if wait_error:
+                raise RuntimeError(wait_error)
+            continue
+
+        try:
+            with rt.canvas_llm_request_lock:
+                result = compute()
+        except Exception as exc:
+            with rt.lock:
+                meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+                inflight = meeting_entries.pop(normalized_cache_key, None)
+                if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
+                    inflight["error"] = str(exc)
+                    inflight["event"].set()
+                if not meeting_entries:
+                    rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+            raise
+
+        workspace_snapshot: dict[str, Any] | None = None
+        with rt.lock:
+            _set_canvas_llm_cached_result(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+                result,
+            )
+            workspace_snapshot = copy.deepcopy(
+                _ensure_canvas_workspace_entry(rt, normalized_meeting_id),
+            )
+            meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+            inflight = meeting_entries.pop(normalized_cache_key, None)
+            if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
+                inflight["event"].set()
+            if not meeting_entries:
+                rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+        if workspace_snapshot:
+            _save_canvas_workspace_to_db(normalized_meeting_id, workspace_snapshot)
+        return copy.deepcopy(result)
+
+
 def _doc_freq(rows: list[dict[str, Any]]) -> Counter[str]:
     cnt: Counter[str] = Counter()
     for row in rows:
-        seen = set(_keyword_tokens(_safe_text(row.get("text"))))
+        seen = set(_keyword_tokens(_strip_leading_timestamp(row.get("text"))))
         for tok in seen:
             cnt[tok] += 1
     return cnt
@@ -279,7 +1389,7 @@ def _top_keywords_from_rows(
     banned = _tokens(meeting_goal)
     cnt: Counter[str] = Counter()
     for row in rows:
-        text = _safe_text(row.get("text"))
+        text = _strip_leading_timestamp(row.get("text"))
         for tok in _keyword_tokens(text):
             if tok in banned:
                 continue
@@ -379,7 +1489,7 @@ def _usable_title_keywords(keywords: list[str] | None, meeting_goal: str) -> lis
 
 
 def _is_low_quality_title(title: str, meeting_goal: str) -> bool:
-    txt = _safe_text(title)
+    txt = _strip_leading_timestamp(title)
     if not txt:
         return True
     goal = _safe_text(meeting_goal)
@@ -407,7 +1517,7 @@ def _is_low_quality_title(title: str, meeting_goal: str) -> bool:
 
 
 def _clean_agenda_title(raw_title: Any, meeting_goal: str = "", keywords: list[str] | None = None) -> str:
-    title = _safe_text(raw_title)
+    title = _strip_leading_timestamp(raw_title)
     title = re.sub(r"^[0-9]+[.)]\s*", "", title).strip(" -:|")
     title = re.sub(r"\s+", " ", title)
     if (not title) or _is_low_quality_title(title, meeting_goal):
@@ -417,15 +1527,17 @@ def _clean_agenda_title(raw_title: Any, meeting_goal: str = "", keywords: list[s
 
 def _split_ts_prefix(line: str) -> tuple[str, str]:
     txt = _safe_text(line)
-    m = re.match(r"^\[(\d{2}:\d{2}(?::\d{2})?)\]\s*(.*)$", txt)
+    m = re.match(
+        r"^\[\s*((?:\d{4}-\d{2}-\d{2}[T\s]\d{1,2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:\d{2}:\d{2}(?::\d{2})?))\s*\]\s*(.*)$",
+        txt,
+    )
     if m:
         return _safe_text(m.group(1)), _safe_text(m.group(2))
     return "", txt
 
 
 def _to_summary_point(text: str, max_len: int | None = SUMMARY_POINT_TARGET_LEN) -> str:
-    s = _safe_text(text)
-    s = re.sub(r"^\[[0-9:]+\]\s*", "", s)
+    s = _strip_leading_timestamp(text)
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"^(음|어|네|예|일단|그리고|근데|그니까|그러니까)\s+", "", s)
     s = re.sub(r"^(저는|제가|저희는|저희가)\s+", "", s)
@@ -497,8 +1609,7 @@ def _extractive_title_from_candidates(candidates: list[str], meeting_goal: str) 
             break
 
     def _compact_clause(text: str, max_len: int = 36) -> str:
-        s = _safe_text(text)
-        s = re.sub(r"^\[[0-9:]+\]\s*", "", s)
+        s = _strip_leading_timestamp(text)
         s = re.sub(r"\s+", " ", s).strip(" ,;:/")
         s = re.sub(r"^(그리고|또|또한|다만|하지만|근데|그래서)\s+", "", s)
         s = re.split(r"\s*(?:;|/|·)\s*", s)[0]
@@ -660,9 +1771,350 @@ class ReplayStepInput(BaseModel):
     auto_analyze: bool = True
 
 
+class TranscriptSyncItemInput(BaseModel):
+    speaker: str = "화자"
+    text: str
+    timestamp: str | None = None
+
+
+class TranscriptSyncInput(BaseModel):
+    meeting_goal: str = ""
+    window_size: int = Field(default=12, ge=4, le=80)
+    reset_state: bool = True
+    auto_analyze: bool = True
+    transcript: list[TranscriptSyncItemInput] = Field(default_factory=list)
+
+
+class SttFlowSummaryTurnInput(BaseModel):
+    speaker: str = "화자"
+    text: str = ""
+    timestamp: str | None = None
+
+
+class SttFlowSummaryInput(BaseModel):
+    meeting_id: str = ""
+    turns: list[SttFlowSummaryTurnInput] = Field(default_factory=list, min_length=1, max_length=6)
+    max_chars: int = Field(default=30, ge=8, le=60)
+
+
+class CanvasPlacementConfirmInput(BaseModel):
+    tool: str = "note"
+    ui_x: float = 0.0
+    ui_y: float = 0.0
+    flow_x: float = 0.0
+    flow_y: float = 0.0
+    agenda_id: str = ""
+    point_id: str = ""
+    title: str = ""
+    body: str = ""
+
+
+class ProblemDefinitionAgendaInput(BaseModel):
+    agenda_id: str
+    title: str
+    keywords: list[str] = Field(default_factory=list)
+    summary_bullets: list[str] = Field(default_factory=list)
+
+
+class ProblemDefinitionIdeaInput(BaseModel):
+    id: str
+    agenda_id: str
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class ProblemDefinitionGenerateInput(BaseModel):
+    meeting_id: str = ""
+    topic: str = ""
+    agendas: list[ProblemDefinitionAgendaInput] = Field(default_factory=list)
+    ideas: list[ProblemDefinitionIdeaInput] = Field(default_factory=list)
+
+
+class ProblemConclusionIdeaInput(BaseModel):
+    id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class ProblemConclusionGroupInput(BaseModel):
+    group_id: str = ""
+    topic: str = ""
+    insight_lens: str = ""
+    agenda_titles: list[str] = Field(default_factory=list)
+    source_summary_items: list[str] = Field(default_factory=list)
+    ideas: list[ProblemConclusionIdeaInput] = Field(default_factory=list)
+
+
+class ProblemConclusionGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    group: ProblemConclusionGroupInput
+
+
+class MeetingGoalGenerateInput(BaseModel):
+    meeting_id: str = ""
+    topic: str = ""
+
+
+class CanvasIdeaAssimilationUtteranceInput(BaseModel):
+    id: str = ""
+    speaker: str = ""
+    text: str = ""
+    timestamp: str = ""
+
+
+class CanvasRefinedUtteranceInput(BaseModel):
+    utterance_id: str = ""
+    speaker: str = ""
+    text: str = ""
+    timestamp: str = ""
+
+
+class CanvasIdeaAssimilationIdeaInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    summary: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    key_evidence: list[str] = Field(default_factory=list)
+    refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    user_edited: bool = False
+
+
+class CanvasIdeaAssimilationInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    selected_agenda_id: str = ""
+    context_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+    target_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+    existing_ideas: list[CanvasIdeaAssimilationIdeaInput] = Field(default_factory=list)
+
+
+class SolutionStageTopicInput(BaseModel):
+    group_id: str
+    topic_no: int = 0
+    topic: str
+    conclusion: str = ""
+
+
+class SolutionStageGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    topics: list[SolutionStageTopicInput] = Field(default_factory=list)
+
+
+class IdeationSuggestionTopicInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+
+
+class IdeationSuggestionChildInput(BaseModel):
+    id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+
+
+class IdeationSuggestionGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    topic: IdeationSuggestionTopicInput = Field(default_factory=IdeationSuggestionTopicInput)
+    child_items: list[IdeationSuggestionChildInput] = Field(default_factory=list)
+
+
+class CanvasIdeationSuggestionInput(BaseModel):
+    id: str = ""
+    text: str = ""
+    status: str = "draft"
+
+
+class CanvasWorkspaceIdeaInput(BaseModel):
+    id: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class CanvasProblemDiscussionInput(BaseModel):
+    id: str = ""
+    parent_group_id: str = ""
+    target_node_id: str = ""
+    target_node_label: str = ""
+    target_node_kind: str = ""
+    title: str = ""
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    key_evidence: list[str] = Field(default_factory=list)
+    refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    ignored_utterance_ids: list[str] = Field(default_factory=list)
+    ai_pending: bool = False
+    ai_generated: bool = False
+    user_edited: bool = False
+    created_by: str = ""
+    created_at: str = ""
+
+
+class CanvasWorkspaceCanvasItemInput(BaseModel):
+    id: str = ""
+    agenda_id: str = ""
+    point_id: str = ""
+    kind: str = "note"
+    status: str = "discussion"
+    title: str = ""
+    body: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    key_evidence: list[str] = Field(default_factory=list)
+    refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    ignored_utterance_ids: list[str] = Field(default_factory=list)
+    merged_children: list[dict[str, Any]] = Field(default_factory=list)
+    compacted_from_ids: list[str] = Field(default_factory=list)
+    compaction_level: int = 0
+    parent_topic_id: str = ""
+    parent_topic_source: str = ""
+    parent_topic_locked: bool = False
+    child_item_ids: list[str] = Field(default_factory=list)
+    topic_collapsed: bool = False
+    created_by: str = ""
+    manual_position: bool = False
+    ai_generated: bool = False
+    user_edited: bool = False
+    ai_pending: bool = False
+    ai_suggestions: list[CanvasIdeationSuggestionInput] = Field(default_factory=list)
+    x: float | None = None
+    y: float | None = None
+
+
+class CanvasIdeaAssimilationWorkspaceStartInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    selected_agenda_id: str = ""
+    context_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+    target_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+
+
+class CanvasTopicSummaryWorkspaceStartInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    topic_item_id: str = ""
+
+
+class CanvasProblemDiscussionWorkspaceStartInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    selected_group_id: str = ""
+    context_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+    target_utterances: list[CanvasIdeaAssimilationUtteranceInput] = Field(default_factory=list)
+
+
+class CanvasCustomGroupInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    description: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    color: str = ""
+    created_by: str = ""
+    created_at: str = ""
+
+
+class CanvasPersonalNoteInput(BaseModel):
+    id: str = ""
+    project_id: str = ""
+    agenda_id: str = ""
+    linked_canvas_item_id: str = ""
+    linked_canvas_item_title: str = ""
+    kind: str = "note"
+    title: str = ""
+    body: str = ""
+
+
+class CanvasNodePositionInput(BaseModel):
+    x: float = 0
+    y: float = 0
+
+
+class CanvasWorkspaceProblemGroupInput(BaseModel):
+    group_id: str = ""
+    topic: str = ""
+    insight_lens: str = ""
+    insight_user_edited: bool = False
+    keywords: list[str] = Field(default_factory=list)
+    agenda_ids: list[str] = Field(default_factory=list)
+    agenda_titles: list[str] = Field(default_factory=list)
+    ideas: list[CanvasWorkspaceIdeaInput] = Field(default_factory=list)
+    discussion_items: list[CanvasProblemDiscussionInput] = Field(default_factory=list)
+    source_summary_items: list[str] = Field(default_factory=list)
+    conclusion: str = ""
+    conclusion_user_edited: bool = False
+    status: str = "draft"
+    source_signature: str = ""
+    source_agenda_signatures: dict[str, str] = Field(default_factory=dict)
+
+
+class CanvasWorkspaceSolutionTopicInput(BaseModel):
+    group_id: str = ""
+    topic_no: int = 0
+    topic: str = ""
+    conclusion: str = ""
+    ideas: list[str] = Field(default_factory=list)
+    status: str = "draft"
+    problem_topic: str = ""
+    problem_insight: str = ""
+    problem_conclusion: str = ""
+    problem_keywords: list[str] = Field(default_factory=list)
+    agenda_titles: list[str] = Field(default_factory=list)
+    ai_suggestions: list[dict[str, Any]] = Field(default_factory=list)
+    notes: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CanvasWorkspaceStateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_goal: str = ""
+    meeting_goal_context: str = ""
+    stage: str = "ideation"
+    agenda_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
+    custom_groups: list[CanvasCustomGroupInput] = Field(default_factory=list)
+    problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
+    solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
+    final_solution_summary: dict[str, Any] = Field(default_factory=dict)
+    node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
+    imported_state: dict[str, Any] | None = None
+
+
+class CanvasWorkspacePatchInput(BaseModel):
+    meeting_id: str = ""
+    meeting_goal: str | None = None
+    meeting_goal_context: str | None = None
+    stage: str | None = None
+    agenda_overrides: dict[str, dict[str, Any]] | None = None
+    canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
+    custom_groups: list[CanvasCustomGroupInput] | None = None
+    problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
+    solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
+    final_solution_summary: dict[str, Any] | None = None
+    node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
+    imported_state: dict[str, Any] | None = None
+
+
+class CanvasPersonalNotesStateInput(BaseModel):
+    meeting_id: str = ""
+    user_id: str = ""
+    personal_notes: list[CanvasPersonalNoteInput] = Field(default_factory=list)
+    local_canvas_state: dict[str, Any] | None = None
+
+
 @dataclass
 class RuntimeStore:
     lock: threading.Lock = field(default_factory=threading.Lock)
+    llm_io_lock: threading.Lock = field(default_factory=threading.Lock)
+    canvas_llm_request_lock: threading.Lock = field(default_factory=threading.Lock)
     meeting_goal: str = ""
     window_size: int = 12
     transcript: list[dict[str, str]] = field(default_factory=list)
@@ -697,6 +2149,13 @@ class RuntimeStore:
     analysis_next_windowed_target: int = SUMMARY_INTERVAL
     llm_io_seq: int = 0
     llm_io_logs: list[dict[str, Any]] = field(default_factory=list)
+    canvas_last_placement: dict[str, Any] = field(default_factory=dict)
+    canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_idea_jobs_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_problem_jobs_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_personal_notes_by_meeting_user: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    canvas_local_state_by_meeting_user: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.meeting_goal = ""
@@ -732,11 +2191,42 @@ class RuntimeStore:
         self.analysis_next_windowed_target = SUMMARY_INTERVAL
         self.llm_io_seq = 0
         self.llm_io_logs = []
+        self.canvas_last_placement = {}
+        self.canvas_workspace_by_meeting = {}
+        self.canvas_llm_inflight_by_meeting = {}
+        self.canvas_idea_jobs_by_meeting = {}
+        self.canvas_problem_jobs_by_meeting = {}
+        self.canvas_personal_notes_by_meeting_user = {}
+        self.canvas_local_state_by_meeting_user = {}
+
+
+@dataclass
+class AudioImportJob:
+    job_id: str
+    meeting_id: str
+    user_id: str
+    filename: str
+    status: str = "queued"
+    progress: float = 0.0
+    step: str = "queued"
+    detail: str = ""
+    created_at: str = field(default_factory=lambda: _now_ts())
+    updated_at: str = field(default_factory=lambda: _now_ts())
+    transcript_count: int = 0
+    speaker_count: int = 0
+    used_diarization: bool = False
+    warning: str = ""
+    error: str = ""
+    state: dict[str, Any] | None = None
 
 
 RT = RuntimeStore()
 ANALYSIS_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=2048)
 ANALYSIS_WORKER_STARTED = False
+_PYANNOTE_PIPELINE = None
+_PYANNOTE_LOCK = threading.Lock()
+_AUDIO_IMPORT_JOBS: dict[str, AudioImportJob] = {}
+_AUDIO_IMPORT_JOBS_LOCK = threading.Lock()
 
 
 def _analysis_worker_status(rt: RuntimeStore) -> dict[str, Any]:
@@ -767,19 +2257,20 @@ def _truncate_text(raw: Any, limit: int = LLM_IO_PREVIEW_MAX) -> str:
 
 
 def _append_llm_io_log(rt: RuntimeStore, direction: str, stage: str, payload: Any, meta: dict[str, Any] | None = None) -> None:
-    rt.llm_io_seq += 1
-    preview = _truncate_text(payload)
-    entry = {
-        "seq": int(rt.llm_io_seq),
-        "at": _now_ts(),
-        "direction": _safe_text(direction),
-        "stage": _safe_text(stage),
-        "payload": preview,
-        "meta": dict(meta or {}),
-    }
-    rt.llm_io_logs.append(entry)
-    if len(rt.llm_io_logs) > LLM_IO_LOG_MAX:
-        rt.llm_io_logs = rt.llm_io_logs[-LLM_IO_LOG_MAX:]
+    with rt.llm_io_lock:
+        rt.llm_io_seq += 1
+        preview = _truncate_text(payload)
+        entry = {
+            "seq": int(rt.llm_io_seq),
+            "at": _now_ts(),
+            "direction": _safe_text(direction),
+            "stage": _safe_text(stage),
+            "payload": preview,
+            "meta": dict(meta or {}),
+        }
+        rt.llm_io_logs.append(entry)
+        if len(rt.llm_io_logs) > LLM_IO_LOG_MAX:
+            rt.llm_io_logs = rt.llm_io_logs[-LLM_IO_LOG_MAX:]
 
 
 def _call_llm_json(
@@ -810,6 +2301,966 @@ def _call_llm_json(
     return parsed
 
 
+def _md_text(raw: Any) -> str:
+    return re.sub(r"\s+", " ", _safe_text(raw)).strip()
+
+
+def _build_problem_definition_groups_local(payload: ProblemDefinitionGenerateInput) -> list[dict[str, Any]]:
+    agendas = payload.agendas or []
+    ideas = payload.ideas or []
+    if not agendas:
+        return []
+
+    groups: list[dict[str, Any]] = []
+    for agenda in agendas:
+        agenda_keywords = [
+            tok
+            for tok in (
+                [_normalize_keyword_token(x) for x in (agenda.keywords or [])]
+                + _keyword_tokens(agenda.title)
+            )
+            if tok and not _is_title_keyword_noise(tok)
+        ]
+        dedup_keywords = list(dict.fromkeys(agenda_keywords))
+
+        best_group_idx = -1
+        best_score = 0
+        for idx, group in enumerate(groups):
+            overlap = len(set(dedup_keywords) & set(group.get("keywords") or []))
+            if overlap > best_score:
+                best_score = overlap
+                best_group_idx = idx
+
+        if best_group_idx < 0 or best_score == 0:
+            groups.append(
+                {
+                    "group_id": f"problem-group-{len(groups) + 1}",
+                    "topic": _safe_text(dedup_keywords[0] if dedup_keywords else agenda.title, agenda.title),
+                    "keywords": dedup_keywords[:8],
+                    "agenda_ids": [_safe_text(agenda.agenda_id)],
+                    "agenda_titles": [_safe_text(agenda.title)],
+                    "source_summary_items": [_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)],
+                }
+            )
+            continue
+
+        group = groups[best_group_idx]
+        group["agenda_ids"].append(_safe_text(agenda.agenda_id))
+        group["agenda_titles"].append(_safe_text(agenda.title))
+        group["keywords"] = list(dict.fromkeys([*(group.get("keywords") or []), *dedup_keywords]))[:8]
+        group["source_summary_items"] = [
+            *(group.get("source_summary_items") or []),
+            *[_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)],
+        ][:12]
+
+    idea_by_agenda: dict[str, list[dict[str, Any]]] = {}
+    for idea in ideas:
+        agenda_id = _safe_text(idea.agenda_id)
+        if not agenda_id:
+            continue
+        idea_by_agenda.setdefault(agenda_id, []).append(
+            {
+                "id": _safe_text(idea.id),
+                "kind": _safe_text(idea.kind, "note"),
+                "title": _safe_text(idea.title),
+                "body": _safe_text(idea.body),
+            }
+        )
+
+    out: list[dict[str, Any]] = []
+    for idx, group in enumerate(groups, start=1):
+        linked_ideas: list[dict[str, Any]] = []
+        for agenda_id in group.get("agenda_ids") or []:
+            linked_ideas.extend(idea_by_agenda.get(_safe_text(agenda_id), []))
+
+        topic = _safe_text(group.get("topic"), f"주제 {idx}")
+        summaries = [_safe_text(x) for x in (group.get("source_summary_items") or []) if _safe_text(x)]
+        out.append(
+            {
+                "group_id": _safe_text(group.get("group_id"), f"problem-group-{idx}"),
+                "topic": _normalize_problem_topic_label(topic, f"주제 {idx}"),
+                "insight_lens": "공통 행동과 니즈를 묶어 해석",
+                "keywords": [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)][:6],
+                "agenda_ids": [_safe_text(x) for x in (group.get("agenda_ids") or []) if _safe_text(x)],
+                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
+                "ideas": linked_ideas[:24],
+                "source_summary_items": summaries[:8],
+                "conclusion": _to_summary_point(summaries[0], max_len=None) if summaries else f"{_safe_text(topic)} 방향 구체화",
+            }
+        )
+    return out
+
+
+def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
+    text = _strip_leading_timestamp(raw) or _safe_text(fallback, "주제")
+    parts = re.findall(r"[A-Za-z0-9가-힣]+", text)
+    cleaned: list[str] = []
+    for part in parts:
+        tok = _safe_text(part)
+        if not tok:
+            continue
+        lowered = tok.lower()
+        if lowered in STOPWORDS or _is_title_keyword_noise(tok):
+            continue
+        cleaned.append(tok)
+        if len(cleaned) >= 2:
+            break
+    if cleaned:
+        return " ".join(cleaned)
+    return _safe_text(fallback, "주제")
+
+
+def _build_meeting_goal_local(topic: str) -> str:
+    clean_topic = _safe_text(topic, "이번 회의").strip()
+    if not clean_topic:
+        return "이번 회의에서 실행 방향과 우선순위를 정리한다."
+    return f"{clean_topic}에 대해 실행 방향과 핵심 우선순위를 정리한다."
+
+
+def _build_meeting_goal_local_options(topic: str) -> list[str]:
+    clean_topic = _safe_text(topic, "이번 회의").strip()
+    if not clean_topic:
+        return [
+            "이번 회의에서 실행 방향과 우선순위를 정리한다.",
+            "이번 회의의 핵심 쟁점과 결정 기준을 합의한다.",
+            "이번 회의에서 다음 실행 과제를 명확히 한다.",
+        ]
+    return _dedup_preserve(
+        [
+            f"{clean_topic}에 대해 실행 방향과 핵심 우선순위를 정리한다.",
+            f"{clean_topic}의 핵심 쟁점과 의사결정 기준을 합의한다.",
+            f"{clean_topic}에서 다음 실행 과제와 담당 범위를 정리한다.",
+        ],
+        limit=3,
+    )
+
+
+def _build_meeting_goal_prompt(topic: str) -> str:
+    payload = {
+        "meeting_topic": _safe_text(topic),
+    }
+    return (
+        "너는 회의 제목을 보고 회의 목표를 한 문장으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- meeting_topic을 바탕으로 이번 회의가 무엇을 정리하거나 결정해야 하는지 목표 후보 3개를 쓴다.\n"
+        "- 제목을 그대로 반복하지 말고, 회의에서 얻고 싶은 결과나 방향이 드러나게 쓴다.\n"
+        "- 너무 추상적이지 않게, 실행 또는 정리의 대상이 보이도록 쓴다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "goal": "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다.",\n'
+        '  "goals": [\n'
+        '    "키링 굿즈 전략에서 우선 검증할 타깃 수요와 실행 방향을 정리한다.",\n'
+        '    "키링 굿즈 출시를 위한 고객 반응과 제작 우선순위를 합의한다.",\n'
+        '    "키링 굿즈 아이디어의 실현 가능성과 다음 실행 과제를 정한다."\n'
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- goal은 가장 추천하는 목표 1개다.\n"
+        "- goals는 사용자가 선택할 수 있는 서로 다른 관점의 목표 3개다.\n"
+        "- 제목 복붙이 아니라 회의 목적이 드러나는 재작성 문장.\n"
+        "- 각 목표는 한국어 1문장, 18~48자 정도의 짧고 분명한 문장.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _idea_assimilation_utterance_dict(item: CanvasIdeaAssimilationUtteranceInput) -> dict[str, str]:
+    return {
+        "id": _safe_text(item.id),
+        "speaker": _safe_text(item.speaker, "참가자"),
+        "text": _safe_text(item.text),
+        "timestamp": _safe_text(item.timestamp),
+    }
+
+
+def _idea_assimilation_existing_idea_dict(item: CanvasIdeaAssimilationIdeaInput) -> dict[str, Any]:
+    return {
+        "id": _safe_text(item.id),
+        "title": _safe_text(item.title),
+        "summary": _safe_text(item.summary),
+        "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
+        "key_evidence": [_safe_text(value) for value in (item.key_evidence or []) if _safe_text(value)][:6],
+        "refined_utterances": _normalize_refined_utterances(item.refined_utterances, limit=12),
+        "evidence_utterance_ids": [
+            _safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)
+        ][:40],
+        "user_edited": bool(item.user_edited),
+    }
+
+
+IDEA_KEYWORD_NOISE = {
+    "content",
+    "summary",
+    "keyword",
+    "keywords",
+    "title",
+    "요약",
+    "내용",
+    "키워드",
+    "제목",
+    "아이디어",
+    "발화",
+    "전사",
+    "정리",
+    "회의",
+    "논의",
+    "언급",
+    "화자",
+    "참가자",
+    "speaker",
+}
+
+
+def _strip_idea_reference_text(raw: Any, collapse_whitespace: bool = True) -> str:
+    text = _strip_leading_timestamp(raw)
+    text = re.sub(r"\[[0-9a-fA-F-]{8,}\]\s*", "", text)
+    text = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "", text)
+    text = re.sub(r"\b[\w.+-]+@[\w.-]+\.\w+\b:?\s*", "", text)
+    text = re.sub(r"^\s*(?:speaker|화자|참가자|user|root)\d*[:：]\s*", "", text, flags=re.IGNORECASE)
+    if collapse_whitespace:
+        text = re.sub(r"\s+", " ", text)
+    else:
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = re.sub(r"\n\s+", "\n", text)
+    return _safe_text(text.strip(" \t\r\n-:：|/.,;"))
+
+
+def _normalize_idea_keyword(raw: Any) -> str:
+    token = _strip_idea_reference_text(raw)
+    token = re.sub(r"^#+", "", token).strip()
+    token = re.sub(r"^[^\w가-힣]+|[^\w가-힣]+$", "", token)
+    token = re.sub(r"\s+", " ", token).strip()
+    if not token:
+        return ""
+    if "@" in token:
+        return ""
+    if re.fullmatch(r"\d+", token):
+        return ""
+    if re.fullmatch(r"[0-9a-fA-F-]{8,}", token):
+        return ""
+    if re.search(r"\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}|^\d{1,2}:\d{2}", token):
+        return ""
+    if len(token) > 24:
+        return ""
+
+    if " " not in token:
+        normalized = _normalize_keyword_token(token)
+    else:
+        normalized = " ".join(_normalize_keyword_token(part) for part in token.split())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized or len(normalized) < 2:
+        return ""
+    lowered = normalized.lower()
+    if lowered in STOPWORDS or lowered in TITLE_NOISE_TOKENS or lowered in IDEA_KEYWORD_NOISE:
+        return ""
+    if _is_title_keyword_noise(normalized):
+        return ""
+    return normalized
+
+
+def _extract_light_keywords(text: str, limit: int = 4) -> list[str]:
+    tokens: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9가-힣]{2,}", _strip_leading_timestamp(text)):
+        cleaned = _normalize_idea_keyword(token)
+        if not cleaned:
+            continue
+        if cleaned not in tokens:
+            tokens.append(cleaned)
+        if len(tokens) >= limit:
+            break
+    return tokens
+
+
+def _normalize_idea_keywords(raw_keywords: Any, source_text: str, limit: int = 6) -> list[str]:
+    values: list[Any] = []
+    if isinstance(raw_keywords, str):
+        values.extend(re.split(r"[,/#\n]+", raw_keywords))
+    elif isinstance(raw_keywords, list):
+        for item in raw_keywords:
+            if isinstance(item, str):
+                values.extend(re.split(r"[,/#\n]+", item))
+            else:
+                values.append(item)
+
+    keywords = _dedup_preserve(
+        [_normalize_idea_keyword(value) for value in values if _safe_text(value)],
+        limit=limit,
+    )
+    if len(keywords) < min(3, limit):
+        keywords = _dedup_preserve(keywords + _extract_light_keywords(source_text, limit), limit=limit)
+    return keywords[:limit]
+
+
+def _clean_idea_title(raw_title: Any, keywords: list[str], fallback: str = "AI 아이디어") -> str:
+    title = _strip_idea_reference_text(raw_title)
+    title = re.sub(r"^(?:아이디어|요약|핵심|제목)\s*[:：-]\s*", "", title)
+    title = re.sub(r"\s+", " ", title).strip(" -:：|/.,;")
+    if not title or title.lower() in IDEA_KEYWORD_NOISE:
+        title = " ".join(keywords[:2]).strip() or fallback
+    if len(title) > 24:
+        title = _to_summary_point(title, 24)
+    return _safe_text(title, fallback)
+
+
+def _clean_idea_summary(raw_summary: Any, fallback_title: str, keywords: list[str]) -> str:
+    summary = _safe_text(raw_summary)
+    if isinstance(raw_summary, list):
+        summary = "\n".join(_safe_text(item) for item in raw_summary if _safe_text(item))
+    summary = _strip_idea_reference_text(summary, collapse_whitespace=False)
+    summary = re.sub(r"^(?:내용|요약|summary|content)\s*[:：-]\s*", "", summary, flags=re.IGNORECASE)
+    candidates = [
+        _to_summary_point(part, 46)
+        for part in re.split(r"\n+|\s*/\s*|[;；]+", summary)
+        if _safe_text(part)
+    ]
+    candidates = [
+        item
+        for item in candidates
+        if item and item.lower() not in IDEA_KEYWORD_NOISE and not re.fullmatch(r"(없음|해당 없음|n/?a)", item, flags=re.IGNORECASE)
+    ]
+    if not candidates:
+        fallback = " / ".join(keywords[:2]) or fallback_title
+        candidates = [_to_summary_point(fallback, 46)]
+    return "\n".join(_dedup_preserve(candidates, limit=2))
+
+
+def _normalize_idea_assimilation_update(raw: Any, fallback_ids: list[str]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    action = _safe_text(raw.get("action")).lower()
+    if action not in {"merge", "create"}:
+        return None
+
+    target_id = _safe_text(raw.get("targetIdeaId") or raw.get("target_idea_id") or raw.get("target_id"))
+    if action == "merge" and not target_id:
+        return None
+
+    raw_title = raw.get("title")
+    raw_summary = raw.get("summary") or raw.get("content") or raw.get("contentSummary") or raw.get("body")
+    keywords = _normalize_idea_keywords(raw.get("keywords") or [], f"{raw_title or ''} {raw_summary or ''}", 6)
+    title = _clean_idea_title(raw_title, keywords, "새 아이디어")
+    summary = _clean_idea_summary(raw_summary, title, keywords)
+    keywords = keywords or _normalize_idea_keywords([], f"{title} {summary}", 6)
+    key_evidence = [
+        _to_summary_point(_strip_idea_reference_text(value), 72)
+        for value in (raw.get("keyEvidence") or raw.get("key_evidence") or [])
+        if _safe_text(value)
+    ][:6]
+    evidence_ids = [
+        _safe_text(value)
+        for value in (raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or [])
+        if _safe_text(value)
+    ][:400]
+    ignored_ids = [
+        _safe_text(value)
+        for value in (raw.get("ignoredUtteranceIds") or raw.get("ignored_utterance_ids") or [])
+        if _safe_text(value)
+    ][:400]
+
+    if not evidence_ids and not ignored_ids:
+        evidence_ids = fallback_ids[:400]
+
+    refined_utterances = _normalize_refined_utterances(
+        raw.get("refinedUtterances") or raw.get("refined_utterances") or raw.get("refined_utterance") or [],
+        limit=4,
+        allowed_ids=set(evidence_ids),
+        min_relevance_score=0.78,
+    )
+
+    return {
+        "action": action,
+        "targetIdeaId": target_id,
+        "title": title,
+        "summary": summary,
+        "keywords": keywords,
+        "keyEvidence": key_evidence,
+        "refinedUtterances": refined_utterances,
+        "evidenceUtteranceIds": evidence_ids,
+        "ignoredUtteranceIds": ignored_ids,
+    }
+
+
+def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str:
+    context_rows = [_idea_assimilation_utterance_dict(item) for item in (payload.context_utterances or [])[-8:]]
+    target_rows = [_idea_assimilation_utterance_dict(item) for item in (payload.target_utterances or [])]
+    context_transcript_text = " ".join(
+        f"{row['speaker']}: {row['text']}" for row in context_rows if _safe_text(row.get("text"))
+    )
+    target_ref_rows = [
+        {
+            **row,
+            "ref": f"U{index + 1}",
+        }
+        for index, row in enumerate(target_rows)
+        if _safe_text(row.get("text"))
+    ]
+    target_transcript_text = " ".join(
+        f"[{row['ref']}] {row['speaker']}: {row['text']}" for row in target_ref_rows
+    )
+    prompt_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "context_transcript_text": context_transcript_text,
+        "target_transcript_text": target_transcript_text,
+        "target_utterance_refs": [
+            {
+                "ref": row["ref"],
+                "id": row["id"],
+                "speaker": row["speaker"],
+                "timestamp": row["timestamp"],
+            }
+            for row in target_ref_rows
+            if _safe_text(row.get("id"))
+        ],
+        "existing_ideas": [
+            _idea_assimilation_existing_idea_dict(item) for item in (payload.existing_ideas or [])[:40]
+        ],
+    }
+    return (
+        "너는 회의 발화를 아이디어 캔버스에 반영하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- target_transcript_text 전체를 하나의 이어진 전사문으로 보고 기존 아이디어에 편입할지, 새 아이디어를 만들지 결정한다.\n"
+        "- meeting_topic과 context_transcript_text는 배경 정보일 뿐이다. title/summary/keywords/refinedUtterances는 반드시 target_transcript_text에서 나온 의미만 사용한다.\n"
+        "- 잡담, 단순 맞장구, 반복 확인, 감사 인사는 아이디어 노드에 넣지 말고 ignoredUtteranceIds에만 포함한다.\n"
+        "- 아이디어 노드에는 불필요한 대화 흐름이 아니라 전체 전사문에서 드러난 실행/기획 핵심만 정제해서 넣는다.\n"
+        "- summary는 노드 본문에 들어갈 content이며, 완성형 설명문이 아니라 핵심만 남긴 압축 문구여야 한다.\n"
+        "- summary는 1~2줄로 작성하되 각 줄은 짧은 명사구/핵심 구문 중심으로 쓴다.\n"
+        "- summary에는 '해야 한다', '필요하다', '정리된다', '보인다', '논의했다' 같은 일반 서술어를 되도록 쓰지 않는다.\n"
+        "- keywords는 target_transcript_text 전체를 모두 읽은 뒤 중심 의미를 이루는 용어만 추출한다. 앞에 나온 단어를 순서대로 뽑지 않는다.\n"
+        "- 대괄호 ref, id, timestamp, speaker/email/user/root 같은 식별자는 참조용이다. title/summary/keywords/keyEvidence/refinedUtterances.text에 절대 쓰지 않는다.\n"
+        "- keywords에는 '회의', '논의', '요약', '내용', '아이디어', '발화', '전사' 같은 일반어를 넣지 않는다.\n"
+        "- refinedUtterances는 summary에 깊게 관련된 주요 발화만 각각 한 줄씩 '요약'한 것이다.\n"
+        "- refinedUtterances는 원문을 예쁘게 고친 문장이 아니라, 해당 발화가 content를 만든 직접 근거/의도만 남긴 압축문이다.\n"
+        "- refinedUtterances는 content에서 빠지면 summary 의미가 바뀌는 발화만 포함한다.\n"
+        "- 기존 아이디어와 의미가 매우 같을 때만 merge한다. 단순 키워드 1개 겹침, 같은 안건, 같은 화자라는 이유만으로 merge하지 않는다.\n"
+        "- merge 확신이 낮거나 기존 아이디어와 핵심 대상/방향이 다르면 반드시 create를 사용한다.\n"
+        "- user_edited가 true인 기존 아이디어는 제목과 요약을 덮어쓰지 않도록 merge 대상으로 삼더라도 근거/키워드 보강 중심으로 응답한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "updates": [\n'
+        "    {\n"
+        '      "action": "merge",\n'
+        '      "targetIdeaId": "idea-id",\n'
+        '      "title": "짧은 아이디어 제목",\n'
+        '      "summary": "핵심 키워드/방향만 남긴 1~2줄 압축 content",\n'
+        '      "keywords": ["키워드1", "키워드2"],\n'
+        '      "keyEvidence": ["A: 핵심 근거 발화 요약"],\n'
+        '      "refinedUtterances": [\n'
+        '        {"utterance_id": "utterance-id-1", "speaker": "A", "text": "주요 발화의 핵심 근거 한 줄 요약", "timestamp": "ISO time", "relevanceScore": 0.9}\n'
+        "      ],\n"
+        '      "evidenceUtteranceIds": ["utterance-id-1"],\n'
+        '      "ignoredUtteranceIds": ["utterance-id-2"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- updates는 0~3개까지 가능하다. 한 번의 전사 묶음에서 핵심 의미가 하나면 update도 하나만 만든다.\n"
+        "- 하나의 target_utterance는 evidenceUtteranceIds 또는 ignoredUtteranceIds 중 하나에만 넣는다.\n"
+        "- create의 targetIdeaId는 빈 문자열로 둔다.\n"
+        "- title은 12자 이내의 한국어 명사구를 우선한다.\n"
+        "- title에는 '이유', '방안', '문제'처럼 의미를 보강하는 말은 쓸 수 있지만, '요약', '정리', '논의' 같은 메타어는 쓰지 않는다.\n"
+        "- summary는 회의 잡담을 제거하고 전체 전사문의 핵심만 1~2줄로 남긴다.\n"
+        "- summary는 문장형 설명보다 '핵심 대상 + 방향/문제/조건' 형태의 압축 구문을 우선한다.\n"
+        "- summary 예시: '사용자별 회의 흐름 유지 / 다중 기기 STT 동기화', '잡담 제외, 의미 단위 아이디어 병합'.\n"
+        "- summary에는 회의 주제의 일반 설명을 쓰지 말고, target_transcript_text에서 새로 나온 구체 논지만 쓴다.\n"
+        "- keywords는 3~6개로 작성하고, title/summary에서 실제 의미를 구성하는 명사구만 넣는다.\n"
+        "- keywords는 target_transcript_text의 첫 단어들이 아니라, 전체 발화에서 반복/강조/결론 역할을 하는 중심 개념이어야 한다.\n"
+        "- refinedUtterances에는 핵심 요약문에 직접 영향을 준 주요 발화만 넣고, 잡담은 넣지 않는다.\n"
+        "- refinedUtterances에는 단순 배경 설명, 동의/확인, 중복 부연, 간접 관련 발화는 넣지 않는다.\n"
+        "- refinedUtterances는 update 하나당 최대 4개까지만 작성한다. 확실한 직접 근거가 1개면 1개만 작성한다.\n"
+        "- relevanceScore는 content와의 직접 관련도를 0~1로 평가한다. 0.78 미만이면 refinedUtterances에 넣지 않는다.\n"
+        "- refinedUtterances.text는 반드시 14~38자 정도의 짧은 요약문으로 쓴다.\n"
+        "- refinedUtterances.text는 발화 원문을 그대로 복사하거나 긴 문장으로 다듬어 쓰지 않는다.\n"
+        "- refinedUtterances.text는 '말함', '언급함', '논의함' 같은 메타 표현 없이 핵심 근거만 쓴다.\n"
+        "- refinedUtterances 예시: '다중 마이크 전사 중복 문제', '노드 생성 전 LLM 정리 대기', '핵심 요약과 발화 근거 분리'.\n"
+        "- refinedUtterances의 utterance_id, speaker, timestamp는 target_utterance_refs 중 ref가 일치하는 실제 id/speaker/timestamp를 사용한다.\n"
+        "- evidenceUtteranceIds와 ignoredUtteranceIds는 target_utterance_refs의 id만 사용한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _compute_idea_assimilation_result(payload: CanvasIdeaAssimilationInput) -> dict[str, Any]:
+    updates: list[dict[str, Any]] = []
+    used_llm = False
+    warning = ""
+    fallback_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
+
+    client, llm_ready, llm_note = _ensure_llm_ready(RT)
+    if payload.target_utterances and llm_ready:
+        try:
+            parsed = _call_llm_json(
+                RT,
+                client,
+                prompt=_build_idea_assimilation_prompt(payload),
+                stage="canvas_idea_assimilation",
+                temperature=0.2,
+                max_tokens=2200,
+            )
+            parsed_updates = parsed.get("updates") if isinstance(parsed, dict) else None
+            normalized_updates: list[dict[str, Any]] = []
+            if isinstance(parsed_updates, list):
+                for item in parsed_updates:
+                    normalized = _normalize_idea_assimilation_update(item, fallback_ids)
+                    if normalized:
+                        normalized_updates.append(normalized)
+            if normalized_updates:
+                updates = normalized_updates[:5]
+                used_llm = True
+                RT.last_llm_parsed_json = {
+                    "stage": "canvas_idea_assimilation",
+                    "updates": copy.deepcopy(updates),
+                }
+                RT.last_llm_parsed_at = _now_ts()
+            else:
+                warning = "LLM JSON 형식이 예상과 달라 아이디어 노드를 생성하지 않았습니다."
+        except Exception as exc:
+            warning = f"아이디어 병합 LLM 생성 실패: {exc}"
+    elif payload.target_utterances:
+        warning = llm_note or "LLM 미연결 상태라 아이디어 노드를 생성하지 않았습니다."
+
+    return {
+        "ok": True,
+        "used_llm": used_llm,
+        "warning": warning,
+        "generated_at": _now_ts(),
+        "updates": updates,
+    }
+
+
+def _build_problem_definition_prompt(topic: str, groups: list[dict[str, Any]]) -> str:
+    prompt_groups: list[dict[str, Any]] = []
+    for group in groups:
+        prompt_groups.append(
+            {
+                "group_id": _safe_text(group.get("group_id")),
+                "draft_topic": _safe_text(group.get("topic")),
+                "draft_insight_lens": _safe_text(group.get("insight_lens"), "공통 행동과 니즈를 묶어 해석"),
+                "keywords": [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)],
+                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
+                "ideas": group.get("ideas") or [],
+                "source_summary_items": [_safe_text(x) for x in (group.get("source_summary_items") or []) if _safe_text(x)],
+            }
+        )
+    payload = {
+        "meeting_topic": _safe_text(topic),
+        "groups": prompt_groups,
+    }
+    return (
+        "너는 회의 아이디어를 문제 정의 단계용 주제 묶음으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 각 묶음의 draft_topic은 초안일 뿐이다. 이를 그대로 복사하지 말고, 묶음 전체를 더 잘 설명하는 최종 topic을 다시 정제해 작성한다.\n"
+        "- 유사한 안건/아이디어 묶음마다 '주제 결론'을 새로 작성한다.\n"
+        "- 주제 결론은 기존 문장을 그대로 복사하지 말고, 입력 내용을 종합해서 새 한국어 문장 1개로 재작성한다.\n"
+        "- topic은 너무 길지 않은 키워드/짧은 구 형태로 유지한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "groups": [\n'
+        "    {\n"
+        '      "group_id": "problem-group-1",\n'
+        '      "topic": "트렌드",\n'
+        '      "insight_lens": "사용자의 행동에서 드러난 숨은 니즈를 정리",\n'
+        '      "conclusion": "키링을 통해 자신을 표현하려는 수요가 강하게 드러난다."\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id는 입력값을 그대로 유지한다.\n"
+        "- topic은 draft_topic 재사용이 아니라, 묶음의 안건/아이디어/요약을 보고 다시 정제한 최종 주제명이어야 한다.\n"
+        "- insight_lens는 이 묶음의 인사이트를 어떤 관점으로 정리했는지 설명하는 짧은 문구다.\n"
+        "- insight_lens는 예를 들면 '행동에서 드러난 니즈', '의사결정 기준의 충돌', '실행 제약과 우선순위' 같은 식으로 쓴다.\n"
+        "- insight_lens는 반드시 8~20자 이내의 짧은 한국어 구로 쓴다.\n"
+        "- topic은 반드시 1~2단어만 사용한다.\n"
+        "- topic은 가급적 10자 이내의 짧은 명사구로 쓴다.\n"
+        "- topic은 너무 일반적인 표현(예: 기타, 논의, 안건, 주제)으로 쓰지 않는다.\n"
+        "- conclusion은 각 주제당 정확히 1문장.\n"
+        "- conclusion은 반드시 insight_lens의 관점으로 해석한 결과여야 한다.\n"
+        "- conclusion은 '이 그룹에서는', '~에서는', '~정리된다', '~필요가 있다' 같은 서술 틀로 시작하거나 끝내지 않는다.\n"
+        "- conclusion은 바로 핵심 결과 문장만 쓴다.\n"
+        "- conclusion은 요약문 재인용이 아니라 새로 쓴 문장.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_problem_group_conclusion_local(payload: ProblemConclusionGenerateInput) -> str:
+    summary_items = [_safe_text(item) for item in (payload.group.source_summary_items or []) if _safe_text(item)]
+    idea_bodies = [
+        _safe_text(item.body) or _safe_text(item.title)
+        for item in (payload.group.ideas or [])
+        if _safe_text(item.body) or _safe_text(item.title)
+    ]
+    evidence = summary_items + idea_bodies
+    if evidence:
+        anchor = _to_summary_point(evidence[0], max_len=None)
+        if anchor:
+            return anchor
+    agenda_titles = [_safe_text(item) for item in (payload.group.agenda_titles or []) if _safe_text(item)]
+    if agenda_titles:
+        return f"{agenda_titles[0]} 방향 구체화"
+    return f"{_safe_text(payload.group.topic, '주제')} 방향 구체화"
+
+
+def _build_problem_group_insight_lens_local(payload: ProblemConclusionGenerateInput) -> str:
+    existing = _safe_text(payload.group.insight_lens)
+    if existing:
+        return existing
+    if payload.group.ideas:
+        return "개인 메모와 요약을 함께 해석"
+    if payload.group.source_summary_items:
+        return "요약 흐름에서 공통 인사이트 도출"
+    if payload.group.agenda_titles:
+        return "안건 흐름에서 공통 방향 정리"
+    return "핵심 방향을 묶어 해석"
+
+
+def _build_problem_group_conclusion_prompt(payload: ProblemConclusionGenerateInput) -> str:
+    serialized = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "group": {
+            "group_id": _safe_text(payload.group.group_id),
+            "topic": _safe_text(payload.group.topic),
+            "draft_insight_lens": _safe_text(payload.group.insight_lens),
+            "agenda_titles": [_safe_text(item) for item in (payload.group.agenda_titles or []) if _safe_text(item)],
+            "source_summary_items": [
+                _safe_text(item) for item in (payload.group.source_summary_items or []) if _safe_text(item)
+            ],
+            "ideas": [
+                {
+                    "id": _safe_text(item.id),
+                    "kind": _safe_text(item.kind, "note"),
+                    "title": _safe_text(item.title),
+                    "body": _safe_text(item.body),
+                }
+                for item in (payload.group.ideas or [])
+                if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
+            ],
+        },
+    }
+    return (
+        "너는 문제정의 그룹의 현재 메모와 요약을 보고 결론 한 문장을 작성하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 먼저 이 그룹의 인사이트를 어떤 관점으로 정리할지 insight_lens를 정한다.\n"
+        "- group.topic, source_summary_items, ideas를 종합해 이 그룹의 결론을 한 문장으로 쓴다.\n"
+        "- 회의에서 드러난 핵심 인사이트나 방향이 드러나야 한다.\n"
+        "- 입력 문장을 그대로 복붙하지 말고 새로운 한국어 문장으로 정리한다.\n"
+        "- 너무 추상적이지 않게, 실제 논의된 흐름이 느껴지게 쓴다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(serialized, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "group_id": "problem-group-1",\n'
+        '  "insight_lens": "행동에서 드러난 숨은 니즈",\n'
+        '  "conclusion": "사용자의 표현 욕구를 반영한 방향으로 아이디어를 정리해야 한다."\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id는 입력값을 그대로 유지한다.\n"
+        "- insight_lens는 인사이트를 어떤 각도로 정리했는지 드러내는 8~20자 이내의 짧은 한국어 구다.\n"
+        "- insight_lens는 예를 들면 '행동에서 드러난 니즈', '의사결정 기준의 충돌', '실행 제약과 우선순위'처럼 쓴다.\n"
+        "- conclusion은 한국어 1문장.\n"
+        "- conclusion은 18~45자 정도의 짧고 분명한 문장.\n"
+        "- conclusion은 반드시 insight_lens 관점으로 해석한 결과여야 한다.\n"
+        "- conclusion은 '이 그룹에서는', '~에서는', '~정리된다', '~필요가 있다' 같은 틀을 쓰지 않는다.\n"
+        "- conclusion은 바로 핵심 결과 문장만 쓴다.\n"
+        "- topic을 반복만 하지 말고, 근거를 종합한 결과를 써야 한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_solution_stage_prompt(meeting_topic: str, topics: list[dict[str, Any]]) -> str:
+    payload = {
+        "meeting_topic": _safe_text(meeting_topic),
+        "topics": topics,
+    }
+    return (
+        "너는 회의 해결책 단계용 AI 아이디어 생성기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 각 topic마다 실행 가능한 해결책 아이디어를 여러 개 제안한다.\n"
+        "- 아이디어는 topic과 conclusion을 바탕으로 새로 작성한다.\n"
+        "- 기존 conclusion 문장을 그대로 반복하지 말고, 실제 시도 가능한 해결 방향으로 제안한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "topics": [\n'
+        "    {\n"
+        '      "group_id": "problem-group-1",\n'
+        '      "topic_no": 1,\n'
+        '      "topic": "트렌드",\n'
+        '      "ideas": ["아이디어 1", "아이디어 2", "아이디어 3"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id, topic_no, topic은 입력값을 그대로 유지한다.\n"
+        "- ideas는 topic마다 2~4개.\n"
+        "- 각 아이디어는 1문장 또는 짧은 명사구.\n"
+        "- 서로 중복되지 않게 작성한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_ideation_suggestions_prompt(payload: IdeationSuggestionGenerateInput) -> str:
+    serialized = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "topic": {
+            "id": _safe_text(payload.topic.id),
+            "title": _safe_text(payload.topic.title),
+            "body": _safe_text(payload.topic.body),
+            "keywords": [_safe_text(item) for item in (payload.topic.keywords or []) if _safe_text(item)][:8],
+        },
+        "child_items": [
+            {
+                "id": _safe_text(item.id),
+                "kind": _safe_text(item.kind, "note"),
+                "title": _safe_text(item.title),
+                "body": _safe_text(item.body),
+                "keywords": [_safe_text(keyword) for keyword in (item.keywords or []) if _safe_text(keyword)][:8],
+            }
+            for item in (payload.child_items or [])
+            if _safe_text(item.title) or _safe_text(item.body)
+        ][:12],
+    }
+    return (
+        "너는 아이디어 단계의 topic을 보고 회의에서 추가로 검토할 아이디어를 제안하는 AI다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- topic과 하위 아이디어/메모를 바탕으로 아직 카드로 만들지 않은 새 아이디어를 제안한다.\n"
+        "- 기존 내용을 다른 말로 반복하지 말고, 서로 구분되는 제안을 만든다.\n"
+        "- 회의 참가자가 선택적으로 채택할 참고 제안처럼 낮은 위계로 쓸 수 있게 짧게 작성한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(serialized, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "suggestions": [\n'
+        '    {"text": "추천 아이디어 1"},\n'
+        '    {"text": "추천 아이디어 2"}\n'
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        "- suggestions는 2~5개.\n"
+        "- 각 text는 한국어 1문장 또는 짧은 명사구.\n"
+        "- 기존 child_items의 title/body와 의미가 거의 같은 제안은 제외한다.\n"
+        "- 너무 추상적인 표현 대신 바로 카드로 채택 가능한 아이디어로 쓴다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _build_local_ideation_suggestions(payload: IdeationSuggestionGenerateInput) -> list[dict[str, str]]:
+    topic_title = _safe_text(payload.topic.title, "선택한 topic")
+    topic_keywords = [_safe_text(item) for item in (payload.topic.keywords or []) if _safe_text(item)]
+    child_titles = [_safe_text(item.title) for item in (payload.child_items or []) if _safe_text(item.title)]
+    anchors = _dedup_preserve([*topic_keywords, *child_titles, topic_title], limit=5)
+    if not anchors:
+        anchors = [topic_title]
+    candidates = [
+        f"{anchors[0]}를 빠르게 검증할 수 있는 사용자 시나리오를 만든다.",
+        f"{anchors[min(1, len(anchors) - 1)]} 관점에서 비교 가능한 대안을 정리한다.",
+        f"{topic_title}에 대한 실행 우선순위를 정하는 판단 기준을 만든다.",
+    ]
+    return [
+        {
+            "id": f"ideation-suggestion-{index + 1}",
+            "text": text,
+            "status": "draft",
+        }
+        for index, text in enumerate(_dedup_preserve(candidates, limit=3))
+        if _safe_text(text)
+    ]
+
+
+def _build_agenda_markdown(rt: RuntimeStore) -> str:
+    lines: list[str] = []
+    lines.append("# 회의 안건/발언 구조")
+    lines.append("")
+    lines.append(f"- 생성 시각: {_now_ts()}")
+    lines.append(f"- 회의 목표: {_safe_text(rt.meeting_goal, '-')}")
+    lines.append(f"- 전사 수: {len(rt.transcript)}")
+    lines.append(f"- 안건 수: {len(rt.agenda_outcomes)}")
+    lines.append("")
+
+    if not rt.agenda_outcomes:
+        lines.append("## 안건 없음")
+        lines.append("")
+        lines.append("현재 분석된 안건이 없습니다.")
+        return "\n".join(lines).strip() + "\n"
+
+    speaker_alias: dict[str, str] = {}
+    speaker_seq = 0
+    for turn in rt.transcript:
+        name = _safe_text(turn.get("speaker"), "화자")
+        if name in speaker_alias:
+            continue
+        speaker_seq += 1
+        speaker_alias[name] = f"화자{speaker_seq}"
+
+    lines.append("## 화자 약어")
+    lines.append("")
+    for name, alias in speaker_alias.items():
+        lines.append(f"- {alias}: {name}")
+    lines.append("")
+
+    total_turns = len(rt.transcript)
+    agenda_outline_rows: list[str] = []
+    for idx, row in enumerate(rt.agenda_outcomes, start=1):
+        agenda_id = _safe_text(row.get("agenda_id"), f"agenda-{idx}")
+        title = _safe_text(row.get("agenda_title"), "안건 제목 미정")
+        state = _normalize_agenda_state(row.get("agenda_state"))
+        flow = _normalize_flow_type(row.get("flow_type"))
+        start_id = int(row.get("start_turn_id") or row.get("_start_turn_id") or 0)
+        end_id = int(row.get("end_turn_id") or row.get("_end_turn_id") or 0)
+        if start_id <= 0:
+            start_id = 1
+        if end_id < start_id:
+            end_id = min(total_turns, start_id)
+        end_id = min(total_turns, end_id)
+
+        lines.append(f"## 안건 {idx}. {title}")
+        lines.append("")
+        lines.append(f"- agenda_id: `{agenda_id}`")
+        lines.append(f"- 상태: `{state}`")
+        lines.append(f"- 흐름: `{flow}`")
+        lines.append(f"- turn 범위: `{start_id} ~ {end_id}`")
+        summary = _md_text(row.get("summary"))
+        if summary:
+            lines.append(f"- 요약: {summary}")
+        lines.append("")
+        agenda_outline_rows.append(f"- 안건 {idx}: {title} (`{state}`, turn {start_id}~{end_id})")
+
+        utterances: list[tuple[int, dict[str, Any]]] = []
+        if 1 <= start_id <= end_id <= total_turns:
+            for turn_id in range(start_id, end_id + 1):
+                utterances.append((turn_id, rt.transcript[turn_id - 1]))
+        else:
+            seen_ids: set[int] = set()
+            for ref in list(row.get("summary_references") or []):
+                if not isinstance(ref, dict):
+                    continue
+                tid = int(ref.get("turn_id") or 0)
+                if tid <= 0 or tid > total_turns or tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                utterances.append((tid, rt.transcript[tid - 1]))
+            utterances.sort(key=lambda x: x[0])
+
+        lines.append(f"### 발언 ({len(utterances)})")
+        if not utterances:
+            lines.append("- 매핑된 발언이 없습니다.")
+        else:
+            for turn_id, turn in utterances:
+                speaker = _safe_text(turn.get("speaker"), "화자")
+                speaker_short = speaker_alias.get(speaker, "화자")
+                text = _md_text(turn.get("text"))
+                lines.append(f"- ({turn_id}) **{speaker_short}**: {text}")
+        lines.append("")
+
+    lines.append("## 안건 목록 요약")
+    lines.append("")
+    lines.extend(agenda_outline_rows if agenda_outline_rows else ["- 안건 없음"])
+    lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_agenda_snapshot(rt: RuntimeStore) -> dict[str, Any]:
+    return {
+        "snapshot_version": 1,
+        "exported_at": _now_ts(),
+        "meeting_goal": _safe_text(rt.meeting_goal),
+        "window_size": int(rt.window_size or 12),
+        "transcript": copy.deepcopy(list(rt.transcript)),
+        "agenda_outcomes": copy.deepcopy(list(rt.agenda_outcomes)),
+        "last_analyzed_count": int(rt.last_analyzed_count or len(rt.transcript)),
+        "analysis_runtime": {
+            "tick_mode": _safe_text(rt.last_tick_mode, "snapshot"),
+            "used_local_fallback": bool(rt.used_local_fallback),
+            "title_refine_attempts": int(rt.last_title_refine_attempts),
+            "title_refine_success": int(rt.last_title_refine_success),
+        },
+        "last_llm_json": copy.deepcopy(dict(rt.last_llm_parsed_json or {})),
+        "last_llm_parsed_at": _safe_text(rt.last_llm_parsed_at),
+    }
+
+
+def _load_agenda_snapshot(rt: RuntimeStore, payload: dict[str, Any], reset_state: bool = True) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("스냅샷 JSON 객체가 아닙니다.")
+
+    if reset_state:
+        rt.reset()
+    else:
+        rt.transcript = []
+        rt.agenda_outcomes = []
+        rt.last_analyzed_count = 0
+        rt.agenda_seq = 0
+        rt.used_local_fallback = False
+        rt.last_analysis_warning = ""
+        rt.last_tick_mode = "snapshot"
+        rt.last_title_refine_attempts = 0
+        rt.last_title_refine_success = 0
+        rt.last_llm_parsed_json = {}
+        rt.last_llm_parsed_at = ""
+        rt.replay_rows = []
+        rt.replay_index = 0
+        rt.replay_source = ""
+        rt.replay_loaded_at = ""
+        rt.analysis_task_seq = 0
+        rt.analysis_queued = 0
+        rt.analysis_inflight = False
+        rt.analysis_last_enqueued_at = ""
+        rt.analysis_last_started_at = ""
+        rt.analysis_last_done_at = ""
+        rt.analysis_last_error = ""
+        rt.analysis_last_enqueued_id = 0
+        rt.analysis_last_started_id = 0
+        rt.analysis_last_done_id = 0
+        rt.analysis_generation += 1
+        rt.transcript_version = 0
+        rt.analysis_next_windowed_target = SUMMARY_INTERVAL
+        rt.llm_io_seq = 0
+        rt.llm_io_logs = []
+        rt.canvas_last_placement = {}
+
+    transcript = payload.get("transcript") or []
+    if not isinstance(transcript, list):
+        raise ValueError("transcript 필드가 배열이 아닙니다.")
+
+    outcomes = payload.get("agenda_outcomes") or []
+    if not isinstance(outcomes, list):
+        raise ValueError("agenda_outcomes 필드가 배열이 아닙니다.")
+
+    rt.meeting_goal = _safe_text(payload.get("meeting_goal"))
+    rt.window_size = max(1, int(payload.get("window_size") or 12))
+    rt.transcript = []
+    for item in transcript:
+        if not isinstance(item, dict):
+            continue
+        rt.transcript.append(
+            {
+                "speaker": _safe_text(item.get("speaker"), "화자"),
+                "text": _safe_text(item.get("text")),
+                "timestamp": _safe_text(item.get("timestamp"), _now_ts()),
+            }
+        )
+
+    rt.agenda_outcomes = copy.deepcopy(outcomes)
+    rt.last_analyzed_count = max(0, min(int(payload.get("last_analyzed_count") or len(rt.transcript)), len(rt.transcript)))
+    rt.agenda_seq = len(rt.agenda_outcomes)
+    rt.last_tick_mode = _safe_text((payload.get("analysis_runtime") or {}).get("tick_mode"), "snapshot")
+    rt.used_local_fallback = bool((payload.get("analysis_runtime") or {}).get("used_local_fallback"))
+    rt.last_title_refine_attempts = int((payload.get("analysis_runtime") or {}).get("title_refine_attempts") or 0)
+    rt.last_title_refine_success = int((payload.get("analysis_runtime") or {}).get("title_refine_success") or 0)
+    rt.last_llm_parsed_json = copy.deepcopy(payload.get("last_llm_json") or {})
+    rt.last_llm_parsed_at = _safe_text(payload.get("last_llm_parsed_at"))
+    rt.last_analysis_warning = "agenda_snapshot_import"
+    rt.transcript_version += 1
+
+    return {
+        "meeting_goal": rt.meeting_goal,
+        "transcript_count": len(rt.transcript),
+        "agenda_count": len(rt.agenda_outcomes),
+    }
 def _snapshot_runtime_for_analysis(rt: RuntimeStore) -> RuntimeStore:
     snap = RuntimeStore()
     snap.meeting_goal = _safe_text(rt.meeting_goal)
@@ -1080,7 +3531,7 @@ def _create_agenda(rt: RuntimeStore, title: str, state: str = "ACTIVE") -> dict[
     rt.agenda_seq += 1
     row = {
         "agenda_id": f"agenda-{rt.agenda_seq}",
-        "agenda_title": _safe_text(title, f"안건 {rt.agenda_seq}"),
+        "agenda_title": _strip_leading_timestamp(title) or f"안건 {rt.agenda_seq}",
         "agenda_state": state,
         "flow_type": "",
         "key_utterances": [],
@@ -1157,7 +3608,7 @@ def _extract_refs(rt: RuntimeStore, evidence_turn_ids: list[int], recent_turns: 
 
 def _format_line_from_turn(turn: dict[str, Any], max_chars: int = 180) -> str:
     ts = _safe_text(turn.get("timestamp"), _now_ts())
-    text = _safe_text(turn.get("text")).replace("\n", " ").strip()
+    text = _strip_leading_timestamp(turn.get("text")).replace("\n", " ").strip()
     if len(text) > max_chars:
         text = text[: max_chars - 1] + "…"
     return f"[{ts}] {text}"
@@ -1168,7 +3619,7 @@ def _ref_from_turn(turn: dict[str, Any], why: str = "요약 근거") -> dict[str
         "turn_id": int(turn.get("turn_id") or 0),
         "speaker": _safe_text(turn.get("speaker"), "화자"),
         "timestamp": _safe_text(turn.get("timestamp"), _now_ts()),
-        "quote": _safe_text(turn.get("text")),
+        "quote": _strip_leading_timestamp(turn.get("text")),
         "why": _safe_text(why, "요약 근거"),
     }
 
@@ -1177,7 +3628,7 @@ def _pick_key_refs(turns: list[dict[str, Any]], keywords: list[str], max_items: 
     scored: list[tuple[float, int, dict[str, Any]]] = []
     kw = [k.lower() for k in keywords[:8]]
     for idx, t in enumerate(turns):
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if len(text) < 8:
             continue
         low = text.lower()
@@ -1222,11 +3673,11 @@ def _segment_turns(turns: list[dict[str, Any]]) -> list[tuple[int, int]]:
     i = min_seg
     while i < n - min_seg:
         dist = i - last
-        prev_txt = " ".join(_safe_text(t.get("text")) for t in turns[max(last, i - win) : i])
-        next_txt = " ".join(_safe_text(t.get("text")) for t in turns[i : min(n, i + win)])
+        prev_txt = " ".join(_strip_leading_timestamp(t.get("text")) for t in turns[max(last, i - win) : i])
+        next_txt = " ".join(_strip_leading_timestamp(t.get("text")) for t in turns[i : min(n, i + win)])
         sim = _text_similarity(prev_txt, next_txt)
-        cue = bool(TRANSITION_PAT.search(_safe_text(turns[i].get("text")))) or bool(
-            TRANSITION_PAT.search(_safe_text(turns[i - 1].get("text")))
+        cue = bool(TRANSITION_PAT.search(_strip_leading_timestamp(turns[i].get("text")))) or bool(
+            TRANSITION_PAT.search(_strip_leading_timestamp(turns[i - 1].get("text")))
         )
         reached_target = dist >= target_gap
         too_long = dist >= max_seg
@@ -1296,7 +3747,7 @@ def _pick_key_utterances(turns: list[dict[str, Any]], keywords: list[str], max_i
     scored: list[tuple[float, int, str]] = []
     kw = [k.lower() for k in keywords[:8]]
     for idx, t in enumerate(turns):
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if len(text) < 8:
             continue
         low = text.lower()
@@ -1326,7 +3777,7 @@ def _extract_decisions_from_turns(turns: list[dict[str, Any]], max_items: int = 
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for t in turns:
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if not text or not DECISION_PAT.search(text):
             continue
         key = text[:120]
@@ -1343,7 +3794,7 @@ def _extract_actions_from_turns(turns: list[dict[str, Any]], max_items: int = 10
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for t in turns:
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if not text:
             continue
         if not ACTION_PAT.search(text) and not DUE_PAT.search(text):
@@ -1376,6 +3827,75 @@ def _extract_actions_from_turns(turns: list[dict[str, Any]], max_items: int = 10
         if len(out) >= max_items:
             break
     return out
+
+
+def _agenda_turn_overlap_ratio(
+    left_start: int,
+    left_end: int,
+    right_start: int,
+    right_end: int,
+) -> float:
+    if left_start <= 0 or left_end < left_start or right_start <= 0 or right_end < right_start:
+        return 0.0
+    overlap = min(left_end, right_end) - max(left_start, right_start) + 1
+    if overlap <= 0:
+        return 0.0
+    base = max(1, min(left_end - left_start + 1, right_end - right_start + 1))
+    return float(overlap) / float(base)
+
+
+def _reuse_previous_agenda_ids(
+    previous_outcomes: list[dict[str, Any]],
+    cleaned_outcomes: list[dict[str, Any]],
+) -> list[str]:
+    assigned_ids: list[str] = []
+    used_prev_indexes: set[int] = set()
+
+    for row_idx, row in enumerate(cleaned_outcomes):
+        row_title = _safe_text(row.get("agenda_title"))
+        row_start = int(row.get("_start_turn_id") or 0)
+        row_end = int(row.get("_end_turn_id") or 0)
+        best_prev_idx = -1
+        best_score = 0.0
+
+        for prev_idx, prev in enumerate(previous_outcomes):
+            if prev_idx in used_prev_indexes:
+                continue
+
+            prev_id = _safe_text(prev.get("agenda_id"))
+            if not prev_id:
+                continue
+
+            prev_title = _safe_text(prev.get("agenda_title"))
+            prev_start = int(prev.get("start_turn_id") or 0)
+            prev_end = int(prev.get("end_turn_id") or 0)
+            title_score = 1.0 if row_title and row_title == prev_title else _text_similarity(row_title, prev_title)
+            overlap_score = _agenda_turn_overlap_ratio(row_start, row_end, prev_start, prev_end)
+            order_bonus = max(0.0, 0.25 - abs(prev_idx - row_idx) * 0.08)
+            score = (title_score * 0.65) + (overlap_score * 0.85) + order_bonus
+
+            if score > best_score:
+                best_score = score
+                best_prev_idx = prev_idx
+
+        if best_prev_idx >= 0 and best_score >= 0.45:
+            used_prev_indexes.add(best_prev_idx)
+            assigned_ids.append(_safe_text(previous_outcomes[best_prev_idx].get("agenda_id")))
+        else:
+            assigned_ids.append("")
+
+    return assigned_ids
+
+
+def _max_agenda_sequence(agenda_rows: list[dict[str, Any]]) -> int:
+    max_seq = 0
+    for row in agenda_rows:
+        agenda_id = _safe_text(row.get("agenda_id"))
+        match = re.match(r"^agenda-(\d+)$", agenda_id)
+        if not match:
+            continue
+        max_seq = max(max_seq, int(match.group(1)))
+    return max_seq
 
 
 def _dedup_preserve(items: list[str], limit: int = 10) -> list[str]:
@@ -1445,6 +3965,7 @@ def _sample_turns_for_title(seg_turns: list[dict[str, Any]], max_items: int = 14
 
 
 def _request_agenda_title_with_llm(
+    rt: RuntimeStore,
     client: Any,
     meeting_goal: str,
     turns: list[dict[str, Any]],
@@ -1466,7 +3987,7 @@ def _request_agenda_title_with_llm(
         tid = int(t.get("turn_id") or 0)
         ts = _safe_text(t.get("timestamp"), _now_ts())
         speaker = _safe_text(t.get("speaker"), "화자")
-        text = _safe_text(t.get("text"))
+        text = _strip_leading_timestamp(t.get("text"))
         if not text:
             continue
         lines.append(f"- turn_id={tid} | {ts} | {speaker} | {text}")
@@ -1550,6 +4071,7 @@ def _refresh_low_quality_titles_with_llm(
         if (not title) or _is_low_quality_title(title, rt.meeting_goal):
             attempts += 1
             regenerated = _request_agenda_title_with_llm(
+                rt=rt,
                 client=client,
                 meeting_goal=rt.meeting_goal,
                 turns=turns,
@@ -1567,7 +4089,7 @@ def _refresh_low_quality_titles_with_llm(
 
 
 def _compact_summary_line(text: str, max_len: int = 90) -> str:
-    s = _safe_text(text)
+    s = _strip_leading_timestamp(text)
     s = re.sub(r"\s+", " ", s).strip()
     s = re.sub(r"^(음|어|네|예|일단|그러면|그럼|근데|그러니까)\s+", "", s)
     if len(s) > max_len:
@@ -1697,7 +4219,7 @@ def _build_local_outcomes(rt: RuntimeStore, turns: list[dict[str, Any]]) -> list
 
         outcomes.append(
             {
-                "agenda_title": title,
+                "agenda_title": _strip_leading_timestamp(title) or f"안건 {seg_idx + 1}",
                 "agenda_state": "ACTIVE" if seg_idx == len(segments) - 1 else "CLOSED",
                 "flow_type": flow_type,
                 "key_utterances": _dedup_preserve(key_utterances, limit=20),
@@ -1886,10 +4408,16 @@ def _apply_outcomes(rt: RuntimeStore, outcomes: list[dict[str, Any]]) -> None:
         else:
             row["agenda_state"] = _normalize_agenda_state(row.get("agenda_state"))
 
+    previous_outcomes = [copy.deepcopy(item) for item in rt.agenda_outcomes if isinstance(item, dict)]
+    reused_agenda_ids = _reuse_previous_agenda_ids(previous_outcomes, cleaned)
+
     rt.agenda_outcomes = []
     rt.agenda_seq = 0
-    for row in cleaned:
+    for row_idx, row in enumerate(cleaned):
         created = _create_agenda(rt, _safe_text(row.get("agenda_title"), "안건 제목 미정"), _normalize_agenda_state(row.get("agenda_state")))
+        reused_agenda_id = _safe_text(reused_agenda_ids[row_idx] if row_idx < len(reused_agenda_ids) else "")
+        if reused_agenda_id:
+            created["agenda_id"] = reused_agenda_id
         created["flow_type"] = _safe_text(row.get("flow_type"))
         created["key_utterances"] = _dedup_preserve(list(row.get("key_utterances") or []), limit=20)
         created["_summary_items"] = _dedup_preserve(list(row.get("_summary_items") or []), limit=20)
@@ -1901,6 +4429,7 @@ def _apply_outcomes(rt: RuntimeStore, outcomes: list[dict[str, Any]]) -> None:
         created["action_items"] = list(row.get("action_items") or [])
         created["start_turn_id"] = int(row.get("_start_turn_id") or 0)
         created["end_turn_id"] = int(row.get("_end_turn_id") or 0)
+    rt.agenda_seq = max(rt.agenda_seq, _max_agenda_sequence(rt.agenda_outcomes))
 
 
 def _to_ids(raw_ids: Any) -> list[int]:
@@ -1920,8 +4449,9 @@ def _build_agenda_outline_prompt(rt: RuntimeStore, turns: list[dict[str, Any]], 
     agenda_hint_max = max(agenda_hint_min, min(12, agenda_hint_min + 3))
     lines = []
     for turn in turns:
+        text = _strip_leading_timestamp(turn.get("text"))
         lines.append(
-            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {turn['text']}"
+            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {text}"
         )
     transcript_block = "\n".join(lines)
 
@@ -1972,8 +4502,9 @@ def _build_agenda_detail_prompt(
     meeting_goal = _safe_text(rt.meeting_goal, "미정")
     lines = []
     for turn in seg_turns:
+        text = _strip_leading_timestamp(turn.get("text"))
         lines.append(
-            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {turn['text']}"
+            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {text}"
         )
     transcript_block = "\n".join(lines)
 
@@ -2048,8 +4579,9 @@ def _build_windowed_shift_prompt(
     meeting_goal = _safe_text(rt.meeting_goal, "미정")
     lines = []
     for turn in recent_turns:
+        text = _strip_leading_timestamp(turn.get("text"))
         lines.append(
-            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {turn['text']}"
+            f"- turn_id={turn['turn_id']} | {turn['timestamp']} | {turn['speaker']} | {text}"
         )
     transcript_block = "\n".join(lines)
     return f"""
@@ -2297,7 +4829,7 @@ def _run_realtime_window_analysis(rt: RuntimeStore, client: Any) -> bool:
 
     active = _active_agenda(rt.agenda_outcomes)
     if active is None:
-        seed = _extractive_title_from_candidates([_safe_text(t.get("text")) for t in turns[-8:]], rt.meeting_goal)
+        seed = _extractive_title_from_candidates([_strip_leading_timestamp(t.get("text")) for t in turns[-8:]], rt.meeting_goal)
         active = _create_agenda(rt, _safe_text(seed, "안건 진행"), "ACTIVE")
         active["start_turn_id"] = max(1, max_turn - min(7, max_turn - 1))
         active["end_turn_id"] = max_turn
@@ -2843,7 +5375,7 @@ def _run_analysis(rt: RuntimeStore, force: bool = False, mode: str = "windowed",
 
         outcomes.append(
             {
-                "agenda_title": title,
+                "agenda_title": _strip_leading_timestamp(title) or f"안건 {idx + 1}",
                 "agenda_state": state,
                 "flow_type": flow_type,
                 "key_utterances": _dedup_preserve(key_utterances, limit=20),
@@ -2973,6 +5505,135 @@ async def _collect_rows_from_uploads(files: list[UploadFile]) -> dict[str, Any]:
     }
 
 
+def _serialize_audio_import_job(job: AudioImportJob) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "job_id": _safe_text(job.job_id),
+        "meeting_id": _safe_text(job.meeting_id),
+        "filename": _safe_text(job.filename),
+        "status": _safe_text(job.status, "queued"),
+        "progress": max(0.0, min(float(job.progress), 100.0)),
+        "step": _safe_text(job.step, "queued"),
+        "detail": _safe_text(job.detail),
+        "created_at": _safe_text(job.created_at),
+        "updated_at": _safe_text(job.updated_at),
+        "transcript_count": int(job.transcript_count),
+        "speaker_count": int(job.speaker_count),
+        "used_diarization": bool(job.used_diarization),
+        "warning": _safe_text(job.warning),
+        "error": _safe_text(job.error),
+        "state": copy.deepcopy(job.state) if isinstance(job.state, dict) else None,
+    }
+
+
+def _create_audio_import_job(meeting_id: str, user_id: str, filename: str) -> AudioImportJob:
+    job = AudioImportJob(
+        job_id=str(uuid4()),
+        meeting_id=_safe_text(meeting_id),
+        user_id=_safe_text(user_id),
+        filename=_safe_text(filename, "audio"),
+    )
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        _AUDIO_IMPORT_JOBS[job.job_id] = job
+        stale = list(_AUDIO_IMPORT_JOBS.keys())[:-24]
+        for key in stale:
+            _AUDIO_IMPORT_JOBS.pop(key, None)
+    return job
+
+
+def _get_audio_import_job(job_id: str) -> AudioImportJob | None:
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        job = _AUDIO_IMPORT_JOBS.get(_safe_text(job_id))
+        return copy.deepcopy(job) if job else None
+
+
+def _update_audio_import_job(job_id: str, **changes: Any) -> AudioImportJob | None:
+    with _AUDIO_IMPORT_JOBS_LOCK:
+        job = _AUDIO_IMPORT_JOBS.get(_safe_text(job_id))
+        if not job:
+            return None
+        for key, value in changes.items():
+            if hasattr(job, key):
+                setattr(job, key, value)
+        job.updated_at = _now_ts()
+        return copy.deepcopy(job)
+
+
+def _run_ffmpeg_to_mono_wav(source_path: Path, target_path: Path) -> None:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(target_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not target_path.exists():
+        raise RuntimeError((result.stderr or result.stdout or "ffmpeg normalize failed").strip())
+
+
+def _measure_wav_duration_seconds(path: Path) -> float:
+    with wave.open(str(path), "rb") as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate() or 16000
+        return max(float(frames) / float(rate), 0.0)
+
+
+def _load_pyannote_pipeline():
+    global _PYANNOTE_PIPELINE
+    token = _env_first("HUGGINGFACE_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+    if not token:
+        raise RuntimeError("HUGGINGFACE_TOKEN이 없어 diarization을 실행할 수 없습니다.")
+
+    with _PYANNOTE_LOCK:
+        if _PYANNOTE_PIPELINE is not None:
+            return _PYANNOTE_PIPELINE
+
+        try:
+            from pyannote.audio import Pipeline
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("pyannote.audio 패키지가 없습니다. diarization 의존성을 설치하세요.") from exc
+
+        pipeline = Pipeline.from_pretrained(PYANNOTE_DIARIZATION_MODEL, use_auth_token=token)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                pipeline.to(torch.device("cuda"))
+        except Exception:
+            pass
+
+        _PYANNOTE_PIPELINE = pipeline
+        return _PYANNOTE_PIPELINE
+
+
+def _diarize_audio_file(path: Path) -> list[dict[str, Any]]:
+    pipeline = _load_pyannote_pipeline()
+    diarization = pipeline(str(path))
+    rows: list[dict[str, Any]] = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        start = max(0.0, float(turn.start))
+        end = max(start, float(turn.end))
+        rows.append(
+            {
+                "start": start,
+                "end": end,
+                "speaker": _safe_text(speaker, "SPEAKER_00"),
+            }
+        )
+    return rows
+
+
 def _load_whisper_model():
     try:
         import whisper
@@ -2993,13 +5654,16 @@ def _get_whisper_model():
         return _WHISPER_MODEL
 
 
-def _transcribe_with_whisper(data: bytes, suffix: str) -> str:
+def _transcribe_with_whisper(data: bytes, suffix: str, meeting_goal: str = "") -> str:
     model = _get_whisper_model()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
     try:
         kwargs = {"language": "ko", "task": "transcribe", "verbose": False}
+        clean_goal = _safe_text(meeting_goal)
+        if clean_goal:
+            kwargs["initial_prompt"] = f"회의 목표: {clean_goal}. 회의 관련 고유명사와 핵심 용어를 한국어로 정확히 전사한다."
         try:
             import torch
 
@@ -3015,6 +5679,548 @@ def _transcribe_with_whisper(data: bytes, suffix: str) -> str:
             pass
 
 
+def _transcribe_file_with_whisper_segments(path: Path) -> dict[str, Any]:
+    model = _get_whisper_model()
+    kwargs = {"language": "ko", "task": "transcribe", "verbose": False}
+    try:
+        import torch
+
+        kwargs["fp16"] = bool(torch.cuda.is_available())
+    except Exception:
+        kwargs["fp16"] = False
+
+    result = model.transcribe(str(path), **kwargs) or {}
+    segments: list[dict[str, Any]] = []
+    for segment in result.get("segments") or []:
+        text = _safe_text(segment.get("text"))
+        if not text:
+            continue
+        start = max(0.0, float(segment.get("start") or 0.0))
+        end = max(start, float(segment.get("end") or start))
+        segments.append({"start": start, "end": end, "text": text})
+    return {
+        "text": _safe_text(result.get("text")),
+        "segments": segments,
+    }
+
+
+def _speaker_with_max_overlap(
+    start_sec: float,
+    end_sec: float,
+    diarization_rows: list[dict[str, Any]],
+    last_speaker: str,
+) -> str:
+    if not diarization_rows:
+        return _safe_text(last_speaker, "화자 1")
+
+    best_speaker = ""
+    best_overlap = 0.0
+    for row in diarization_rows:
+        overlap = min(end_sec, float(row.get("end") or 0.0)) - max(start_sec, float(row.get("start") or 0.0))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = _safe_text(row.get("speaker"))
+
+    if best_speaker:
+        return best_speaker
+    return _safe_text(last_speaker, "화자 1")
+
+
+def _ends_like_sentence(text: str) -> bool:
+    return bool(re.search(r"[.!?。！？…]$|습니다$|입니다$|어요$|예요$|했어요$|했습니다$", _safe_text(text)))
+
+
+def _split_sentence_by_length(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", _safe_text(text)).strip()
+    if not clean:
+        return []
+    if len(clean) <= max_chars:
+        return [clean]
+
+    parts: list[str] = []
+    remaining = clean
+    while len(remaining) > max_chars:
+        candidate = remaining[: max_chars + 1]
+        split_at = max(candidate.rfind(marker) for marker in (" ", ",", "·", " / ", " - "))
+        if split_at < max_chars // 2:
+            split_at = candidate.rfind(" ")
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip(" ,·-/")
+        if chunk:
+            parts.append(chunk)
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _split_text_naturally(text: str, max_chars: int = 92) -> list[str]:
+    clean = re.sub(r"\s+", " ", _safe_text(text)).strip()
+    if not clean:
+        return []
+
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?。！？])\s+", clean) if segment.strip()]
+    if not sentences:
+        sentences = [clean]
+
+    parts: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not current:
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                parts.extend(_split_sentence_by_length(sentence, max_chars=max_chars))
+        elif len(current) + 1 + len(sentence) <= max_chars:
+            current = f"{current} {sentence}"
+        else:
+            parts.append(current)
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                parts.extend(_split_sentence_by_length(sentence, max_chars=max_chars))
+                current = ""
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _segment_timestamp(base_time: datetime, offset_sec: float) -> str:
+    return (base_time + timedelta(seconds=max(offset_sec, 0.0))).isoformat()
+
+
+def _build_import_utterances(
+    whisper_segments: list[dict[str, Any]],
+    diarization_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], int]:
+    base_time = datetime.now(timezone.utc)
+    speaker_aliases: dict[str, str] = {}
+    atomic_rows: list[dict[str, Any]] = []
+    last_speaker = "SPEAKER_00"
+
+    for segment in whisper_segments:
+        raw_text = _safe_text(segment.get("text"))
+        if not raw_text:
+            continue
+        seg_start = max(0.0, float(segment.get("start") or 0.0))
+        seg_end = max(seg_start, float(segment.get("end") or seg_start))
+        parts = _split_text_naturally(raw_text)
+        if not parts:
+            continue
+
+        duration = max(seg_end - seg_start, 0.001)
+        total_weight = max(sum(max(len(item), 1) for item in parts), 1)
+        cursor = seg_start
+        remaining = duration
+        remaining_weight = total_weight
+
+        for index, part in enumerate(parts):
+            weight = max(len(part), 1)
+            if index == len(parts) - 1 or remaining_weight <= weight:
+                piece_duration = remaining
+            else:
+                piece_duration = duration * (weight / total_weight)
+                piece_duration = min(piece_duration, remaining)
+            piece_end = max(cursor, min(seg_end, cursor + piece_duration))
+            raw_speaker = _speaker_with_max_overlap(cursor, piece_end, diarization_rows, last_speaker)
+            last_speaker = raw_speaker
+            speaker_label = speaker_aliases.setdefault(raw_speaker, f"화자 {len(speaker_aliases) + 1}")
+            atomic_rows.append(
+                {
+                    "speaker": speaker_label,
+                    "text": part,
+                    "timestamp": _segment_timestamp(base_time, cursor),
+                }
+            )
+            remaining -= max(piece_end - cursor, 0.0)
+            remaining_weight -= weight
+            cursor = piece_end
+
+    utterances: list[dict[str, str]] = []
+    for row in atomic_rows:
+        body = _safe_text(row.get("text"))
+        speaker = _safe_text(row.get("speaker"), "화자 1")
+        timestamp = _safe_text(row.get("timestamp"), _now_ts())
+        if not body:
+            continue
+
+        if (
+            utterances
+            and utterances[-1]["speaker"] == speaker
+            and len(utterances[-1]["text"]) + 1 + len(body) <= 120
+            and not _ends_like_sentence(utterances[-1]["text"])
+        ):
+            utterances[-1]["text"] = f"{utterances[-1]['text']} {body}".strip()
+        else:
+            utterances.append({"speaker": speaker, "text": body, "timestamp": timestamp})
+
+    return utterances, max(len(speaker_aliases), 1 if utterances else 0)
+
+
+def _create_working_runtime_for_audio_import(meeting_goal: str, window_size: int, reset_state: bool) -> RuntimeStore:
+    with RT.lock:
+        llm_enabled = bool(RT.llm_enabled)
+        if not reset_state:
+            seeded = _snapshot_runtime_for_analysis(RT)
+            seeded.meeting_goal = _safe_text(meeting_goal, seeded.meeting_goal)
+            seeded.window_size = int(window_size)
+            return seeded
+
+    working = RuntimeStore()
+    working.llm_enabled = llm_enabled
+    working.meeting_goal = _safe_text(meeting_goal)
+    working.window_size = int(window_size)
+    return working
+
+
+def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> None:
+    llm_enabled = bool(rt.llm_enabled)
+    canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
+    canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
+    canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
+    canvas_local_state_by_meeting_user = copy.deepcopy(rt.canvas_local_state_by_meeting_user)
+
+    rt.reset()
+    rt.llm_enabled = llm_enabled
+    rt.meeting_goal = _safe_text(source.meeting_goal)
+    rt.window_size = int(source.window_size)
+    rt.transcript = [dict(row) for row in source.transcript]
+    rt.transcript_version = int(source.transcript_version)
+    rt.analysis_next_windowed_target = int(source.analysis_next_windowed_target)
+    _apply_analysis_result(rt, source)
+    rt.canvas_last_placement = canvas_last_placement
+    rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
+    rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
+    rt.canvas_local_state_by_meeting_user = canvas_local_state_by_meeting_user
+
+
+def _persist_imported_transcripts_to_db(
+    meeting_id: str,
+    user_id: str,
+    rows: list[dict[str, str]],
+    reset_state: bool,
+) -> None:
+    client = _get_supabase_service_client()
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if client is None or not normalized_meeting_id or not normalized_user_id:
+        return
+
+    normalized_rows = [
+        {
+            "meeting_id": normalized_meeting_id,
+            "user_id": normalized_user_id,
+            "speaker": _safe_text(row.get("speaker"), "화자 1"),
+            "text": _safe_text(row.get("text")),
+            "timestamp": _safe_text(row.get("timestamp"), _now_ts()),
+            "turn_id": idx,
+        }
+        for idx, row in enumerate(rows, start=1)
+        if _safe_text(row.get("text"))
+    ]
+
+    if not normalized_rows:
+        return
+
+    try:
+        with _SUPABASE_REQUEST_LOCK:
+            if reset_state:
+                client.table("transcripts").delete().eq("meeting_id", normalized_meeting_id).execute()
+            for start in range(0, len(normalized_rows), 200):
+                batch = normalized_rows[start : start + 200]
+                client.table("transcripts").insert(batch).execute()
+    except Exception as exc:
+        _log_runtime_db_error(
+            f"transcripts:audio-import:{normalized_meeting_id}",
+            f"❌ Failed to persist imported transcripts to Supabase: {exc}",
+            cooldown_sec=10.0,
+        )
+
+
+def _run_audio_import_job(
+    job_id: str,
+    source_path: Path,
+    filename: str,
+    meeting_id: str,
+    meeting_goal: str,
+    user_id: str,
+    reset_state: bool,
+    window_size: int,
+) -> None:
+    normalized_path = source_path.with_suffix(".normalized.wav")
+    try:
+        _update_audio_import_job(job_id, status="processing", progress=4.0, step="normalizing", detail="오디오를 분석용 wav로 변환하는 중입니다.")
+        _run_ffmpeg_to_mono_wav(source_path, normalized_path)
+        duration_sec = _measure_wav_duration_seconds(normalized_path)
+
+        diarization_rows: list[dict[str, Any]] = []
+        used_diarization = False
+        diarization_warning = ""
+        try:
+            _update_audio_import_job(job_id, progress=18.0, step="diarization", detail="화자 분리 구간을 계산하는 중입니다.")
+            diarization_rows = _diarize_audio_file(normalized_path)
+            used_diarization = len(diarization_rows) > 0
+        except Exception as exc:
+            diarization_warning = str(exc)
+            _update_audio_import_job(job_id, progress=18.0, step="diarization", detail="화자 분리를 건너뛰고 단일 화자 기준으로 계속 진행합니다.", warning=diarization_warning)
+
+        _update_audio_import_job(job_id, progress=42.0, step="transcribing", detail="Whisper로 전체 음성을 전사하는 중입니다.", used_diarization=used_diarization)
+        whisper_result = _transcribe_file_with_whisper_segments(normalized_path)
+        whisper_segments = whisper_result.get("segments") or []
+        if not whisper_segments:
+            raise RuntimeError("전사된 segment가 없습니다.")
+
+        _update_audio_import_job(job_id, progress=62.0, step="segmenting", detail="화자와 문장 흐름 기준으로 발화를 정리하는 중입니다.")
+        utterances, speaker_count = _build_import_utterances(whisper_segments, diarization_rows)
+        if not utterances:
+            raise RuntimeError("발화 단위로 정리된 결과가 없습니다.")
+
+        working_rt = _create_working_runtime_for_audio_import(
+            meeting_goal=meeting_goal or Path(filename).stem,
+            window_size=window_size,
+            reset_state=reset_state,
+        )
+        start_count = len(working_rt.transcript)
+        total_new = len(utterances)
+        _update_audio_import_job(
+            job_id,
+            progress=70.0,
+            step="analyzing",
+            detail="발화 4개 단위로 안건 분석을 진행하는 중입니다.",
+            transcript_count=start_count + total_new,
+            speaker_count=speaker_count,
+        )
+
+        appended = 0
+        for row in utterances:
+            _append_turn(working_rt, row.get("speaker", "화자 1"), row.get("text", ""), row.get("timestamp"))
+            appended += 1
+            total_count = len(working_rt.transcript)
+            if total_count % SUMMARY_INTERVAL == 0:
+                _run_analysis(working_rt, force=False, mode="windowed", skip_interval=True)
+            progress = 70.0 + (22.0 * (appended / max(total_new, 1)))
+            _update_audio_import_job(
+                job_id,
+                progress=progress,
+                step="analyzing",
+                detail=f"발화 {appended}/{total_new}개를 반영했습니다.",
+                transcript_count=total_count,
+                speaker_count=speaker_count,
+            )
+
+        if len(working_rt.transcript) > int(working_rt.last_analyzed_count):
+            _run_analysis(working_rt, force=False, mode="windowed", skip_interval=True)
+
+        _update_audio_import_job(job_id, progress=94.0, step="persisting", detail="회의 상태와 전사를 저장하는 중입니다.")
+        with RT.lock:
+            _apply_import_runtime_to_live(RT, working_rt)
+            live_state = _state_response(RT)
+
+        _persist_imported_transcripts_to_db(meeting_id, user_id, working_rt.transcript, reset_state=reset_state)
+
+        _update_audio_import_job(
+            job_id,
+            status="completed",
+            progress=100.0,
+            step="completed",
+            detail=f"{len(working_rt.transcript)}개 발화를 불러왔습니다.",
+            transcript_count=len(working_rt.transcript),
+            speaker_count=speaker_count,
+            used_diarization=used_diarization,
+            warning=diarization_warning,
+            state=live_state,
+        )
+    except Exception as exc:
+        _update_audio_import_job(
+            job_id,
+            status="error",
+            progress=100.0,
+            step="error",
+            detail="오디오 파일 처리에 실패했습니다.",
+            error=str(exc),
+        )
+    finally:
+        for target in (source_path, normalized_path):
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+
+
+def _ensure_llm_ready(rt: RuntimeStore) -> tuple[Any, bool, str]:
+    client = get_client()
+    if bool(rt.llm_enabled) and bool(client.connected):
+        return client, True, ""
+
+    if not _safe_text(getattr(client, "api_key", "")):
+        rt.llm_enabled = False
+        return client, False, "LLM API 키가 없어 로컬 결과를 사용했습니다."
+
+    try:
+        result = client.connect()
+        rt.llm_enabled = bool(result.get("ok"))
+        if rt.llm_enabled and client.connected:
+            return client, True, ""
+        return client, False, _safe_text(result.get("message"), "LLM 연결 실패로 로컬 결과를 사용했습니다.")
+    except Exception as exc:
+        rt.llm_enabled = False
+        return client, False, f"LLM 자동 연결 실패: {exc}"
+
+
+def _fallback_stt_flow_summary(turns: list[SttFlowSummaryTurnInput], max_chars: int = 30) -> str:
+    text = " ".join(_safe_text(turn.text) for turn in turns if _safe_text(turn.text))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(음|어|네|예|일단|그러면|그럼|근데|그러니까)\s+", "", text)
+    if not text:
+        return "현재 발언 정리 중"
+    return _safe_text(text[:max_chars], "현재 발언 정리 중").strip(" .,!?:;/|")
+
+
+def _generate_stt_flow_summary(payload: SttFlowSummaryInput) -> dict[str, Any]:
+    max_chars = int(payload.max_chars or 30)
+    turns = [turn for turn in payload.turns if _safe_text(turn.text)]
+    if not turns:
+        return {
+            "ok": True,
+            "summary": "현재 발언 정리 중",
+            "used_llm": False,
+            "warning": "요약할 발화가 없습니다.",
+        }
+
+    lines = []
+    for index, turn in enumerate(turns, start=1):
+        speaker = _safe_text(turn.speaker, f"화자 {index}")
+        text = _safe_text(turn.text)
+        lines.append(f"{index}. {speaker}: {text}")
+
+    prompt = f"""
+너는 회의 실시간 발언 흐름 요약기다. 출력은 JSON 객체 하나만 반환한다.
+
+[입력 발화]
+{chr(10).join(lines)}
+
+[목표]
+- 위 발화들이 지금 어떤 발언 흐름인지 한국어로 요약한다.
+- 참가자에게 현재 논의 방향을 빠르게 보여주는 짧은 문구여야 한다.
+
+[규칙]
+1) summary는 반드시 {max_chars}자 이내.
+2) "요약", "논의 중", "발언 중" 같은 형식 문구로 채우지 않는다.
+3) 발화 원문을 그대로 복사하지 않는다.
+4) 시간 정보, 화자명, 따옴표, 마침표는 쓰지 않는다.
+5) 핵심 명사와 행동/의도를 포함한다.
+
+[출력 JSON]
+{{
+  "summary": "string"
+}}
+""".strip()
+
+    client, llm_ready, warning = _ensure_llm_ready(RT)
+    if llm_ready:
+        try:
+            parsed = _call_llm_json(
+                rt=RT,
+                client=client,
+                prompt=prompt,
+                stage="stt.flow_summary",
+                temperature=0.15,
+                max_tokens=120,
+            )
+            summary = _safe_text(parsed.get("summary"))
+            summary = re.sub(r"\s+", " ", summary).strip().strip(" .,!?:;/|\"'")
+            if summary:
+                return {
+                    "ok": True,
+                    "summary": _safe_text(summary[:max_chars], "현재 발언 정리 중"),
+                    "used_llm": True,
+                    "warning": "",
+                }
+        except Exception as exc:
+            warning = f"LLM 요약 실패: {exc}"
+
+    return {
+        "ok": True,
+        "summary": _fallback_stt_flow_summary(turns, max_chars=max_chars),
+        "used_llm": False,
+        "warning": warning,
+    }
+
+
+def _normalize_canvas_node_positions(
+    payload: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, dict[str, float]]]:
+    normalized: dict[str, dict[str, dict[str, float]]] = {}
+    if not isinstance(payload, dict):
+        return normalized
+
+    for raw_stage, raw_nodes in payload.items():
+        stage = _normalize_canvas_stage(_safe_text(raw_stage))
+        if stage not in {"ideation", "problem-definition", "solution"}:
+            continue
+        if not isinstance(raw_nodes, dict):
+            continue
+
+        stage_nodes: dict[str, dict[str, float]] = {}
+        for raw_node_id, raw_position in raw_nodes.items():
+            node_id = _safe_text(raw_node_id)
+            if not node_id or not isinstance(raw_position, dict):
+                continue
+            if stage == "ideation" and not node_id.startswith("agenda-"):
+                continue
+
+            try:
+                x = float(raw_position.get("x", 0) or 0)
+                y = float(raw_position.get("y", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+            stage_nodes[node_id] = {"x": x, "y": y}
+
+        if stage_nodes:
+            normalized[stage] = stage_nodes
+
+    return normalized
+
+
+def _summarize_canvas_node_positions_for_debug(
+    payload: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "ideation": 0,
+            "problem_definition": 0,
+            "solution": 0,
+            "sample_ideation": [],
+        }
+
+    ideation = payload.get("ideation") if isinstance(payload.get("ideation"), dict) else {}
+    problem_definition = (
+        payload.get("problem-definition")
+        if isinstance(payload.get("problem-definition"), dict)
+        else {}
+    )
+    solution = payload.get("solution") if isinstance(payload.get("solution"), dict) else {}
+    top_ideation_nodes = sorted(
+        ideation.items(),
+        key=lambda item: (
+            float(item[1].get("y", 0) or 0) if isinstance(item[1], dict) else 0.0,
+            float(item[1].get("x", 0) or 0) if isinstance(item[1], dict) else 0.0,
+        ),
+    )[:4]
+
+    return {
+        "ideation": len(ideation),
+        "problem_definition": len(problem_definition),
+        "solution": len(solution),
+        "top_ideation_nodes": top_ideation_nodes,
+    }
+
+
 app = FastAPI(title="Meeting STT + Agenda MVP")
 app.add_middleware(
     CORSMiddleware,
@@ -3024,6 +6230,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 _ensure_analysis_worker_started()
+
+
+@app.middleware("http")
+async def enforce_ip_whitelist(request, call_next):
+    client_ip = extract_client_ip(request.headers, request.client.host if request.client else None)
+    if not is_ip_allowed(client_ip, IP_WHITELIST):
+        return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -3111,6 +6325,45 @@ def post_transcript_manual(payload: UtteranceInput):
         _append_turn(RT, payload.speaker, payload.text, payload.timestamp)
         _enqueue_windowed_with_backpressure(RT, source="manual_turn")
         return _state_response(RT)
+
+
+@app.post("/api/transcript/sync")
+def post_transcript_sync(payload: TranscriptSyncInput):
+    with RT.lock:
+        if payload.reset_state:
+            RT.reset()
+
+        RT.meeting_goal = _safe_text(payload.meeting_goal)
+        RT.window_size = int(payload.window_size)
+        RT.transcript = []
+        for row in payload.transcript:
+            text = _safe_text(row.text)
+            if not text:
+                continue
+            RT.transcript.append(
+                {
+                    "speaker": _safe_text(row.speaker, "화자"),
+                    "text": text,
+                    "timestamp": _safe_text(row.timestamp, _now_ts()),
+                }
+            )
+
+        RT.transcript_version += 1
+        RT.last_analyzed_count = 0 if payload.auto_analyze else len(RT.transcript)
+        RT.last_analysis_warning = "meeting_transcript_sync"
+        RT.analysis_next_windowed_target = SUMMARY_INTERVAL
+
+        if payload.auto_analyze and RT.transcript:
+            ok = _run_analysis(RT, force=True, mode="full_document")
+            if not ok:
+                RT.last_analysis_warning = "meeting_sync_analyze_failed"
+
+    return _state_response(RT)
+
+
+@app.post("/api/stt/flow-summary")
+def post_stt_flow_summary(payload: SttFlowSummaryInput):
+    return _generate_stt_flow_summary(payload)
 
 
 @app.post("/api/transcript/import-json-dir")
@@ -3367,6 +6620,30 @@ def post_analysis_tick():
         return _state_response(RT)
 
 
+@app.post("/api/canvas/placement-confirm")
+def post_canvas_placement_confirm(payload: CanvasPlacementConfirmInput):
+    with RT.lock:
+        saved_at = _now_ts()
+        RT.canvas_last_placement = {
+            "tool": _safe_text(payload.tool, "note"),
+            "ui_x": float(payload.ui_x or 0.0),
+            "ui_y": float(payload.ui_y or 0.0),
+            "flow_x": float(payload.flow_x or 0.0),
+            "flow_y": float(payload.flow_y or 0.0),
+            "agenda_id": _safe_text(payload.agenda_id),
+            "point_id": _safe_text(payload.point_id),
+            "title": _safe_text(payload.title),
+            "body": _safe_text(payload.body),
+            "saved_at": saved_at,
+        }
+        return {
+            "ok": True,
+            "saved_at": saved_at,
+            "draft": copy.deepcopy(RT.canvas_last_placement),
+            "state": _state_response(RT),
+        }
+
+
 @app.get("/api/analysis/last-llm-json")
 def get_last_llm_json():
     with RT.lock:
@@ -3376,6 +6653,2864 @@ def get_last_llm_json():
             "has_json": bool(RT.last_llm_parsed_json),
             "json": RT.last_llm_parsed_json if isinstance(RT.last_llm_parsed_json, dict) else {},
         }
+
+
+@app.post("/api/canvas/idea-assimilation")
+def post_canvas_idea_assimilation(payload: CanvasIdeaAssimilationInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        return _compute_idea_assimilation_result(payload)
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "idea_assimilation",
+        signature,
+        _compute,
+    )
+
+
+def _canvas_idea_processed_ids(workspace: dict[str, Any]) -> set[str]:
+    processed = {
+        _safe_text(item)
+        for item in (workspace.get("idea_processed_utterance_ids") or [])
+        if _safe_text(item)
+    }
+    for item in workspace.get("canvas_items") or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("evidence_utterance_ids", "ignored_utterance_ids"):
+            for utterance_id in item.get(key) or []:
+                if _safe_text(utterance_id):
+                    processed.add(_safe_text(utterance_id))
+    return processed
+
+
+def _canvas_problem_processed_ids(workspace: dict[str, Any]) -> set[str]:
+    processed = {
+        _safe_text(item)
+        for item in (workspace.get("problem_processed_utterance_ids") or [])
+        if _safe_text(item)
+    }
+    for group in workspace.get("problem_groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for item in group.get("discussion_items") or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("evidence_utterance_ids", "ignored_utterance_ids"):
+                for utterance_id in item.get(key) or []:
+                    if _safe_text(utterance_id):
+                        processed.add(_safe_text(utterance_id))
+    return processed
+
+
+def _normalize_problem_discussion_llm_result(raw: Any, fallback_ids: list[str]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    raw_title = raw.get("title")
+    raw_body = raw.get("summary") or raw.get("body") or raw.get("content")
+    source_text = f"{raw_title or ''} {raw_body or ''}"
+    keywords = _normalize_idea_keywords(raw.get("keywords") or [], source_text, 6)
+    title = _clean_idea_title(raw_title, keywords, "문제 의견")
+    body = _clean_idea_summary(raw_body, title, keywords)
+    refined = _normalize_refined_utterances(
+        raw.get("refinedUtterances") or raw.get("refined_utterances") or [],
+        limit=8,
+    )
+    evidence_ids = _dedup_preserve(
+        [
+            _safe_text(value)
+            for value in (raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or fallback_ids)
+            if _safe_text(value)
+        ],
+        limit=400,
+    )
+    ignored_ids = _dedup_preserve(
+        [
+            _safe_text(value)
+            for value in (raw.get("ignoredUtteranceIds") or raw.get("ignored_utterance_ids") or [])
+            if _safe_text(value)
+        ],
+        limit=400,
+    )
+    return {
+        "title": title,
+        "body": body,
+        "keywords": keywords,
+        "key_evidence": [_safe_text(value) for value in (raw.get("keyEvidence") or raw.get("key_evidence") or []) if _safe_text(value)][:8],
+        "refined_utterances": refined,
+        "evidence_utterance_ids": evidence_ids or fallback_ids,
+        "ignored_utterance_ids": ignored_ids,
+    }
+
+
+def _build_problem_discussion_prompt(
+    payload: CanvasProblemDiscussionWorkspaceStartInput,
+    group: dict[str, Any],
+) -> str:
+    target_rows = [_idea_assimilation_utterance_dict(item) for item in payload.target_utterances]
+    context_rows = [_idea_assimilation_utterance_dict(item) for item in (payload.context_utterances or [])[-6:]]
+    prompt_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "problem_group": {
+            "group_id": _safe_text(group.get("group_id")),
+            "topic": _safe_text(group.get("topic")),
+            "insight_lens": _safe_text(group.get("insight_lens")),
+            "conclusion": _safe_text(group.get("conclusion")),
+            "keywords": [_safe_text(value) for value in (group.get("keywords") or []) if _safe_text(value)][:8],
+        },
+        "context_utterances": context_rows,
+        "target_transcript_text": "\n".join(
+            f"{row.get('speaker')}: {row.get('text')}" for row in target_rows if _safe_text(row.get("text"))
+        ),
+        "target_utterances": target_rows,
+    }
+    return (
+        "너는 문제정의 단계에서 특정 문제정의 노드 아래에 붙일 의견/근거 노드를 생성한다. JSON 하나만 반환한다.\n"
+        "규칙:\n"
+        "- target_transcript_text에서 나온 의미만 사용한다. 배경 정보는 보조로만 사용한다.\n"
+        "- title은 10~24자 정도의 짧은 명사구로 쓴다.\n"
+        "- summary는 노드 본문에 들어갈 content이며, 문장형 설명보다 핵심 대상 + 문제/근거/조건의 압축 구문을 우선한다.\n"
+        "- summary는 최대 2줄, 각 줄은 12~42자 정도로 쓴다.\n"
+        "- keywords는 3~6개, 중심 의미 명사구만 넣는다.\n"
+        "- refinedUtterances는 summary에 직접 영향을 준 주요 발화만 14~38자 한 줄 요약으로 넣는다.\n"
+        "- 잡담, 맞장구, 회의 진행 멘트는 제외한다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{\"title\":\"...\",\"summary\":\"...\",\"keywords\":[\"...\"],\"keyEvidence\":[\"...\"],"
+        "\"refinedUtterances\":[{\"utterance_id\":\"...\",\"speaker\":\"...\",\"text\":\"...\",\"timestamp\":\"...\"}],"
+        "\"evidenceUtteranceIds\":[\"...\"],\"ignoredUtteranceIds\":[\"...\"]}\n\n"
+        f"input={json.dumps(prompt_payload, ensure_ascii=False)}"
+    )
+
+
+def _compute_problem_discussion_result(
+    payload: CanvasProblemDiscussionWorkspaceStartInput,
+    group: dict[str, Any],
+) -> dict[str, Any]:
+    fallback_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
+    client, llm_ready, warning = _ensure_llm_ready(RT)
+    if not llm_ready:
+        return {
+            "ok": False,
+            "used_llm": False,
+            "warning": warning or "LLM 미연결",
+            "update": None,
+        }
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_problem_discussion_prompt(payload, group),
+            stage="canvas_problem_discussion",
+            temperature=0.18,
+            max_tokens=1000,
+        )
+        raw = parsed.get("update") if isinstance(parsed, dict) and isinstance(parsed.get("update"), dict) else parsed
+        update = _normalize_problem_discussion_llm_result(raw, fallback_ids)
+        if not update:
+            return {
+                "ok": False,
+                "used_llm": True,
+                "warning": "LLM JSON 형식이 예상과 달라 의견 노드를 생성하지 않았습니다.",
+                "update": None,
+            }
+        return {
+            "ok": True,
+            "used_llm": True,
+            "warning": _safe_text(parsed.get("warning")) if isinstance(parsed, dict) else "",
+            "update": update,
+        }
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_problem_discussion", payload=str(exc), meta={})
+        return {
+            "ok": False,
+            "used_llm": False,
+            "warning": f"문제정의 의견 LLM 생성 실패: {exc}",
+            "update": None,
+        }
+
+
+def _canvas_idea_existing_ideas_from_workspace(
+    workspace: dict[str, Any],
+    pending_item_id: str = "",
+    selected_agenda_id: str = "",
+) -> list[CanvasIdeaAssimilationIdeaInput]:
+    ideas: list[CanvasIdeaAssimilationIdeaInput] = []
+    agenda_filter = _safe_text(selected_agenda_id)
+    for item in workspace.get("canvas_items") or []:
+        if not isinstance(item, dict):
+            continue
+        if _safe_text(item.get("id")) == pending_item_id:
+            continue
+        if _safe_text(item.get("kind"), "note") == "topic":
+            continue
+        if _safe_text(item.get("kind"), "note") == "comment":
+            continue
+        if bool(item.get("ai_pending")):
+            continue
+        if agenda_filter and _safe_text(item.get("agenda_id")) != agenda_filter:
+            continue
+        ideas.append(
+            CanvasIdeaAssimilationIdeaInput(
+                id=_safe_text(item.get("id")),
+                title=_safe_text(item.get("title")),
+                summary=_safe_text(item.get("body") or item.get("title")),
+                keywords=[_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)],
+                key_evidence=[_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)],
+                refined_utterances=[
+                    CanvasRefinedUtteranceInput(
+                        utterance_id=_safe_text(value.get("utterance_id") or value.get("utteranceId") or value.get("id")),
+                        speaker=_safe_text(value.get("speaker"), "참가자"),
+                        text=_safe_text(value.get("text")),
+                        timestamp=_safe_text(value.get("timestamp")),
+                    )
+                    for value in (item.get("refined_utterances") or [])
+                    if isinstance(value, dict) and _safe_text(value.get("text"))
+                ],
+                evidence_utterance_ids=[
+                    _safe_text(value) for value in (item.get("evidence_utterance_ids") or []) if _safe_text(value)
+                ],
+                user_edited=bool(item.get("user_edited")),
+            )
+        )
+    return ideas
+
+
+def _save_canvas_workspace_runtime(meeting_id: str, workspace: dict[str, Any]) -> None:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return
+    workspace["meeting_id"] = normalized_meeting_id
+    workspace["saved_at"] = _now_ts()
+    with RT.lock:
+        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
+    _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+
+
+def _mark_canvas_idea_job(
+    meeting_id: str,
+    job_id: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        current = meeting_jobs.get(job_id) if isinstance(meeting_jobs.get(job_id), dict) else {}
+        current = {
+            **current,
+            **fields,
+            "job_id": job_id,
+            "meeting_id": normalized_meeting_id,
+            "updated_at": _now_ts(),
+        }
+        meeting_jobs[job_id] = current
+        return copy.deepcopy(current)
+
+
+def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = {
+        "ok": True,
+        "job_id": _safe_text(job.get("job_id")),
+        "meeting_id": _safe_text(job.get("meeting_id")),
+        "status": _safe_text(job.get("status"), "idle"),
+        "detail": _safe_text(job.get("detail")),
+        "used_llm": bool(job.get("used_llm")),
+        "warning": _safe_text(job.get("warning")),
+        "pending_item_id": _safe_text(job.get("pending_item_id")),
+        "target_count": int(job.get("target_count") or 0),
+        "created_at": _safe_text(job.get("created_at")),
+        "updated_at": _safe_text(job.get("updated_at")),
+    }
+    if isinstance(workspace, dict):
+        response["workspace"] = _canvas_workspace_response(workspace)
+    elif isinstance(job.get("workspace"), dict):
+        response["workspace"] = _canvas_workspace_response(job["workspace"])
+    target_signature = _safe_text(job.get("target_signature"))
+    if target_signature:
+        response["target_signature"] = target_signature
+    return response
+
+
+def _mark_canvas_problem_job(
+    meeting_id: str,
+    job_id: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    with RT.lock:
+        meeting_jobs = RT.canvas_problem_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        current = meeting_jobs.get(job_id) if isinstance(meeting_jobs.get(job_id), dict) else {}
+        current = {
+            **current,
+            **fields,
+            "job_id": job_id,
+            "meeting_id": normalized_meeting_id,
+            "updated_at": _now_ts(),
+        }
+        meeting_jobs[job_id] = current
+        return copy.deepcopy(current)
+
+
+def _canvas_problem_job_response(job: dict[str, Any], workspace: dict[str, Any] | None = None) -> dict[str, Any]:
+    response = {
+        "ok": True,
+        "job_id": _safe_text(job.get("job_id")),
+        "meeting_id": _safe_text(job.get("meeting_id")),
+        "status": _safe_text(job.get("status"), "idle"),
+        "detail": _safe_text(job.get("detail")),
+        "used_llm": bool(job.get("used_llm")),
+        "warning": _safe_text(job.get("warning")),
+        "pending_item_id": _safe_text(job.get("pending_item_id")),
+        "target_count": int(job.get("target_count") or 0),
+        "created_at": _safe_text(job.get("created_at")),
+        "updated_at": _safe_text(job.get("updated_at")),
+    }
+    if isinstance(workspace, dict):
+        response["workspace"] = _canvas_workspace_response(workspace)
+    elif isinstance(job.get("workspace"), dict):
+        response["workspace"] = _canvas_workspace_response(job["workspace"])
+    target_signature = _safe_text(job.get("target_signature"))
+    if target_signature:
+        response["target_signature"] = target_signature
+    return response
+
+
+def _apply_idea_update_to_canvas_item(item: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    user_edited = bool(item.get("user_edited"))
+    next_evidence_ids = _dedup_preserve(
+        [_safe_text(value) for value in (item.get("evidence_utterance_ids") or [])]
+        + [_safe_text(value) for value in (update.get("evidenceUtteranceIds") or [])],
+        limit=400,
+    )
+    next_ignored_ids = _dedup_preserve(
+        [_safe_text(value) for value in (item.get("ignored_utterance_ids") or [])]
+        + [_safe_text(value) for value in (update.get("ignoredUtteranceIds") or [])],
+        limit=400,
+    )
+    existing_keywords = _normalize_idea_keywords(
+        item.get("keywords") or [],
+        f"{item.get('title') or ''} {item.get('body') or ''}",
+        8,
+    )
+    update_keywords = _normalize_idea_keywords(
+        update.get("keywords") or [],
+        f"{update.get('title') or ''} {update.get('summary') or ''}",
+        8,
+    )
+    next_keywords = (
+        _dedup_preserve(existing_keywords + update_keywords, limit=8)
+        if user_edited
+        else (update_keywords or existing_keywords)
+    )
+    next_key_evidence = _dedup_preserve(
+        [_safe_text(value) for value in (item.get("key_evidence") or [])]
+        + [_safe_text(value) for value in (update.get("keyEvidence") or [])],
+        limit=8,
+    )
+    next_refined = _normalize_refined_utterances(
+        list(item.get("refined_utterances") or []) + list(update.get("refinedUtterances") or []),
+        limit=120,
+    )
+    next_item = {
+        **item,
+        "title": _safe_text(item.get("title")) if user_edited else (_safe_text(update.get("title")) or _safe_text(item.get("title"))),
+        "body": _safe_text(item.get("body")) if user_edited else (_safe_text(update.get("summary")) or _safe_text(item.get("body"))),
+        "keywords": next_keywords,
+        "key_evidence": next_key_evidence,
+        "refined_utterances": next_refined,
+        "evidence_utterance_ids": next_evidence_ids,
+        "ignored_utterance_ids": next_ignored_ids,
+        "ai_generated": bool(item.get("ai_generated")) or bool(update),
+        "ai_pending": False,
+        "manual_position": False,
+    }
+    next_item.pop("x", None)
+    next_item.pop("y", None)
+    return next_item
+
+
+def _idea_update_merge_allowed(item: dict[str, Any], update: dict[str, Any]) -> bool:
+    target_text = " ".join(
+        [
+            _safe_text(item.get("title")),
+            _safe_text(item.get("body")),
+            " ".join(_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)),
+        ]
+    )
+    update_text = " ".join(
+        [
+            _safe_text(update.get("title")),
+            _safe_text(update.get("summary")),
+            " ".join(_safe_text(value) for value in (update.get("keywords") or []) if _safe_text(value)),
+        ]
+    )
+    target_keywords = set(_normalize_idea_keywords(item.get("keywords") or [], target_text, 8))
+    update_keywords = set(_normalize_idea_keywords(update.get("keywords") or [], update_text, 8))
+    if target_keywords and update_keywords:
+        overlap = len(target_keywords & update_keywords) / max(1, min(len(target_keywords), len(update_keywords)))
+        if overlap >= 0.45:
+            return True
+
+    if _text_similarity(target_text, update_text) >= 0.28:
+        return True
+    return False
+
+
+def _canvas_idea_item_text(item: dict[str, Any]) -> str:
+    child_text = " ".join(
+        _canvas_idea_item_text(child)
+        for child in (item.get("merged_children") or [])[:12]
+        if isinstance(child, dict)
+    )
+    refined_text = " ".join(
+        _safe_text(row.get("text"))
+        for row in (item.get("refined_utterances") or [])[:12]
+        if isinstance(row, dict)
+    )
+    return " ".join(
+        [
+            _safe_text(item.get("title")),
+            _safe_text(item.get("body")),
+            " ".join(_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)),
+            " ".join(_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)),
+            refined_text,
+            child_text,
+        ]
+    )
+
+
+def _canvas_idea_leaf_ids(item: dict[str, Any]) -> list[str]:
+    explicit = [_safe_text(value) for value in (item.get("compacted_from_ids") or []) if _safe_text(value)]
+    if explicit:
+        return explicit
+    child_ids: list[str] = []
+    for child in item.get("merged_children") or []:
+        if isinstance(child, dict):
+            child_ids.extend(_canvas_idea_leaf_ids(child))
+    return _dedup_preserve(child_ids or [_safe_text(item.get("id"))], limit=400)
+
+
+def _canvas_idea_source_count(item: dict[str, Any]) -> int:
+    return max(1, len(_canvas_idea_leaf_ids(item)))
+
+
+def _canvas_idea_child_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": _safe_text(item.get("id")),
+        "agenda_id": _safe_text(item.get("agenda_id")),
+        "point_id": _safe_text(item.get("point_id")),
+        "kind": _safe_text(item.get("kind"), "note"),
+        "title": _safe_text(item.get("title")),
+        "body": _safe_text(item.get("body")),
+        "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+        "key_evidence": [_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)][:8],
+        "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=80),
+        "evidence_utterance_ids": [
+            _safe_text(value) for value in (item.get("evidence_utterance_ids") or []) if _safe_text(value)
+        ][:400],
+        "ignored_utterance_ids": [
+            _safe_text(value) for value in (item.get("ignored_utterance_ids") or []) if _safe_text(value)
+        ][:400],
+        "merged_children": _normalize_canvas_merged_children(item.get("merged_children") or []),
+        "compacted_from_ids": _canvas_idea_leaf_ids(item),
+        "compaction_level": _safe_nonnegative_int(item.get("compaction_level")),
+        "ai_generated": bool(item.get("ai_generated")),
+        "user_edited": bool(item.get("user_edited")),
+    }
+
+
+def _canvas_idea_visible_items(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+        and _safe_text(item.get("id"))
+        and bool(item.get("ai_generated"))
+        and not bool(item.get("ai_pending"))
+        and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
+    ]
+
+
+def _is_canvas_topic_item(item: dict[str, Any]) -> bool:
+    return _safe_text(item.get("kind"), "note") == "topic"
+
+
+def _is_canvas_clusterable_item(item: dict[str, Any]) -> bool:
+    return (
+        isinstance(item, dict)
+        and _safe_text(item.get("id"))
+        and not _is_canvas_topic_item(item)
+        and not bool(item.get("ai_pending"))
+        and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
+    )
+
+
+def _is_canvas_topic_clustering_candidate(item: dict[str, Any]) -> bool:
+    return (
+        _is_canvas_clusterable_item(item)
+        or (
+            _is_canvas_topic_item(item)
+            and not bool(item.get("user_edited"))
+            and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
+        )
+    )
+
+
+def _canvas_direct_child_items(workspace: dict[str, Any], agenda_id: str) -> list[dict[str, Any]]:
+    normalized_agenda_id = _safe_text(agenda_id)
+    return [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+        and _safe_text(item.get("agenda_id")) == normalized_agenda_id
+        and not _safe_text(item.get("parent_topic_id"))
+        and (_is_canvas_topic_item(item) or _is_canvas_clusterable_item(item))
+    ]
+
+
+def _canvas_topic_nodes_for_agenda(workspace: dict[str, Any], agenda_id: str) -> list[dict[str, Any]]:
+    normalized_agenda_id = _safe_text(agenda_id)
+    return [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+        and _safe_text(item.get("agenda_id")) == normalized_agenda_id
+        and _is_canvas_topic_item(item)
+    ]
+
+
+def _canvas_topic_child_ids(workspace: dict[str, Any], topic_id: str) -> list[str]:
+    normalized_topic_id = _safe_text(topic_id)
+    topic = next(
+        (
+            item
+            for item in (workspace.get("canvas_items") or [])
+            if isinstance(item, dict) and _safe_text(item.get("id")) == normalized_topic_id
+        ),
+        None,
+    )
+    explicit = [
+        _safe_text(value)
+        for value in ((topic or {}).get("child_item_ids") or [])
+        if _safe_text(value)
+    ]
+    derived = [
+        _safe_text(item.get("id"))
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict) and _safe_text(item.get("parent_topic_id")) == normalized_topic_id
+    ]
+    return _dedup_preserve(explicit + derived, limit=400)
+
+
+def _canvas_topic_descendant_ids(workspace: dict[str, Any], topic_id: str) -> set[str]:
+    descendants: set[str] = set()
+    pending = list(_canvas_topic_child_ids(workspace, topic_id))
+
+    while pending:
+        child_id = _safe_text(pending.pop(0))
+        if not child_id or child_id in descendants:
+            continue
+        descendants.add(child_id)
+        child = next(
+            (
+                item
+                for item in (workspace.get("canvas_items") or [])
+                if isinstance(item, dict) and _safe_text(item.get("id")) == child_id
+            ),
+            None,
+        )
+        if child and _is_canvas_topic_item(child):
+            pending.extend(_canvas_topic_child_ids(workspace, child_id))
+
+    return descendants
+
+
+def _canvas_topic_leaf_child_ids(workspace: dict[str, Any], topic_id: str) -> list[str]:
+    leaves: list[str] = []
+    pending = list(_canvas_topic_child_ids(workspace, topic_id))
+    seen: set[str] = set()
+
+    while pending:
+        child_id = _safe_text(pending.pop(0))
+        if not child_id or child_id in seen:
+            continue
+        seen.add(child_id)
+        child = next(
+            (
+                item
+                for item in (workspace.get("canvas_items") or [])
+                if isinstance(item, dict) and _safe_text(item.get("id")) == child_id
+            ),
+            None,
+        )
+        if child and _is_canvas_topic_item(child):
+            pending.extend(_canvas_topic_child_ids(workspace, child_id))
+            continue
+        if child:
+            leaves.append(child_id)
+
+    return _dedup_preserve(leaves, limit=400)
+
+
+def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
+    stored = _safe_nonnegative_int(workspace.get("idea_create_stack"))
+    if stored > 0:
+        return stored
+    return sum(_canvas_idea_source_count(item) for item in _canvas_idea_visible_items(workspace))
+
+
+def _canvas_idea_visible_target(workspace: dict[str, Any]) -> int:
+    return 3 + (_canvas_idea_create_stack_value(workspace) // 2)
+
+
+def _canvas_topic_cluster_target(workspace: dict[str, Any]) -> int:
+    return 3 + (_canvas_idea_create_stack_value(workspace) // 4)
+
+
+def _canvas_idea_compaction_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_text = _canvas_idea_item_text(left)
+    right_text = _canvas_idea_item_text(right)
+    score = _text_similarity(left_text, right_text)
+    left_keywords = set(_normalize_idea_keywords(left.get("keywords") or [], left_text, 8))
+    right_keywords = set(_normalize_idea_keywords(right.get("keywords") or [], right_text, 8))
+    if left_keywords and right_keywords:
+        score = max(score, len(left_keywords & right_keywords) / max(1, len(left_keywords | right_keywords)))
+    if _safe_text(left.get("agenda_id")) and _safe_text(left.get("agenda_id")) == _safe_text(right.get("agenda_id")):
+        score += 0.05
+    return score
+
+
+def _pick_canvas_idea_compaction_pair(items: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    candidates = [item for item in items if not bool(item.get("user_edited"))]
+    if len(candidates) < 2:
+        return None
+
+    best_pair: tuple[dict[str, Any], dict[str, Any]] | None = None
+    best_score = -1.0
+    for left_index, left in enumerate(candidates):
+        for right in candidates[left_index + 1 :]:
+            score = _canvas_idea_compaction_similarity(left, right)
+            if score > best_score:
+                best_score = score
+                best_pair = (left, right)
+    return best_pair
+
+
+def _build_idea_compaction_prompt(left: dict[str, Any], right: dict[str, Any]) -> str:
+    ideas = []
+    for item in (left, right):
+        ideas.append(
+            {
+                "id": _safe_text(item.get("id")),
+                "title": _safe_text(item.get("title")),
+                "content": _safe_text(item.get("body")),
+                "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+                "key_evidence": [_safe_text(value) for value in (item.get("key_evidence") or []) if _safe_text(value)][:8],
+                "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=8),
+                "source_node_count": _canvas_idea_source_count(item),
+            }
+        )
+
+    return (
+        "아래 두 개의 아이디어 노드는 의미가 유사해서 canvas에서 하나의 상위 아이디어 노드로 압축하려고 한다.\n"
+        "원본 노드는 시스템이 하위 근거로 보존하므로, 너는 상위 노드에 표시할 title/content/keywords/keyEvidence만 재작성한다.\n"
+        "규칙:\n"
+        "- 두 노드의 공통 의미를 중심으로 압축한다.\n"
+        "- content는 1~2줄, 문장형 설명보다 핵심 대상 + 방향/문제/조건의 압축 구문을 우선한다.\n"
+        "- keywords는 3~6개, 일반어/메타어를 제외하고 의미 중심 명사구로 쓴다.\n"
+        "- keyEvidence는 상위 노드를 이해하는 데 필요한 핵심 근거만 최대 4개로 쓴다.\n"
+        "- 없는 내용을 만들지 말고, 두 노드에 있는 내용만 사용한다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{\"title\":\"...\",\"summary\":\"...\",\"keywords\":[\"...\"],\"keyEvidence\":[\"...\"]}\n\n"
+        f"nodes={json.dumps(ideas, ensure_ascii=False)}"
+    )
+
+
+def _compute_idea_compaction_update(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    fallback_ids = _dedup_preserve(
+        [
+            _safe_text(value)
+            for item in (left, right)
+            for value in (item.get("evidence_utterance_ids") or [])
+            if _safe_text(value)
+        ],
+        limit=400,
+    )
+    client, llm_ready, _ = _ensure_llm_ready(RT)
+    if not llm_ready:
+        return None
+
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_idea_compaction_prompt(left, right),
+            stage="canvas_idea_compaction",
+            temperature=0.18,
+            max_tokens=900,
+        )
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_idea_compaction", payload=str(exc), meta={})
+        return None
+
+    raw = parsed.get("update") if isinstance(parsed, dict) and isinstance(parsed.get("update"), dict) else parsed
+    if not isinstance(raw, dict):
+        return None
+    update = _normalize_idea_assimilation_update(
+        {
+            **raw,
+            "action": "create",
+            "evidenceUtteranceIds": raw.get("evidenceUtteranceIds") or raw.get("evidence_utterance_ids") or fallback_ids,
+        },
+        fallback_ids,
+    )
+    return update
+
+
+def _apply_canvas_idea_compaction_pair(
+    workspace: dict[str, Any],
+    left: dict[str, Any],
+    right: dict[str, Any],
+    update: dict[str, Any],
+) -> None:
+    left_id = _safe_text(left.get("id"))
+    right_id = _safe_text(right.get("id"))
+    if not left_id or not right_id or left_id == right_id:
+        return
+
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    item_indices = {_safe_text(item.get("id")): index for index, item in enumerate(canvas_items) if _safe_text(item.get("id"))}
+    if item_indices.get(right_id, 10**9) < item_indices.get(left_id, 10**9):
+        left, right = right, left
+        left_id, right_id = right_id, left_id
+
+    combined_refined = _normalize_refined_utterances(
+        list(update.get("refinedUtterances") or [])
+        + list(left.get("refined_utterances") or [])
+        + list(right.get("refined_utterances") or []),
+        limit=120,
+    )
+    combined_evidence_ids = _dedup_preserve(
+        [_safe_text(value) for value in (left.get("evidence_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (right.get("evidence_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (update.get("evidenceUtteranceIds") or []) if _safe_text(value)],
+        limit=400,
+    )
+    combined_ignored_ids = _dedup_preserve(
+        [_safe_text(value) for value in (left.get("ignored_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (right.get("ignored_utterance_ids") or []) if _safe_text(value)]
+        + [_safe_text(value) for value in (update.get("ignoredUtteranceIds") or []) if _safe_text(value)],
+        limit=400,
+    )
+    combined_children = _normalize_canvas_merged_children(
+        [_canvas_idea_child_snapshot(left), _canvas_idea_child_snapshot(right)],
+        limit=80,
+    )
+    compacted_from_ids = _dedup_preserve(_canvas_idea_leaf_ids(left) + _canvas_idea_leaf_ids(right), limit=400)
+    parent = {
+        **left,
+        "title": _safe_text(update.get("title")) or _safe_text(left.get("title")),
+        "body": _safe_text(update.get("summary")) or _safe_text(left.get("body")),
+        "keywords": _normalize_idea_keywords(update.get("keywords") or [], f"{update.get('title') or ''} {update.get('summary') or ''}", 8)
+        or _dedup_preserve(
+            [_safe_text(value) for value in (left.get("keywords") or []) if _safe_text(value)]
+            + [_safe_text(value) for value in (right.get("keywords") or []) if _safe_text(value)],
+            limit=8,
+        ),
+        "key_evidence": _dedup_preserve(
+            [_safe_text(value) for value in (update.get("keyEvidence") or []) if _safe_text(value)]
+            + [_safe_text(value) for value in (left.get("key_evidence") or []) if _safe_text(value)]
+            + [_safe_text(value) for value in (right.get("key_evidence") or []) if _safe_text(value)],
+            limit=8,
+        ),
+        "refined_utterances": combined_refined,
+        "evidence_utterance_ids": combined_evidence_ids,
+        "ignored_utterance_ids": combined_ignored_ids,
+        "merged_children": combined_children,
+        "compacted_from_ids": compacted_from_ids,
+        "compaction_level": max(
+            _safe_nonnegative_int(left.get("compaction_level")),
+            _safe_nonnegative_int(right.get("compaction_level")),
+        )
+        + 1,
+        "ai_generated": True,
+        "user_edited": False,
+        "ai_pending": False,
+        "manual_position": False,
+    }
+    parent.pop("x", None)
+    parent.pop("y", None)
+
+    workspace["canvas_items"] = [
+        parent if _safe_text(item.get("id")) == left_id else item
+        for item in canvas_items
+        if _safe_text(item.get("id")) != right_id
+    ]
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+
+
+def _maybe_compact_canvas_idea_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
+    visible_items = _canvas_idea_visible_items(workspace)
+    target = _canvas_idea_visible_target(workspace)
+    if len(visible_items) < CANVAS_IDEA_COMPACTION_MIN_VISIBLE or len(visible_items) <= target:
+        return {"merged": 0, "target": target, "visible": len(visible_items)}
+
+    merged = 0
+    while merged < CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB:
+        visible_items = _canvas_idea_visible_items(workspace)
+        if len(visible_items) <= target:
+            break
+        pair = _pick_canvas_idea_compaction_pair(visible_items)
+        if not pair:
+            break
+        update = _compute_idea_compaction_update(pair[0], pair[1])
+        if not update:
+            break
+        _apply_canvas_idea_compaction_pair(workspace, pair[0], pair[1], update)
+        merged += 1
+
+    return {"merged": merged, "target": target, "visible": len(_canvas_idea_visible_items(workspace))}
+
+
+def _build_canvas_topic_clustering_prompt(
+    workspace: dict[str, Any],
+    agenda_id: str,
+    top_level_items: list[dict[str, Any]],
+    candidate_items: list[dict[str, Any]],
+) -> str:
+    target = _canvas_topic_cluster_target(workspace)
+
+    def node_payload(item: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "id": _safe_text(item.get("id")),
+            "kind": _safe_text(item.get("kind"), "note"),
+            "title": _safe_text(item.get("title")),
+            "content": _safe_text(item.get("body")),
+            "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+            "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=6),
+            "parent_topic_locked": bool(item.get("parent_topic_locked")),
+            "created_by": _safe_text(item.get("created_by")),
+            "user_edited": bool(item.get("user_edited")),
+        }
+        if _is_canvas_topic_item(item):
+            payload["child_count"] = len(_canvas_topic_child_ids(workspace, _safe_text(item.get("id"))))
+        return payload
+
+    payload = {
+        "agenda_id": _safe_text(agenda_id),
+        "visibleTarget": target,
+        "directChildCount": len(top_level_items),
+        "nodes": [node_payload(item) for item in candidate_items],
+    }
+    return (
+        "회의 canvas의 그룹 분류 바로 아래 1차 노드 수가 visibleTarget을 넘었다.\n"
+        "너는 아래 direct child 노드 중 의미가 가장 유사한 2개만 골라 계층적 topic으로 묶어야 한다.\n"
+        "규칙:\n"
+        "- 카운트 기준은 topic node 개수가 아니라 그룹 분류 바로 아래에 있는 1차 노드 전체 개수다.\n"
+        "- nodes는 모두 그룹 분류 바로 아래 direct child 후보이다.\n"
+        "- 반드시 가장 유사한 2개만 pair로 반환한다. 3개 이상 선택 금지.\n"
+        "- 서로 의미가 충분히 유사하지 않으면 pair를 빈 배열로 반환한다.\n"
+        "- kind=topic인 노드도 후보가 될 수 있다. topic끼리 유사하면 topic들을 하위에 넣는 것이 아니라 하나의 새 topic으로 통합한다.\n"
+        "- topic node 아래에는 다른 topic node가 들어가면 안 된다. topic pair를 고르더라도 서버가 기존 topic의 실제 하위 아이디어만 새 topic 아래로 평탄화한다.\n"
+        "- title/body/keywords는 선택한 pair 2개를 대표하는 topic 문구로 작성한다.\n"
+        "- title은 10~24자 정도의 짧은 명사구로 쓴다. '요약', '정리', '논의', '관련' 같은 메타어를 쓰지 않는다.\n"
+        "- body는 topic 노드 본문에 들어갈 content다. 완성형 설명문이 아니라 핵심 대상 + 방향/문제/조건만 남긴 압축 구문이어야 한다.\n"
+        "- body는 최대 2줄로 작성하고, 각 줄은 12~36자 정도의 짧은 명사구/핵심 구문으로 쓴다.\n"
+        "- body에 '~합니다', '~됩니다', '~할 수 있습니다', '~로 보입니다' 같은 문장형 어미를 피한다.\n"
+        "- keywords는 3~6개로 작성하고, pair 전체의 중심 의미를 이루는 명사구만 넣는다.\n"
+        "- 서버가 pair를 검증한 뒤 새 topic 생성 또는 기존 topic 업데이트를 결정한다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{"
+        "\"pair\":[\"node-id-1\",\"node-id-2\"],"
+        "\"title\":\"...\","
+        "\"body\":\"...\","
+        "\"keywords\":[\"...\"]"
+        "}\n\n"
+        f"input={json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _normalize_topic_cluster_title(raw: Any, fallback: str = "") -> str:
+    text = _strip_idea_reference_text(raw, collapse_whitespace=False)
+    if not text:
+        return fallback
+    text = re.sub(r"^(?:주제|topic|제목|요약|정리)\s*[:：-]\s*", "", text, flags=re.IGNORECASE)
+    return _to_summary_point(text, 24)
+
+
+def _normalize_topic_cluster_body(raw: Any, fallback: str = "") -> str:
+    text = _safe_text(raw)
+    if isinstance(raw, list):
+        text = "\n".join(_safe_text(item) for item in raw if _safe_text(item))
+    text = _strip_idea_reference_text(text, collapse_whitespace=False)
+    text = re.sub(r"^(?:내용|본문|요약|summary|content|body)\s*[:：-]\s*", "", text, flags=re.IGNORECASE)
+    candidates = [
+        _to_summary_point(part, 42)
+        for part in re.split(r"\n+|\s*/\s*|[;；]+", text)
+        if _safe_text(part)
+    ]
+    candidates = [
+        item
+        for item in candidates
+        if item
+        and item.lower() not in IDEA_KEYWORD_NOISE
+        and not re.fullmatch(r"(없음|해당 없음|n/?a)", item, flags=re.IGNORECASE)
+    ]
+    if not candidates and fallback:
+        candidates = [_to_summary_point(fallback, 42)]
+    return "\n".join(_dedup_preserve(candidates, limit=2))
+
+
+def _build_canvas_topic_summary_prompt(
+    meeting_topic: str,
+    topic: dict[str, Any],
+    child_items: list[dict[str, Any]],
+) -> str:
+    def child_payload(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": _safe_text(item.get("id")),
+            "kind": _safe_text(item.get("kind"), "note"),
+            "title": _safe_text(item.get("title")),
+            "content": _safe_text(item.get("body")),
+            "keywords": [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8],
+            "refined_utterances": _normalize_refined_utterances(item.get("refined_utterances") or [], limit=8),
+        }
+
+    payload = {
+        "meeting_topic": _safe_text(meeting_topic),
+        "draft_topic": {
+            "id": _safe_text(topic.get("id")),
+            "title": _safe_text(topic.get("title")),
+            "content": _safe_text(topic.get("body")),
+            "keywords": [_safe_text(value) for value in (topic.get("keywords") or []) if _safe_text(value)][:8],
+        },
+        "children": [child_payload(item) for item in child_items],
+    }
+    return (
+        "너는 회의 아이디어 canvas의 topic node 내부를 정리하는 분석기다. JSON 하나만 반환한다.\n"
+        "입력된 children은 사용자가 직접 묶은 아이디어들이다. draft_topic은 참고만 하고 그대로 복사하지 않는다.\n"
+        "규칙:\n"
+        "- title은 children 전체를 대표하는 10~24자 정도의 짧은 명사구로 쓴다.\n"
+        "- title에 '요약', '정리', '논의', '관련', '묶음', '토픽' 같은 메타어를 쓰지 않는다.\n"
+        "- body는 topic node content다. 완성형 문장이 아니라 핵심 대상 + 방향/문제/조건만 남긴 압축 구문이어야 한다.\n"
+        "- body는 최대 2줄, 각 줄 12~36자 정도의 짧은 명사구/핵심 구문으로 쓴다.\n"
+        "- '~합니다', '~됩니다', '~할 수 있습니다', '~로 보입니다' 같은 문장형 어미를 피한다.\n"
+        "- keywords는 children 전체를 대표하는 명사구 3~6개만 쓴다.\n"
+        "- children에 없는 내용을 새로 만들지 않는다.\n"
+        "- JSON만 반환한다.\n\n"
+        "반환 형식:\n"
+        "{"
+        "\"title\":\"...\","
+        "\"body\":\"...\","
+        "\"keywords\":[\"...\"]"
+        "}\n\n"
+        f"input={json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _compute_canvas_topic_summary_update(
+    meeting_topic: str,
+    topic: dict[str, Any],
+    child_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    client, llm_ready, _ = _ensure_llm_ready(RT)
+    if not llm_ready or not child_items:
+        return None
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_canvas_topic_summary_prompt(meeting_topic, topic, child_items),
+            stage="canvas_topic_summary",
+            temperature=0.14,
+            max_tokens=700,
+        )
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_topic_summary", payload=str(exc), meta={})
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    title = _normalize_topic_cluster_title(parsed.get("title"), _safe_text(topic.get("title"), "AI 주제"))
+    body = _normalize_topic_cluster_body(parsed.get("body") or parsed.get("summary"), title)
+    keywords = _normalize_idea_keywords(parsed.get("keywords") or [], f"{title} {body}", 6)
+    if not title and not body and not keywords:
+        return None
+    return {
+        "title": title,
+        "body": body,
+        "keywords": keywords,
+    }
+
+
+def _finalize_canvas_topic_summary_workspace_job(
+    meeting_id: str,
+    job_id: str,
+    topic_item_id: str,
+    meeting_topic: str,
+) -> None:
+    try:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        canvas_items = [
+            copy.deepcopy(item)
+            for item in (latest_workspace.get("canvas_items") or [])
+            if isinstance(item, dict)
+        ]
+        topic_id = _safe_text(topic_item_id)
+        topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_id), None)
+        if not topic or not _is_canvas_topic_item(topic):
+            raise RuntimeError("정리할 topic node를 찾을 수 없습니다.")
+
+        child_ids = _canvas_topic_leaf_child_ids({"canvas_items": canvas_items}, topic_id)
+        child_id_set = set(child_ids)
+        child_items = [
+            item
+            for item in canvas_items
+            if _safe_text(item.get("id")) in child_id_set and not _is_canvas_topic_item(item)
+        ]
+        update = _compute_canvas_topic_summary_update(meeting_topic, topic, child_items)
+        if not update:
+            warning = "LLM 응답을 받지 못해 topic 내용을 생성하지 못했습니다."
+            latest_workspace["canvas_items"] = [
+                {
+                    **item,
+                    "ai_pending": False,
+                    "body": _safe_text(item.get("body")) or "AI topic 정리에 실패했습니다.",
+                }
+                if _safe_text(item.get("id")) == topic_id
+                else item
+                for item in canvas_items
+            ]
+            _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+            _mark_canvas_idea_job(
+                meeting_id,
+                job_id,
+                status="error",
+                detail=warning,
+                workspace=copy.deepcopy(latest_workspace),
+                used_llm=False,
+                warning=warning,
+                pending_item_id=topic_id,
+                failed_at_epoch=time.time(),
+            )
+            return
+
+        latest_workspace["canvas_items"] = [
+            {
+                **item,
+                "title": _safe_text(update.get("title")) or _safe_text(item.get("title")),
+                "body": _safe_text(update.get("body")) or _safe_text(item.get("body")),
+                "keywords": [_safe_text(value) for value in (update.get("keywords") or []) if _safe_text(value)][:6],
+                "ai_pending": False,
+                "ai_generated": True,
+                "user_edited": False,
+                "manual_position": False,
+            }
+            if _safe_text(item.get("id")) == topic_id
+            else item
+            for item in canvas_items
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_idea_job(
+            meeting_id,
+            job_id,
+            status="completed",
+            detail="AI topic 정리 완료",
+            workspace=copy.deepcopy(latest_workspace),
+            used_llm=True,
+            warning="",
+            pending_item_id=topic_id,
+        )
+    except Exception as exc:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        latest_workspace["canvas_items"] = [
+            {
+                **item,
+                "ai_pending": False,
+                "body": _safe_text(item.get("body")) or "AI topic 정리에 실패했습니다.",
+            }
+            if isinstance(item, dict) and _safe_text(item.get("id")) == _safe_text(topic_item_id)
+            else item
+            for item in (latest_workspace.get("canvas_items") or [])
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_idea_job(
+            meeting_id,
+            job_id,
+            status="error",
+            detail=f"AI topic 정리 실패: {exc}",
+            workspace=copy.deepcopy(latest_workspace),
+            used_llm=False,
+            warning=_safe_text(exc),
+            pending_item_id=_safe_text(topic_item_id),
+            failed_at_epoch=time.time(),
+        )
+
+
+def _compute_canvas_topic_clustering_result(
+    workspace: dict[str, Any],
+    agenda_id: str,
+    top_level_items: list[dict[str, Any]],
+    candidate_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    client, llm_ready, _ = _ensure_llm_ready(RT)
+    if not llm_ready or not candidate_items:
+        return None
+    try:
+        parsed = _call_llm_json(
+            RT,
+            client,
+            prompt=_build_canvas_topic_clustering_prompt(
+                workspace,
+                agenda_id,
+                top_level_items,
+                candidate_items,
+            ),
+            stage="canvas_topic_clustering",
+            temperature=0.16,
+            max_tokens=900,
+        )
+    except Exception as exc:
+        _append_llm_io_log(RT, direction="error", stage="canvas_topic_clustering", payload=str(exc), meta={})
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _apply_canvas_topic_clustering_result(
+    workspace: dict[str, Any],
+    agenda_id: str,
+    result: dict[str, Any],
+) -> int:
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    items_by_id = {_safe_text(item.get("id")): item for item in canvas_items if _safe_text(item.get("id"))}
+    direct_child_ids = {
+        item_id
+        for item_id in [
+            _safe_text(item.get("id"))
+            for item in _canvas_direct_child_items({"canvas_items": canvas_items}, agenda_id)
+        ]
+        if item_id
+    }
+    movable_ids = {
+        item_id
+        for item_id, item in items_by_id.items()
+        if _safe_text(item.get("agenda_id")) == _safe_text(agenda_id)
+        and _is_canvas_topic_clustering_candidate(item)
+        and not bool(item.get("parent_topic_locked"))
+        and item_id in direct_child_ids
+    }
+
+    raw_pair = result.get("pair") or result.get("nodeIds") or result.get("node_ids")
+    if not isinstance(raw_pair, list):
+        return 0
+    pair_ids = _dedup_preserve(
+        [_safe_text(value) for value in raw_pair if _safe_text(value) in movable_ids],
+        limit=2,
+    )
+    if len(pair_ids) != 2:
+        return 0
+
+    left_item = items_by_id.get(pair_ids[0])
+    right_item = items_by_id.get(pair_ids[1])
+    if not left_item or not right_item:
+        return 0
+    if pair_ids[0] in _canvas_topic_descendant_ids({"canvas_items": canvas_items}, pair_ids[1]):
+        return 0
+    if pair_ids[1] in _canvas_topic_descendant_ids({"canvas_items": canvas_items}, pair_ids[0]):
+        return 0
+
+    title = _normalize_topic_cluster_title(result.get("title"), "AI 주제")
+    body = _normalize_topic_cluster_body(result.get("body") or result.get("summary"), title or "관련 아이디어 묶음")
+    keywords = _normalize_idea_keywords(result.get("keywords") or [], f"{title} {body}", 6)
+    topic_pair_ids = [item_id for item_id in pair_ids if _is_canvas_topic_item(items_by_id.get(item_id) or {})]
+
+    created_topics: list[dict[str, Any]] = []
+    created_topic_insert_index: int | None = None
+    removed_topic_ids: set[str] = set()
+    now_ms = int(time.time() * 1000)
+
+    assignments: dict[str, str] = {}
+    topic_updates: dict[str, dict[str, Any]] = {}
+    source_workspace = {"canvas_items": canvas_items}
+
+    if len(topic_pair_ids) == 1:
+        topic_id = topic_pair_ids[0]
+        child_id = pair_ids[0] if pair_ids[1] == topic_id else pair_ids[1]
+        nested_topic_ids = {
+            descendant_id
+            for descendant_id in _canvas_topic_descendant_ids(source_workspace, topic_id)
+            if _is_canvas_topic_item(items_by_id.get(descendant_id) or {})
+        }
+        for nested_topic_id in nested_topic_ids:
+            removed_topic_ids.add(nested_topic_id)
+            for leaf_child_id in _canvas_topic_leaf_child_ids(source_workspace, nested_topic_id):
+                if leaf_child_id not in removed_topic_ids:
+                    assignments[leaf_child_id] = topic_id
+        assignments[child_id] = topic_id
+        topic_updates[topic_id] = {
+            "title": title,
+            "body": body,
+            "keywords": keywords,
+        }
+    elif len(topic_pair_ids) == 2:
+        removed_topic_ids.update(topic_pair_ids)
+        leaf_child_ids: list[str] = []
+        for source_topic_id in topic_pair_ids:
+            removed_topic_ids.update(
+                descendant_id
+                for descendant_id in _canvas_topic_descendant_ids(source_workspace, source_topic_id)
+                if _is_canvas_topic_item(items_by_id.get(descendant_id) or {})
+            )
+            leaf_child_ids.extend(_canvas_topic_leaf_child_ids(source_workspace, source_topic_id))
+        leaf_child_ids = _dedup_preserve(
+            [child_id for child_id in leaf_child_ids if child_id and child_id not in removed_topic_ids],
+            limit=400,
+        )
+        if not leaf_child_ids:
+            return 0
+        topic_id = f"ai-topic-{now_ms}-0-{uuid4().hex[:6]}"
+        topic = {
+            "id": topic_id,
+            "agenda_id": _safe_text(agenda_id),
+            "point_id": "",
+            "kind": "topic",
+            "title": title,
+            "body": body,
+            "keywords": keywords,
+            "key_evidence": [],
+            "refined_utterances": [],
+            "evidence_utterance_ids": [],
+            "ignored_utterance_ids": [],
+            "child_item_ids": leaf_child_ids,
+            "topic_collapsed": True,
+            "created_by": "ai",
+            "ai_generated": True,
+            "user_edited": False,
+            "manual_position": False,
+        }
+        created_topics.append(topic)
+        items_by_id[topic_id] = topic
+        for child_id in leaf_child_ids:
+            assignments[child_id] = topic_id
+    else:
+        topic_id = f"ai-topic-{now_ms}-0-{uuid4().hex[:6]}"
+        topic = {
+            "id": topic_id,
+            "agenda_id": _safe_text(agenda_id),
+            "point_id": "",
+            "kind": "topic",
+            "title": title,
+            "body": body,
+            "keywords": keywords,
+            "key_evidence": [],
+            "refined_utterances": [],
+            "evidence_utterance_ids": [],
+            "ignored_utterance_ids": [],
+            "child_item_ids": pair_ids,
+            "topic_collapsed": True,
+            "created_by": "ai",
+            "ai_generated": True,
+            "user_edited": False,
+            "manual_position": False,
+        }
+        created_topics.append(topic)
+        items_by_id[topic_id] = topic
+        for child_id in pair_ids:
+            assignments[child_id] = topic_id
+
+    if created_topics:
+        original_indices = [
+            index
+            for index, item in enumerate(canvas_items)
+            if _safe_text(item.get("id")) in pair_ids
+        ]
+        if original_indices:
+            created_topic_insert_index = min(original_indices)
+
+    if not assignments and not created_topics:
+        return 0
+
+    assigned_by_topic: dict[str, list[str]] = {}
+    for child_id, topic_id in assignments.items():
+        assigned_by_topic.setdefault(topic_id, []).append(child_id)
+
+    topic_lookup_items = created_topics + canvas_items
+
+    def build_next_item(item: dict[str, Any]) -> dict[str, Any] | None:
+        item_id = _safe_text(item.get("id"))
+        if not item_id:
+            return None
+        if item_id in removed_topic_ids:
+            return None
+        next_item = copy.deepcopy(items_by_id.get(item_id, item))
+        if item_id in assignments:
+            next_item["parent_topic_id"] = assignments[item_id]
+            next_item["parent_topic_source"] = "ai"
+            next_item["parent_topic_locked"] = False
+            next_item["manual_position"] = False
+        if _is_canvas_topic_item(next_item):
+            current_children = [
+                child_id
+                for child_id in _canvas_topic_leaf_child_ids({"canvas_items": topic_lookup_items}, item_id)
+                if child_id not in removed_topic_ids
+            ]
+            next_children = _dedup_preserve(current_children + assigned_by_topic.get(item_id, []), limit=400)
+            next_item["child_item_ids"] = next_children
+            next_item.setdefault("topic_collapsed", True)
+            if not bool(next_item.get("user_edited")):
+                raw_update = topic_updates.get(item_id)
+                if raw_update:
+                    if _safe_text(raw_update.get("title")):
+                        next_item["title"] = _safe_text(raw_update.get("title"))
+                    if _safe_text(raw_update.get("body")):
+                        next_item["body"] = _safe_text(raw_update.get("body"))
+                    raw_keywords = raw_update.get("keywords")
+                    if isinstance(raw_keywords, list) and raw_keywords:
+                        next_item["keywords"] = [_safe_text(value) for value in raw_keywords if _safe_text(value)][:6]
+        return next_item
+
+    next_items: list[dict[str, Any]] = []
+    inserted_created_topics = False
+    for index, item in enumerate(canvas_items):
+        if created_topic_insert_index == index and not inserted_created_topics:
+            for topic in created_topics:
+                next_topic = build_next_item(topic)
+                if next_topic:
+                    next_items.append(next_topic)
+            inserted_created_topics = True
+        next_item = build_next_item(item)
+        if next_item:
+            next_items.append(next_item)
+
+    if created_topics and not inserted_created_topics:
+        for topic in created_topics:
+            next_topic = build_next_item(topic)
+            if next_topic:
+                next_items.append(next_topic)
+
+    workspace["canvas_items"] = next_items
+    return len(assignments) + len(created_topics)
+
+
+def _maybe_cluster_canvas_topic_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
+    target = _canvas_topic_cluster_target(workspace)
+    changed = 0
+    for _ in range(CANVAS_TOPIC_CLUSTER_MAX_PASSES_PER_JOB):
+        pass_changed = 0
+        agenda_ids = _dedup_preserve(
+            [
+                _safe_text(item.get("agenda_id"))
+                for item in (workspace.get("canvas_items") or [])
+                if isinstance(item, dict) and _safe_text(item.get("agenda_id"))
+            ],
+            limit=100,
+        )
+        for agenda_id in agenda_ids:
+            top_level_items = _canvas_direct_child_items(workspace, agenda_id)
+            if len(top_level_items) <= target:
+                continue
+            candidate_items = [
+                item
+                for item in top_level_items
+                if _is_canvas_topic_clustering_candidate(item)
+                and not bool(item.get("parent_topic_locked"))
+            ]
+            if len(candidate_items) < 1:
+                continue
+            if len(candidate_items) < 2:
+                continue
+            result = _compute_canvas_topic_clustering_result(
+                workspace,
+                agenda_id,
+                top_level_items,
+                candidate_items,
+            )
+            if not result:
+                continue
+            pass_changed += _apply_canvas_topic_clustering_result(workspace, agenda_id, result)
+        changed += pass_changed
+        if pass_changed <= 0:
+            break
+    return {"changed": changed, "target": target}
+
+
+def _finalize_canvas_idea_workspace_job(
+    meeting_id: str,
+    job_id: str,
+    pending_item_id: str,
+    payload: CanvasIdeaAssimilationInput,
+) -> None:
+    try:
+        result = _compute_idea_assimilation_result(payload)
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        canvas_items = [
+            copy.deepcopy(item)
+            for item in (latest_workspace.get("canvas_items") or [])
+            if isinstance(item, dict)
+        ]
+        pending_item = next((item for item in canvas_items if _safe_text(item.get("id")) == pending_item_id), None)
+        base_items = [item for item in canvas_items if _safe_text(item.get("id")) != pending_item_id]
+        target_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
+        starting_create_stack = _canvas_idea_create_stack_value(latest_workspace)
+        created_node_count = 0
+        clustering_result: dict[str, Any] = {"changed": 0, "target": _canvas_topic_cluster_target(latest_workspace)}
+
+        if not bool(result.get("used_llm")):
+            positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
+            ideation_positions = dict(positions.get("ideation") or {})
+            ideation_positions.pop(f"canvas-item-{pending_item_id}", None)
+            positions["ideation"] = ideation_positions
+            latest_workspace["canvas_items"] = base_items
+            latest_workspace["node_positions"] = positions
+            _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+            warning = _safe_text(result.get("warning"), "LLM 응답을 받지 못해 아이디어 노드를 생성하지 않았습니다.")
+            _mark_canvas_idea_job(
+                meeting_id,
+                job_id,
+                status="error",
+                detail=warning,
+                workspace=copy.deepcopy(latest_workspace),
+                used_llm=False,
+                warning=warning,
+                failed_at_epoch=time.time(),
+            )
+            return
+
+        updates = [
+            update
+            for update in (result.get("updates") or [])
+            if isinstance(update, dict) and _safe_text(update.get("action")) in {"merge", "create"}
+        ]
+        items_by_id = {_safe_text(item.get("id")): item for item in base_items if _safe_text(item.get("id"))}
+        guarded_updates: list[dict[str, Any]] = []
+        for update in updates:
+            if _safe_text(update.get("action")) != "merge":
+                guarded_updates.append(update)
+                continue
+            target_item = items_by_id.get(_safe_text(update.get("targetIdeaId")))
+            if target_item and _idea_update_merge_allowed(target_item, update):
+                guarded_updates.append(update)
+                continue
+            guarded_updates.append({**update, "action": "create", "targetIdeaId": ""})
+        updates = guarded_updates
+
+        if not updates:
+            latest_workspace["canvas_items"] = base_items
+            positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
+            ideation_positions = dict(positions.get("ideation") or {})
+            ideation_positions.pop(f"canvas-item-{pending_item_id}", None)
+            positions["ideation"] = ideation_positions
+            latest_workspace["node_positions"] = positions
+            latest_workspace["idea_processed_utterance_ids"] = _dedup_preserve(
+                list(latest_workspace.get("idea_processed_utterance_ids") or []) + target_ids,
+                limit=1000,
+            )
+        else:
+            next_items = list(base_items)
+            create_updates = [update for update in updates if _safe_text(update.get("action")) == "create"]
+            for update in updates:
+                if _safe_text(update.get("action")) != "merge":
+                    continue
+                target_id = _safe_text(update.get("targetIdeaId"))
+                next_items = [
+                    _apply_idea_update_to_canvas_item(item, update)
+                    if _safe_text(item.get("id")) == target_id
+                    else item
+                    for item in next_items
+                ]
+
+            for create_index, update in enumerate(create_updates):
+                if create_index == 0 and isinstance(pending_item, dict):
+                    created_id = pending_item_id
+                    created_item = _apply_idea_update_to_canvas_item(pending_item, update)
+                else:
+                    created_id = f"ai-idea-{int(time.time() * 1000)}-{create_index}-{uuid4().hex[:6]}"
+                    created_item = _apply_idea_update_to_canvas_item(
+                        {
+                            "id": created_id,
+                            "agenda_id": _safe_text(getattr(payload, "selected_agenda_id", "")),
+                            "point_id": "",
+                            "kind": "note",
+                            "title": "AI 아이디어",
+                            "body": "",
+                            "keywords": [],
+                            "key_evidence": [],
+                            "refined_utterances": [],
+                            "evidence_utterance_ids": [],
+                            "ignored_utterance_ids": [],
+                            "merged_children": [],
+                            "compacted_from_ids": [],
+                            "compaction_level": 0,
+                            "parent_topic_id": "",
+                            "parent_topic_source": "",
+                            "parent_topic_locked": False,
+                            "child_item_ids": [],
+                            "topic_collapsed": False,
+                            "created_by": "ai",
+                            "manual_position": False,
+                            "ai_generated": True,
+                            "user_edited": False,
+                            "ai_pending": False,
+                        },
+                        update,
+                    )
+                next_items.append(created_item)
+
+            created_node_count = len(create_updates)
+            if not create_updates and isinstance(pending_item, dict):
+                positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
+                ideation_positions = dict(positions.get("ideation") or {})
+                ideation_positions.pop(f"canvas-item-{pending_item_id}", None)
+                positions["ideation"] = ideation_positions
+                latest_workspace["node_positions"] = positions
+
+            latest_workspace["canvas_items"] = next_items
+            latest_workspace["idea_processed_utterance_ids"] = _dedup_preserve(
+                list(latest_workspace.get("idea_processed_utterance_ids") or []) + target_ids,
+                limit=1000,
+            )
+            if created_node_count > 0:
+                latest_workspace["idea_create_stack"] = starting_create_stack + created_node_count
+
+        if created_node_count > 0:
+            clustering_result = _maybe_cluster_canvas_topic_nodes(latest_workspace)
+
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        clustered_count = _safe_nonnegative_int(clustering_result.get("changed"))
+        detail = (
+            f"AI 아이디어 정리 완료 · {clustered_count}개 topic 분류 반영"
+            if clustered_count > 0
+            else "AI 아이디어 정리 완료"
+        )
+        _mark_canvas_idea_job(
+            meeting_id,
+            job_id,
+            status="completed",
+            detail=detail,
+            workspace=copy.deepcopy(latest_workspace),
+            used_llm=bool(result.get("used_llm")),
+            warning=_safe_text(result.get("warning")),
+        )
+    except Exception as exc:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        latest_workspace["canvas_items"] = [
+            {**item, "ai_pending": False, "body": "AI 정리에 실패했습니다."}
+            if isinstance(item, dict) and _safe_text(item.get("id")) == pending_item_id
+            else item
+            for item in (latest_workspace.get("canvas_items") or [])
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_idea_job(
+            meeting_id,
+            job_id,
+            status="error",
+            detail=f"AI 아이디어 정리 실패: {exc}",
+            workspace=copy.deepcopy(latest_workspace),
+            warning=_safe_text(exc),
+            failed_at_epoch=time.time(),
+        )
+
+
+@app.post("/api/canvas/idea-assimilation-workspace/start")
+def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilationWorkspaceStartInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        running_job = next(
+            (
+                copy.deepcopy(job)
+                for job in meeting_jobs.values()
+                if isinstance(job, dict) and _safe_text(job.get("status")) == "processing"
+            ),
+            None,
+        )
+    if running_job:
+        workspace = running_job.get("workspace") if isinstance(running_job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+        return _canvas_idea_job_response(running_job, workspace)
+
+    workspace = _clone_runtime_workspace_state(
+        normalized_meeting_id,
+        _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        _now_ts(),
+    )
+    processed_ids = _canvas_idea_processed_ids(workspace)
+    now_epoch = time.time()
+    cooling_failed_ids: set[str] = set()
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        for job in meeting_jobs.values():
+            if not isinstance(job, dict) or _safe_text(job.get("status")) != "error":
+                continue
+            failed_at = float(job.get("failed_at_epoch") or 0)
+            if now_epoch - failed_at >= CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS:
+                continue
+            cooling_failed_ids.update(
+                _safe_text(item)
+                for item in _safe_text(job.get("target_signature")).split("|")
+                if _safe_text(item)
+            )
+    target_rows = [
+        item
+        for item in (payload.target_utterances or [])
+        if _safe_text(item.id)
+        and _safe_text(item.text)
+        and _safe_text(item.id) not in processed_ids
+        and _safe_text(item.id) not in cooling_failed_ids
+    ]
+    target_text_length = sum(len(_strip_leading_timestamp(_safe_text(item.text))) for item in target_rows)
+    if not target_rows or target_text_length < 40:
+        cooling_count = len(cooling_failed_ids)
+        wait_seconds = 0
+        if cooling_count > 0:
+            with RT.lock:
+                active_failed_at = [
+                    float(job.get("failed_at_epoch") or 0)
+                    for job in RT.canvas_idea_jobs_by_meeting.get(normalized_meeting_id, {}).values()
+                    if isinstance(job, dict)
+                    and _safe_text(job.get("status")) == "error"
+                    and now_epoch - float(job.get("failed_at_epoch") or 0) < CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS
+                ]
+            if active_failed_at:
+                wait_seconds = max(
+                    1,
+                    int(CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS - (now_epoch - max(active_failed_at))),
+                )
+        job = {
+            "job_id": "",
+            "meeting_id": normalized_meeting_id,
+            "status": "idle",
+            "detail": (
+                f"이전 LLM 실패 발화 재요청 대기 중 · {wait_seconds}초"
+                if wait_seconds > 0 and not target_rows
+                else f"아이디어 정리 대기 중 · {len(target_rows)}개 발화"
+            ),
+            "target_count": len(target_rows),
+            "updated_at": _now_ts(),
+        }
+        return _canvas_idea_job_response(job, workspace)
+
+    target_signature = "|".join([_safe_text(item.id) for item in target_rows if _safe_text(item.id)])
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        failed_same_target_jobs = [
+            copy.deepcopy(job)
+            for job in meeting_jobs.values()
+            if isinstance(job, dict)
+            and _safe_text(job.get("status")) == "error"
+            and _safe_text(job.get("target_signature")) == target_signature
+        ]
+    if failed_same_target_jobs:
+        latest_failed_job = max(
+            failed_same_target_jobs,
+            key=lambda job: float(job.get("failed_at_epoch") or 0),
+        )
+        retry_after = CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS - (
+            now_epoch - float(latest_failed_job.get("failed_at_epoch") or 0)
+        )
+        if retry_after > 0:
+            retry_seconds = max(1, int(retry_after))
+            job = {
+                "job_id": _safe_text(latest_failed_job.get("job_id")),
+                "meeting_id": normalized_meeting_id,
+                "status": "error",
+                "detail": f"이전 LLM 실패로 같은 발화 재요청 대기 중 · {retry_seconds}초",
+                "warning": _safe_text(latest_failed_job.get("warning") or latest_failed_job.get("detail")),
+                "target_count": len(target_rows),
+                "target_signature": target_signature,
+                "updated_at": _now_ts(),
+            }
+            return _canvas_idea_job_response(job, workspace)
+
+    job_id = uuid4().hex
+    pending_item_id = f"ai-idea-pending-{job_id[:10]}"
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    pending_item = {
+        "id": pending_item_id,
+        "agenda_id": _safe_text(payload.selected_agenda_id),
+        "point_id": "",
+        "kind": "note",
+        "title": "AI 정리 중",
+        "body": "",
+        "keywords": [],
+        "key_evidence": [],
+        "refined_utterances": [],
+        "evidence_utterance_ids": [_safe_text(item.id) for item in target_rows if _safe_text(item.id)][:400],
+        "ignored_utterance_ids": [],
+        "merged_children": [],
+        "compacted_from_ids": [],
+        "compaction_level": 0,
+        "parent_topic_id": "",
+        "parent_topic_source": "",
+        "parent_topic_locked": False,
+        "child_item_ids": [],
+        "topic_collapsed": False,
+        "created_by": "ai",
+        "manual_position": False,
+        "ai_generated": True,
+        "user_edited": False,
+        "ai_pending": True,
+    }
+    workspace["canvas_items"] = [*canvas_items, pending_item]
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+    _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
+
+    idea_payload = CanvasIdeaAssimilationInput(
+        meeting_id=normalized_meeting_id,
+        meeting_topic=_safe_text(payload.meeting_topic, "회의 주제"),
+        selected_agenda_id=_safe_text(payload.selected_agenda_id),
+        context_utterances=payload.context_utterances,
+        target_utterances=target_rows,
+        existing_ideas=_canvas_idea_existing_ideas_from_workspace(
+            workspace,
+            pending_item_id,
+            payload.selected_agenda_id,
+        ),
+    )
+    job = _mark_canvas_idea_job(
+        normalized_meeting_id,
+        job_id,
+        status="processing",
+        detail="AI가 키워드와 content를 생성 중",
+        pending_item_id=pending_item_id,
+        target_count=len(target_rows),
+        target_signature=target_signature,
+        created_at=_now_ts(),
+        workspace=copy.deepcopy(workspace),
+    )
+    threading.Thread(
+        target=_finalize_canvas_idea_workspace_job,
+        args=(normalized_meeting_id, job_id, pending_item_id, idea_payload),
+        daemon=True,
+        name=f"canvas-idea-{job_id[:8]}",
+    ).start()
+    return _canvas_idea_job_response(job, workspace)
+
+
+@app.post("/api/canvas/topic-summary-workspace/start")
+def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspaceStartInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    topic_item_id = _safe_text(payload.topic_item_id)
+    if not normalized_meeting_id or not topic_item_id:
+        raise HTTPException(status_code=400, detail="meeting_id and topic_item_id are required")
+
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        running_job = next(
+            (
+                copy.deepcopy(job)
+                for job in meeting_jobs.values()
+                if isinstance(job, dict)
+                and _safe_text(job.get("status")) == "processing"
+                and _safe_text(job.get("job_type")) == "topic_summary"
+                and _safe_text(job.get("pending_item_id")) == topic_item_id
+            ),
+            None,
+        )
+    if running_job:
+        workspace = running_job.get("workspace") if isinstance(running_job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+        return _canvas_idea_job_response(running_job, workspace)
+
+    workspace = _clone_runtime_workspace_state(
+        normalized_meeting_id,
+        _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        _now_ts(),
+    )
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_item_id), None)
+    if not topic or not _is_canvas_topic_item(topic):
+        raise HTTPException(status_code=404, detail="topic item not found")
+
+    workspace["canvas_items"] = [
+        {
+            **item,
+            "ai_pending": True,
+            "ai_generated": True,
+            "user_edited": False,
+        }
+        if _safe_text(item.get("id")) == topic_item_id
+        else item
+        for item in canvas_items
+    ]
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+    _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
+
+    job_id = uuid4().hex
+    job = _mark_canvas_idea_job(
+        normalized_meeting_id,
+        job_id,
+        job_type="topic_summary",
+        status="processing",
+        detail="AI가 topic 제목과 content를 생성 중",
+        pending_item_id=topic_item_id,
+        target_count=len(_canvas_topic_leaf_child_ids(workspace, topic_item_id)),
+        target_signature=topic_item_id,
+        created_at=_now_ts(),
+        workspace=copy.deepcopy(workspace),
+    )
+    threading.Thread(
+        target=_finalize_canvas_topic_summary_workspace_job,
+        args=(normalized_meeting_id, job_id, topic_item_id, _safe_text(payload.meeting_topic, "회의 주제")),
+        daemon=True,
+        name=f"canvas-topic-{job_id[:8]}",
+    ).start()
+    return _canvas_idea_job_response(job, workspace)
+
+
+@app.get("/api/canvas/idea-assimilation-workspace/jobs/{job_id}")
+def get_canvas_idea_assimilation_workspace_job(job_id: str, meeting_id: str):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_job_id = _safe_text(job_id)
+    if not normalized_meeting_id or not normalized_job_id:
+        raise HTTPException(status_code=400, detail="meeting_id and job_id are required")
+    with RT.lock:
+        job = copy.deepcopy(
+            (RT.canvas_idea_jobs_by_meeting.get(normalized_meeting_id) or {}).get(normalized_job_id) or {}
+        )
+    if not job:
+        return _canvas_idea_job_response(
+            {
+                "job_id": normalized_job_id,
+                "meeting_id": normalized_meeting_id,
+                "status": "missing",
+                "detail": "작업 정보를 찾을 수 없습니다.",
+                "updated_at": _now_ts(),
+            },
+            _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        )
+    workspace = job.get("workspace") if isinstance(job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    return _canvas_idea_job_response(job, workspace)
+
+
+def _finalize_canvas_problem_discussion_workspace_job(
+    meeting_id: str,
+    job_id: str,
+    group_id: str,
+    pending_item_id: str,
+    payload: CanvasProblemDiscussionWorkspaceStartInput,
+) -> None:
+    try:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        groups = [
+            copy.deepcopy(group)
+            for group in (latest_workspace.get("problem_groups") or [])
+            if isinstance(group, dict)
+        ]
+        target_group = next((group for group in groups if _safe_text(group.get("group_id")) == group_id), None)
+        if not target_group:
+            raise RuntimeError("선택된 문제정의 그룹을 찾을 수 없습니다.")
+
+        result = _compute_problem_discussion_result(payload, target_group)
+        target_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
+        if not bool(result.get("ok")):
+            warning = _safe_text(result.get("warning"), "문제정의 의견 LLM 응답을 받지 못했습니다.")
+            next_groups = []
+            for group in groups:
+                group = copy.deepcopy(group)
+                group["discussion_items"] = [
+                    item
+                    for item in (group.get("discussion_items") or [])
+                    if isinstance(item, dict) and _safe_text(item.get("id")) != pending_item_id
+                ]
+                next_groups.append(group)
+            latest_workspace["problem_groups"] = next_groups
+            _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+            _mark_canvas_problem_job(
+                meeting_id,
+                job_id,
+                status="error",
+                detail=warning,
+                workspace=copy.deepcopy(latest_workspace),
+                used_llm=bool(result.get("used_llm")),
+                warning=warning,
+                failed_at_epoch=time.time(),
+            )
+            return
+
+        update = result.get("update") if isinstance(result.get("update"), dict) else {}
+        next_groups = []
+        found_pending = False
+        for group in groups:
+            group = copy.deepcopy(group)
+            next_discussions = []
+            for item in group.get("discussion_items") or []:
+                if not isinstance(item, dict):
+                    continue
+                if _safe_text(item.get("id")) != pending_item_id:
+                    next_discussions.append(item)
+                    continue
+                found_pending = True
+                next_discussions.append(
+                    {
+                        **item,
+                        "target_node_id": _safe_text(item.get("target_node_id")),
+                        "target_node_label": _safe_text(item.get("target_node_label")),
+                        "target_node_kind": _safe_text(item.get("target_node_kind")),
+                        "title": _safe_text(update.get("title"), "문제 의견"),
+                        "body": _safe_text(update.get("body")),
+                        "keywords": update.get("keywords") or [],
+                        "key_evidence": update.get("key_evidence") or [],
+                        "refined_utterances": update.get("refined_utterances") or [],
+                        "evidence_utterance_ids": update.get("evidence_utterance_ids") or target_ids,
+                        "ignored_utterance_ids": update.get("ignored_utterance_ids") or [],
+                        "ai_pending": False,
+                        "ai_generated": True,
+                        "user_edited": False,
+                    }
+                )
+            group["discussion_items"] = next_discussions
+            next_groups.append(group)
+        if not found_pending:
+            fallback_group_id = group_id
+            next_groups = [
+                {
+                    **group,
+                    "discussion_items": [
+                        *(group.get("discussion_items") or []),
+                        {
+                            "id": pending_item_id,
+                            "parent_group_id": fallback_group_id,
+                            "target_node_id": "",
+                            "target_node_label": "",
+                            "target_node_kind": "",
+                            "title": _safe_text(update.get("title"), "문제 의견"),
+                            "body": _safe_text(update.get("body")),
+                            "keywords": update.get("keywords") or [],
+                            "key_evidence": update.get("key_evidence") or [],
+                            "refined_utterances": update.get("refined_utterances") or [],
+                            "evidence_utterance_ids": update.get("evidence_utterance_ids") or target_ids,
+                            "ignored_utterance_ids": update.get("ignored_utterance_ids") or [],
+                            "ai_pending": False,
+                            "ai_generated": True,
+                            "user_edited": False,
+                            "created_by": "ai",
+                            "created_at": _now_ts(),
+                        },
+                    ],
+                }
+                if _safe_text(group.get("group_id")) == fallback_group_id
+                else group
+                for group in next_groups
+            ]
+
+        latest_workspace["problem_groups"] = next_groups
+        latest_workspace["problem_processed_utterance_ids"] = _dedup_preserve(
+            list(latest_workspace.get("problem_processed_utterance_ids") or []) + target_ids,
+            limit=1000,
+        )
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_problem_job(
+            meeting_id,
+            job_id,
+            status="completed",
+            detail="AI 문제정의 의견 정리 완료",
+            workspace=copy.deepcopy(latest_workspace),
+            used_llm=bool(result.get("used_llm")),
+            warning=_safe_text(result.get("warning")),
+        )
+    except Exception as exc:
+        latest_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        latest_workspace["problem_groups"] = [
+            {
+                **group,
+                "discussion_items": [
+                    item
+                    for item in (group.get("discussion_items") or [])
+                    if isinstance(item, dict) and _safe_text(item.get("id")) != pending_item_id
+                ],
+            }
+            if isinstance(group, dict)
+            else group
+            for group in (latest_workspace.get("problem_groups") or [])
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        _mark_canvas_problem_job(
+            meeting_id,
+            job_id,
+            status="error",
+            detail=f"문제정의 의견 정리 실패: {exc}",
+            workspace=copy.deepcopy(latest_workspace),
+            warning=_safe_text(exc),
+            failed_at_epoch=time.time(),
+        )
+
+
+@app.post("/api/canvas/problem-discussion-workspace/start")
+def post_canvas_problem_discussion_workspace_start(payload: CanvasProblemDiscussionWorkspaceStartInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    workspace = _clone_runtime_workspace_state(
+        normalized_meeting_id,
+        _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        _now_ts(),
+    )
+    groups = [
+        copy.deepcopy(group)
+        for group in (workspace.get("problem_groups") or [])
+        if isinstance(group, dict)
+    ]
+    if not groups:
+        job = {
+            "job_id": "",
+            "meeting_id": normalized_meeting_id,
+            "status": "idle",
+            "detail": "문제정의 그룹이 없어 의견 정리를 대기합니다.",
+            "updated_at": _now_ts(),
+        }
+        return _canvas_problem_job_response(job, workspace)
+
+    selected_group_id = _safe_text(payload.selected_group_id) or _safe_text(groups[0].get("group_id"))
+    selected_group = next((group for group in groups if _safe_text(group.get("group_id")) == selected_group_id), groups[0])
+    selected_group_id = _safe_text(selected_group.get("group_id"))
+    processed_ids = _canvas_problem_processed_ids(workspace)
+    target_rows = [
+        item
+        for item in (payload.target_utterances or [])
+        if _safe_text(item.id) and _safe_text(item.text) and _safe_text(item.id) not in processed_ids
+    ]
+    target_text_length = sum(len(_strip_leading_timestamp(_safe_text(item.text))) for item in target_rows)
+    if not target_rows or target_text_length < 30:
+        job = {
+            "job_id": "",
+            "meeting_id": normalized_meeting_id,
+            "status": "idle",
+            "detail": f"문제정의 의견 정리 대기 중 · {len(target_rows)}개 발화",
+            "target_count": len(target_rows),
+            "updated_at": _now_ts(),
+        }
+        return _canvas_problem_job_response(job, workspace)
+
+    with RT.lock:
+        meeting_jobs = RT.canvas_problem_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        running_job = next(
+            (
+                copy.deepcopy(job)
+                for job in meeting_jobs.values()
+                if isinstance(job, dict) and _safe_text(job.get("status")) == "processing"
+            ),
+            None,
+        )
+    if running_job:
+        job_workspace = running_job.get("workspace") if isinstance(running_job.get("workspace"), dict) else workspace
+        return _canvas_problem_job_response(running_job, job_workspace)
+
+    job_id = uuid4().hex
+    pending_item_id = f"ai-problem-note-{job_id[:10]}"
+    pending_item = {
+        "id": pending_item_id,
+        "parent_group_id": selected_group_id,
+        "target_node_id": "",
+        "target_node_label": "",
+        "target_node_kind": "",
+        "title": "의견 정리 중",
+        "body": "",
+        "keywords": [],
+        "key_evidence": [],
+        "refined_utterances": [],
+        "evidence_utterance_ids": [_safe_text(item.id) for item in target_rows if _safe_text(item.id)][:400],
+        "ignored_utterance_ids": [],
+        "ai_pending": True,
+        "ai_generated": True,
+        "user_edited": False,
+        "created_by": "ai",
+        "created_at": _now_ts(),
+    }
+
+    next_groups = []
+    for group in groups:
+        if _safe_text(group.get("group_id")) == selected_group_id:
+            group = copy.deepcopy(group)
+            group["discussion_items"] = [*(group.get("discussion_items") or []), pending_item]
+        next_groups.append(group)
+    workspace["problem_groups"] = next_groups
+    _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
+
+    discussion_payload = CanvasProblemDiscussionWorkspaceStartInput(
+        meeting_id=normalized_meeting_id,
+        meeting_topic=_safe_text(payload.meeting_topic, "회의 주제"),
+        selected_group_id=selected_group_id,
+        context_utterances=payload.context_utterances,
+        target_utterances=target_rows,
+    )
+    target_signature = "|".join([_safe_text(item.id) for item in target_rows if _safe_text(item.id)])
+    job = _mark_canvas_problem_job(
+        normalized_meeting_id,
+        job_id,
+        status="processing",
+        detail="AI가 문제정의 의견을 생성 중",
+        pending_item_id=pending_item_id,
+        target_count=len(target_rows),
+        target_signature=target_signature,
+        created_at=_now_ts(),
+        workspace=copy.deepcopy(workspace),
+    )
+    threading.Thread(
+        target=_finalize_canvas_problem_discussion_workspace_job,
+        args=(normalized_meeting_id, job_id, selected_group_id, pending_item_id, discussion_payload),
+        daemon=True,
+        name=f"canvas-problem-note-{job_id[:8]}",
+    ).start()
+    return _canvas_problem_job_response(job, workspace)
+
+
+@app.get("/api/canvas/problem-discussion-workspace/jobs/{job_id}")
+def get_canvas_problem_discussion_workspace_job(job_id: str, meeting_id: str):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_job_id = _safe_text(job_id)
+    if not normalized_meeting_id or not normalized_job_id:
+        raise HTTPException(status_code=400, detail="meeting_id and job_id are required")
+    with RT.lock:
+        job = copy.deepcopy(
+            (RT.canvas_problem_jobs_by_meeting.get(normalized_meeting_id) or {}).get(normalized_job_id) or {}
+        )
+    if not job:
+        return _canvas_problem_job_response(
+            {
+                "job_id": normalized_job_id,
+                "meeting_id": normalized_meeting_id,
+                "status": "missing",
+                "detail": "작업 정보를 찾을 수 없습니다.",
+                "updated_at": _now_ts(),
+            },
+            _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        )
+    workspace = job.get("workspace") if isinstance(job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    return _canvas_problem_job_response(job, workspace)
+
+
+@app.post("/api/canvas/problem-definition")
+def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        groups = _build_problem_definition_groups_local(payload)
+        used_llm = False
+        warning = ""
+
+        if groups:
+            client, llm_ready, llm_note = _ensure_llm_ready(RT)
+            if llm_ready:
+                try:
+                    prompt = _build_problem_definition_prompt(payload.topic, groups)
+                    parsed = _call_llm_json(
+                        RT,
+                        client,
+                        prompt=prompt,
+                        stage="canvas_problem_definition",
+                        temperature=0.2,
+                        max_tokens=1200,
+                    )
+                    parsed_groups = parsed.get("groups") if isinstance(parsed, dict) else None
+                    if isinstance(parsed_groups, list):
+                        by_id = {
+                            _safe_text(item.get("group_id")): item
+                            for item in parsed_groups
+                            if isinstance(item, dict) and _safe_text(item.get("group_id"))
+                        }
+                        for group in groups:
+                            llm_item = by_id.get(_safe_text(group.get("group_id")))
+                            if not llm_item:
+                                continue
+                            llm_topic = _normalize_problem_topic_label(llm_item.get("topic"), _safe_text(group.get("topic"), "주제"))
+                            llm_insight_lens = _safe_text(llm_item.get("insight_lens"))
+                            llm_conclusion = _safe_text(llm_item.get("conclusion"))
+                            if llm_topic:
+                                group["topic"] = llm_topic
+                            if llm_insight_lens:
+                                group["insight_lens"] = llm_insight_lens
+                            if llm_conclusion:
+                                group["conclusion"] = llm_conclusion
+                        used_llm = True
+                        RT.last_llm_parsed_json = {
+                            "stage": "canvas_problem_definition",
+                            "groups": copy.deepcopy(groups),
+                        }
+                        RT.last_llm_parsed_at = _now_ts()
+                    else:
+                        warning = "LLM JSON 형식이 예상과 달라 로컬 결과를 사용했습니다."
+                except Exception as exc:
+                    warning = f"문제 정의 LLM 생성 실패: {exc}"
+            else:
+                warning = llm_note or "LLM 미연결 상태로 로컬 문제 정의 묶음을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "groups": groups,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "problem_definition",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/problem-conclusion")
+def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    group_id = _safe_text(payload.group.group_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        conclusion = _build_problem_group_conclusion_local(payload)
+        insight_lens = _build_problem_group_insight_lens_local(payload)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_problem_group_conclusion_prompt(payload),
+                    stage="canvas_problem_conclusion",
+                    temperature=0.2,
+                    max_tokens=260,
+                )
+                candidate = _safe_text(parsed.get("conclusion")) if isinstance(parsed, dict) else ""
+                candidate_lens = _safe_text(parsed.get("insight_lens")) if isinstance(parsed, dict) else ""
+                if candidate:
+                    conclusion = candidate
+                    if candidate_lens:
+                        insight_lens = candidate_lens
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_problem_conclusion",
+                        "group_id": group_id,
+                        "insight_lens": insight_lens,
+                        "conclusion": conclusion,
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 결론을 사용했습니다."
+            except Exception as exc:
+                warning = f"결론 LLM 생성 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 결론을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "group_id": group_id,
+            "insight_lens": insight_lens,
+            "conclusion": conclusion,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        f"problem_conclusion:{group_id}",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/meeting-goal")
+def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    topic = _safe_text(payload.topic)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        goal = _build_meeting_goal_local(topic)
+        goals = _build_meeting_goal_local_options(topic)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if topic and llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_meeting_goal_prompt(topic),
+                    stage="canvas_meeting_goal",
+                    temperature=0.2,
+                    max_tokens=420,
+                )
+                candidate = _safe_text(parsed.get("goal")) if isinstance(parsed, dict) else ""
+                raw_goals = parsed.get("goals") if isinstance(parsed, dict) else []
+                llm_goals = [
+                    _safe_text(value)
+                    for value in (raw_goals if isinstance(raw_goals, list) else [])
+                    if _safe_text(value)
+                ]
+                if not candidate and llm_goals:
+                    candidate = llm_goals[0]
+                if candidate:
+                    goals = _dedup_preserve([candidate, *llm_goals, *goals], limit=3)
+                    goal = goals[0] if goals else candidate
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_meeting_goal",
+                        "topic": topic,
+                        "goal": goal,
+                        "goals": goals,
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 회의 목표를 사용했습니다."
+            except Exception as exc:
+                warning = f"회의 목표 LLM 생성 실패: {exc}"
+        elif topic:
+            warning = llm_note or "LLM 미연결 상태로 로컬 회의 목표를 사용했습니다."
+        else:
+            warning = "회의 제목이 없어 기본 회의 목표를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "topic": topic,
+            "goal": goal,
+            "goals": goals,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "meeting_goal",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/solution-stage")
+def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        topics = [
+            {
+                "group_id": _safe_text(item.group_id),
+                "topic_no": int(item.topic_no or 0),
+                "topic": _safe_text(item.topic),
+                "conclusion": _safe_text(item.conclusion),
+                "ideas": [
+                    f"{_safe_text(item.topic, '주제')} 관련 핵심 가설을 빠르게 검증할 실험안을 설계한다.",
+                    f"{_safe_text(item.topic, '주제')}에 대한 사용자 반응을 비교할 시범안을 만든다.",
+                ],
+            }
+            for item in (payload.topics or [])
+            if _safe_text(item.topic)
+        ]
+        used_llm = False
+        warning = ""
+
+        if topics:
+            client, llm_ready, llm_note = _ensure_llm_ready(RT)
+            if llm_ready:
+                try:
+                    prompt = _build_solution_stage_prompt(payload.meeting_topic, topics)
+                    parsed = _call_llm_json(
+                        RT,
+                        client,
+                        prompt=prompt,
+                        stage="canvas_solution_stage",
+                        temperature=0.3,
+                        max_tokens=1400,
+                    )
+                    parsed_topics = parsed.get("topics") if isinstance(parsed, dict) else None
+                    if isinstance(parsed_topics, list):
+                        by_id = {
+                            _safe_text(item.get("group_id")): item
+                            for item in parsed_topics
+                            if isinstance(item, dict) and _safe_text(item.get("group_id"))
+                        }
+                        for topic in topics:
+                            llm_item = by_id.get(_safe_text(topic.get("group_id")))
+                            if not llm_item:
+                                continue
+                            llm_ideas = llm_item.get("ideas")
+                            if isinstance(llm_ideas, list):
+                                topic["ideas"] = [_safe_text(x) for x in llm_ideas if _safe_text(x)][:4]
+                        used_llm = True
+                        RT.last_llm_parsed_json = {
+                            "stage": "canvas_solution_stage",
+                            "topics": copy.deepcopy(topics),
+                        }
+                        RT.last_llm_parsed_at = _now_ts()
+                    else:
+                        warning = "LLM JSON 형식이 예상과 달라 로컬 해결책을 사용했습니다."
+                except Exception as exc:
+                    warning = f"해결책 단계 LLM 생성 실패: {exc}"
+            else:
+                warning = llm_note or "LLM 미연결 상태로 로컬 해결책 아이디어를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "topics": topics,
+        }
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "solution_stage",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/ideation-suggestions")
+def post_canvas_ideation_suggestions(payload: IdeationSuggestionGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        suggestions = _build_local_ideation_suggestions(payload)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_ideation_suggestions_prompt(payload),
+                    stage="canvas_ideation_suggestions",
+                    temperature=0.35,
+                    max_tokens=900,
+                )
+                parsed_suggestions = parsed.get("suggestions") if isinstance(parsed, dict) else None
+                if isinstance(parsed_suggestions, list):
+                    normalized = _normalize_canvas_ideation_suggestions(
+                        [
+                            {
+                                "id": f"ideation-suggestion-{index + 1}",
+                                "text": _safe_text(item.get("text") if isinstance(item, dict) else item),
+                                "status": "draft",
+                            }
+                            for index, item in enumerate(parsed_suggestions)
+                        ],
+                        limit=5,
+                    )
+                    if normalized:
+                        suggestions = normalized
+                        used_llm = True
+                        RT.last_llm_parsed_json = {
+                            "stage": "canvas_ideation_suggestions",
+                            "suggestions": copy.deepcopy(suggestions),
+                        }
+                        RT.last_llm_parsed_at = _now_ts()
+                    else:
+                        warning = "LLM 추천 결과가 비어 있어 로컬 추천을 사용했습니다."
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 추천을 사용했습니다."
+            except Exception as exc:
+                warning = f"아이디어 추천 LLM 생성 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 추천을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "suggestions": suggestions,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "ideation_suggestions",
+        signature,
+        _compute,
+    )
+
+
+@app.get("/api/canvas/personal-notes")
+def get_canvas_personal_notes(meeting_id: str, user_id: str):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    loaded_notes, loaded_local_state = _load_canvas_personal_notes_from_db(
+        normalized_meeting_id,
+        normalized_user_id,
+    )
+    with RT.lock:
+        meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_local_state = RT.canvas_local_state_by_meeting_user.setdefault(normalized_meeting_id, {})
+        if loaded_notes is not None:
+            meeting_notes[normalized_user_id] = copy.deepcopy(loaded_notes)
+        if loaded_local_state is not None:
+            meeting_local_state[normalized_user_id] = copy.deepcopy(loaded_local_state)
+        personal_notes = copy.deepcopy(meeting_notes.get(normalized_user_id) or [])
+        local_canvas_state = copy.deepcopy(meeting_local_state.get(normalized_user_id) or {})
+        return {
+            "ok": True,
+            "meeting_id": normalized_meeting_id,
+            "user_id": normalized_user_id,
+            "personal_notes": personal_notes,
+            "local_canvas_state": local_canvas_state,
+            "saved_at": _safe_text((RT.canvas_workspace_by_meeting.get(normalized_meeting_id) or {}).get("saved_at")),
+        }
+
+
+@app.post("/api/canvas/personal-notes")
+def post_canvas_personal_notes(payload: CanvasPersonalNotesStateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    normalized_user_id = _safe_text(payload.user_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    saved_at = _now_ts()
+    normalized_notes = [
+        {
+            "id": _safe_text(note.id),
+            "project_id": _safe_text(note.project_id) or normalized_meeting_id,
+            "agenda_id": _safe_text(note.agenda_id),
+            "linked_canvas_item_id": _safe_text(note.linked_canvas_item_id),
+            "linked_canvas_item_title": _safe_text(note.linked_canvas_item_title),
+            "kind": _safe_text(note.kind, "note"),
+            "title": _safe_text(note.title),
+            "body": _safe_text(note.body),
+        }
+        for note in (payload.personal_notes or [])
+        if _safe_text(note.id) or _safe_text(note.title) or _safe_text(note.body)
+    ]
+    normalized_local_canvas_state = _normalize_canvas_local_state(payload.local_canvas_state)
+
+    with RT.lock:
+        meeting_notes = RT.canvas_personal_notes_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_local_state = RT.canvas_local_state_by_meeting_user.setdefault(normalized_meeting_id, {})
+        meeting_notes[normalized_user_id] = copy.deepcopy(normalized_notes)
+        meeting_local_state[normalized_user_id] = copy.deepcopy(normalized_local_canvas_state)
+
+    _save_canvas_personal_notes_to_db(
+        normalized_meeting_id,
+        normalized_user_id,
+        normalized_notes,
+        normalized_local_canvas_state,
+    )
+
+    return {
+        "ok": True,
+        "meeting_id": normalized_meeting_id,
+        "user_id": normalized_user_id,
+        "personal_notes": copy.deepcopy(normalized_notes),
+        "local_canvas_state": copy.deepcopy(normalized_local_canvas_state),
+        "saved_at": saved_at,
+    }
+
+
+@app.get("/api/canvas/workspace-state")
+def get_canvas_workspace_state(meeting_id: str):
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    saved = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    print(
+        "[canvas workspace GET]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "stage": _safe_text(saved.get("stage")),
+            "canvas_items": len(saved.get("canvas_items") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(saved.get("node_positions")),
+        },
+    )
+    return _canvas_workspace_response(saved)
+
+
+@app.post("/api/canvas/workspace-state")
+def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    saved_at = _now_ts()
+    previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
+    workspace["meeting_goal"] = _safe_text(payload.meeting_goal)
+    workspace["meeting_goal_context"] = _safe_text(payload.meeting_goal_context)
+    workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
+    workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
+    workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
+    workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
+    workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
+    workspace["final_solution_summary"] = _normalize_canvas_final_solution_summary(payload.final_solution_summary)
+    workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
+    workspace["imported_state"] = (
+        copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
+    )
+    with RT.lock:
+        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
+
+    _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    print(
+        "[canvas workspace PUT]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "meeting_goal": _safe_text(workspace.get("meeting_goal"))[:80],
+            "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context"))[:80],
+            "stage": _safe_text(workspace.get("stage")),
+            "canvas_items": len(workspace.get("canvas_items") or []),
+            "custom_groups": len(workspace.get("custom_groups") or []),
+            "final_solution_count": int((workspace.get("final_solution_summary") or {}).get("final_count") or 0),
+            "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
+        },
+    )
+
+    return _canvas_workspace_response(workspace)
+
+
+@app.post("/api/canvas/workspace-patch")
+def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+
+    saved_at = _now_ts()
+    previous_workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+    workspace = _clone_runtime_workspace_state(normalized_meeting_id, previous_workspace, saved_at)
+    provided_fields = set(getattr(payload, "model_fields_set", set()))
+
+    if "meeting_goal" in provided_fields:
+        workspace["meeting_goal"] = _safe_text(payload.meeting_goal)
+    if "meeting_goal_context" in provided_fields:
+        workspace["meeting_goal_context"] = _safe_text(payload.meeting_goal_context)
+    if "stage" in provided_fields:
+        workspace["stage"] = _normalize_canvas_stage(payload.stage)
+    if "agenda_overrides" in provided_fields:
+        workspace["agenda_overrides"] = _normalize_canvas_agenda_overrides(payload.agenda_overrides)
+    if "canvas_items" in provided_fields:
+        workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
+    if "custom_groups" in provided_fields:
+        workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
+    if "problem_groups" in provided_fields:
+        workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
+    if "solution_topics" in provided_fields:
+        workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
+    if "final_solution_summary" in provided_fields:
+        workspace["final_solution_summary"] = _normalize_canvas_final_solution_summary(
+            payload.final_solution_summary
+        )
+    if "node_positions" in provided_fields:
+        workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions or {})
+    if "imported_state" in provided_fields:
+        workspace["imported_state"] = (
+            copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
+        )
+
+    with RT.lock:
+        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
+
+    _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
+    print(
+        "[canvas workspace PATCH]",
+        {
+            "meeting_id": normalized_meeting_id,
+            "fields": sorted(list(provided_fields)),
+            "meeting_goal": _safe_text(workspace.get("meeting_goal"))[:80],
+            "meeting_goal_context": _safe_text(workspace.get("meeting_goal_context"))[:80],
+            "stage": _safe_text(workspace.get("stage")),
+            "canvas_items": len(workspace.get("canvas_items") or []),
+            "custom_groups": len(workspace.get("custom_groups") or []),
+            "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
+        },
+    )
+    return _canvas_workspace_response(workspace)
+
+
+@app.get("/api/export/agenda-markdown")
+def get_export_agenda_markdown():
+    with RT.lock:
+        markdown = _build_agenda_markdown(RT)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        return {
+            "ok": True,
+            "filename": f"agenda_export_{stamp}.md",
+            "agenda_count": len(RT.agenda_outcomes),
+            "transcript_count": len(RT.transcript),
+            "markdown": markdown,
+        }
+
+
+@app.get("/api/export/agenda-snapshot")
+def get_export_agenda_snapshot():
+    with RT.lock:
+        snapshot = _build_agenda_snapshot(RT)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        return {
+            "ok": True,
+            "filename": f"agenda_snapshot_{stamp}.json",
+            "agenda_count": len(RT.agenda_outcomes),
+            "transcript_count": len(RT.transcript),
+            "snapshot": snapshot,
+        }
+
+
+@app.post("/api/import/agenda-snapshot")
+async def post_import_agenda_snapshot(
+    file: UploadFile = File(...),
+    reset_state: str = Form(default="true"),
+):
+    raw = await file.read()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"스냅샷 JSON 파싱 실패: {exc}") from exc
+
+    with RT.lock:
+        try:
+            loaded = _load_agenda_snapshot(RT, payload, reset_state=_boolify(reset_state, True))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"스냅샷 복원 실패: {exc}") from exc
+        return {
+            "ok": True,
+            "state": _state_response(RT),
+            "import_debug": {
+                "filename": _safe_text(getattr(file, "filename", ""), "agenda_snapshot.json"),
+                "meeting_goal": loaded["meeting_goal"],
+                "transcript_count": int(loaded["transcript_count"]),
+                "agenda_count": int(loaded["agenda_count"]),
+                "reset_state": _boolify(reset_state, True),
+            },
+        }
+
+
+@app.post("/api/import/audio-file/start")
+async def post_import_audio_file_start(
+    file: UploadFile = File(...),
+    meeting_id: str = Form(...),
+    user_id: str = Form(...),
+    meeting_goal: str = Form(default=""),
+    reset_state: str = Form(default="true"),
+    window_size: str = Form(default="12"),
+):
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_user_id = _safe_text(user_id)
+    filename = _safe_text(getattr(file, "filename", ""), "audio")
+    suffix = Path(filename).suffix.lower()
+    if not normalized_meeting_id:
+        raise HTTPException(status_code=400, detail="meeting_id is required")
+    if not normalized_user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if suffix not in AUDIO_IMPORT_ALLOWED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 오디오 형식입니다. 허용 형식: {', '.join(sorted(AUDIO_IMPORT_ALLOWED_SUFFIXES))}",
+        )
+
+    try:
+        blob = await file.read()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"오디오 파일 읽기에 실패했습니다: {exc}") from exc
+    if not blob:
+        raise HTTPException(status_code=400, detail="비어 있는 오디오 파일입니다.")
+
+    try:
+        normalized_window_size = max(4, min(int(window_size), 80))
+    except Exception:
+        normalized_window_size = 12
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="imms-audio-import-"))
+    source_path = temp_dir / f"source{suffix}"
+    source_path.write_bytes(blob)
+
+    job = _create_audio_import_job(normalized_meeting_id, normalized_user_id, filename)
+    _update_audio_import_job(
+        job.job_id,
+        status="queued",
+        progress=1.0,
+        step="queued",
+        detail="오디오 파일 처리 작업을 준비하는 중입니다.",
+    )
+
+    worker = threading.Thread(
+        target=_run_audio_import_job,
+        args=(
+            job.job_id,
+            source_path,
+            filename,
+            normalized_meeting_id,
+            _safe_text(meeting_goal),
+            normalized_user_id,
+            _boolify(reset_state, True),
+            normalized_window_size,
+        ),
+        daemon=True,
+        name=f"audio-import-{job.job_id[:8]}",
+    )
+    worker.start()
+
+    current_job = _get_audio_import_job(job.job_id)
+    return _serialize_audio_import_job(current_job or job)
+
+
+@app.get("/api/import/audio-file/jobs/{job_id}")
+def get_audio_import_job_status(job_id: str):
+    job = _get_audio_import_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="audio import job not found")
+    return _serialize_audio_import_job(job)
 
 
 @app.post("/api/reset")
@@ -3458,22 +9593,32 @@ async def post_stt_chunk(
 @app.post("/api/transcribe-chunk")
 async def post_transcribe_chunk(
     audio_file: UploadFile = File(...),
+    meeting_goal: str = Form(default=""),
 ):
     """
     Gateway에서 호출하는 전사 엔드포인트
     오디오 청크를 받아서 Whisper로 전사한 후 텍스트 반환
     """
     try:
+        started_at = time.perf_counter()
         blob = await audio_file.read()
         if not blob:
             return {"text": "", "language": "ko", "error": "empty audio"}
         
         suffix = Path(audio_file.filename or "chunk.webm").suffix or ".webm"
-        text = _transcribe_with_whisper(blob, suffix=suffix)
+        text = _transcribe_with_whisper(blob, suffix=suffix, meeting_goal=meeting_goal)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        print(
+            f"[STT] transcribed chunk model={WHISPER_MODEL_NAME} "
+            f"bytes={len(blob)} suffix={suffix} elapsed_ms={elapsed_ms} "
+            f"meeting_goal={bool(_safe_text(meeting_goal))} chars={len(_safe_text(text))}"
+        )
         
         return {
             "text": _safe_text(text),
-            "language": "ko"
+            "language": "ko",
+            "elapsed_ms": elapsed_ms,
+            "model": WHISPER_MODEL_NAME,
         }
     except Exception as exc:
         return {

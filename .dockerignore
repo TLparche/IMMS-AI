@@ -1,0 +1,17 @@
+.git
+.idea
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.env
+.env.local
+.env.production
+frontend/.env.local
+frontend/node_modules
+frontend/.next
+node_modules
+proto
+*.tsbuildinfo

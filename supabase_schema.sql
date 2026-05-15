@@ -47,9 +47,15 @@ CREATE TABLE IF NOT EXISTS transcripts (
   speaker TEXT NOT NULL,
   text TEXT NOT NULL,
   timestamp TEXT NOT NULL,
+  canvas_stage TEXT NOT NULL DEFAULT 'ideation',
+  canvas_target_id TEXT NOT NULL DEFAULT '',
   turn_id INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Existing projects created before stage-aware STT need these columns.
+ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS canvas_stage TEXT NOT NULL DEFAULT 'ideation';
+ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS canvas_target_id TEXT NOT NULL DEFAULT '';
 
 -- Agendas table
 CREATE TABLE IF NOT EXISTS agendas (
@@ -101,6 +107,23 @@ CREATE TABLE IF NOT EXISTS reports (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Shared runtime state for each meeting
+CREATE TABLE IF NOT EXISTS meeting_runtime_states (
+  meeting_id UUID PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+  shared_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+  llm_cache JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Personal runtime state for each user inside a meeting
+CREATE TABLE IF NOT EXISTS meeting_user_states (
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  personal_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (meeting_id, user_id)
+);
+
 -- Enable Row Level Security (RLS)
 ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meetings ENABLE ROW LEVEL SECURITY;
@@ -110,6 +133,8 @@ ALTER TABLE agendas ENABLE ROW LEVEL SECURITY;
 ALTER TABLE decisions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE action_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meeting_runtime_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meeting_user_states ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies
 -- user_profiles: 본인 프로필만 읽기/쓰기
@@ -152,4 +177,67 @@ CREATE POLICY "Participants can view action_items" ON action_items FOR SELECT US
 
 CREATE POLICY "Participants can view reports" ON reports FOR SELECT USING (
   EXISTS (SELECT 1 FROM participants p JOIN meetings m ON p.meeting_id = m.id WHERE m.id = reports.meeting_id AND p.user_id = auth.uid())
+);
+
+CREATE POLICY "Participants can view runtime states" ON meeting_runtime_states FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM meetings
+    WHERE meetings.id = meeting_runtime_states.meeting_id
+      AND (
+        meetings.host_id = auth.uid()
+        OR EXISTS (
+          SELECT 1 FROM participants
+          WHERE participants.meeting_id = meeting_runtime_states.meeting_id
+            AND participants.user_id = auth.uid()
+        )
+      )
+  )
+);
+
+CREATE POLICY "Participants can view own meeting user states" ON meeting_user_states FOR SELECT USING (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM meetings
+    WHERE meetings.id = meeting_user_states.meeting_id
+      AND (
+        meetings.host_id = auth.uid()
+        OR EXISTS (
+          SELECT 1 FROM participants
+          WHERE participants.meeting_id = meeting_user_states.meeting_id
+            AND participants.user_id = auth.uid()
+        )
+      )
+  )
+);
+
+CREATE POLICY "Participants can insert own meeting user states" ON meeting_user_states FOR INSERT WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM meetings
+    WHERE meetings.id = meeting_user_states.meeting_id
+      AND (
+        meetings.host_id = auth.uid()
+        OR EXISTS (
+          SELECT 1 FROM participants
+          WHERE participants.meeting_id = meeting_user_states.meeting_id
+            AND participants.user_id = auth.uid()
+        )
+      )
+  )
+);
+
+CREATE POLICY "Participants can update own meeting user states" ON meeting_user_states FOR UPDATE USING (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM meetings
+    WHERE meetings.id = meeting_user_states.meeting_id
+      AND (
+        meetings.host_id = auth.uid()
+        OR EXISTS (
+          SELECT 1 FROM participants
+          WHERE participants.meeting_id = meeting_user_states.meeting_id
+            AND participants.user_id = auth.uid()
+        )
+      )
+  )
 );
