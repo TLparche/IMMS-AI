@@ -3125,7 +3125,7 @@ function makeProblemSourceCardNodeLabel(
         event.stopPropagation();
         onSourceNodeSelect(card.sourceNodeId);
       }}
-      className={`nodrag nopan min-w-0 rounded-[18px] border bg-white p-5 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_10px_22px_rgba(15,23,42,0.08)] transition ${
+      className={`nodrag nopan box-border flex h-full min-h-full min-w-0 flex-col rounded-[18px] border bg-white p-5 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_10px_22px_rgba(15,23,42,0.08)] transition ${
         selected ? "border-black ring-2 ring-black/5" : "border-black/10 hover:border-violet-200"
       } ${card.draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"}`}
     >
@@ -7300,7 +7300,7 @@ export default function MeetingCanvasTab({
                   sourcePosition: Position.Bottom,
                   targetPosition: Position.Top,
                   className: "!border-0 !bg-transparent !p-0 !shadow-none",
-                  style: { width: rightCardWidth, minHeight: activeCardHeights[index], padding: 0 },
+                  style: { width: rightCardWidth, height: activeCardHeights[index], minHeight: activeCardHeights[index], padding: 0 },
                   draggable: false,
                   data: {
                     contentSignature: buildNodeContentSignature([
@@ -13118,28 +13118,7 @@ export default function MeetingCanvasTab({
       }`;
     const positionClassName = stage === "solution" ? "left-1/2 xl:left-[68%]" : "left-1/2 xl:left-[69%]";
 
-    if (stage === "ideation" && selectedRootItemForIdeationCanvas) {
-      const selectedStatus = normalizeCanvasItemStatus(selectedRootItemForIdeationCanvas.status);
-      return (
-        <div className={`pointer-events-none absolute top-[clamp(0.75rem,1.5vh,1rem)] z-[12] -translate-x-1/2 ${positionClassName}`}>
-          <div className="pointer-events-auto flex items-center justify-center gap-1 rounded-[12px] border border-black/10 bg-white/95 p-1 shadow-[0_5.64px_22.56px_rgba(0,0,0,0.08)] backdrop-blur">
-            {CANVAS_ITEM_STATUSES.map((status) => {
-              const active = selectedStatus === status;
-              return (
-                <button
-                  key={`canvas-floating-root-status-${status}`}
-                  type="button"
-                  onClick={() => handleSetCanvasItemStatus(status, selectedRootItemForIdeationCanvas.id, false)}
-                  className={buttonClassName(active, canvasItemStatusTone(status))}
-                >
-                  {canvasItemStatusLabel(status)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      );
-    }
+    if (stage === "ideation") return null;
 
     if (stage === "problem-definition" && selectedProblemGroup) {
       return (
