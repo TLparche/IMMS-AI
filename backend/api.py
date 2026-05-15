@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import queue
@@ -42,7 +43,9 @@ LLM_IO_PREVIEW_MAX = 6000
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
 CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
-CANVAS_TOPIC_CLUSTER_MAX_PASSES_PER_JOB = 3
+CANVAS_TOPIC_CHILD_IDEA_MERGE_MIN_SCORE = 0.42
+CANVAS_TOPIC_CHILD_IDEA_MERGE_MAX_MERGES_PER_JOB = 2
+CANVAS_TOPIC_CLUSTER_MAX_PASSES_PER_JOB = 8
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
 IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
@@ -468,6 +471,8 @@ def _normalize_canvas_workspace_problem_groups(
             "keywords": [_safe_text(item) for item in (group.keywords or []) if _safe_text(item)],
             "agenda_ids": [_safe_text(item) for item in (group.agenda_ids or []) if _safe_text(item)],
             "agenda_titles": [_safe_text(item) for item in (group.agenda_titles or []) if _safe_text(item)],
+            "source_group_id": _safe_text(group.source_group_id),
+            "source_group_title": _safe_text(group.source_group_title),
             "ideas": [
                 {
                     "id": _safe_text(idea.id),
@@ -477,6 +482,9 @@ def _normalize_canvas_workspace_problem_groups(
                 }
                 for idea in (group.ideas or [])
                 if _safe_text(idea.id) or _safe_text(idea.title) or _safe_text(idea.body)
+            ],
+            "source_child_item_ids": [
+                _safe_text(item) for item in (group.source_child_item_ids or []) if _safe_text(item)
             ],
             "discussion_items": [
                 {
@@ -514,6 +522,9 @@ def _normalize_canvas_workspace_problem_groups(
                 for item in (group.discussion_items or [])
                 if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
             ],
+            "linked_group_ids": [
+                _safe_text(item) for item in (group.linked_group_ids or []) if _safe_text(item)
+            ],
             "source_summary_items": [
                 _safe_text(item) for item in (group.source_summary_items or []) if _safe_text(item)
             ],
@@ -524,6 +535,11 @@ def _normalize_canvas_workspace_problem_groups(
             "source_agenda_signatures": {
                 _safe_text(key): _safe_text(value)
                 for key, value in (group.source_agenda_signatures or {}).items()
+                if _safe_text(key) and _safe_text(value)
+            },
+            "source_idea_signatures": {
+                _safe_text(key): _safe_text(value)
+                for key, value in (group.source_idea_signatures or {}).items()
                 if _safe_text(key) and _safe_text(value)
             },
         }
@@ -1828,6 +1844,8 @@ class ProblemDefinitionGenerateInput(BaseModel):
     meeting_id: str = ""
     topic: str = ""
     agendas: list[ProblemDefinitionAgendaInput] = Field(default_factory=list)
+    source_group_id: str = ""
+    source_group_title: str = ""
     ideas: list[ProblemDefinitionIdeaInput] = Field(default_factory=list)
 
 
@@ -2047,14 +2065,19 @@ class CanvasWorkspaceProblemGroupInput(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     agenda_ids: list[str] = Field(default_factory=list)
     agenda_titles: list[str] = Field(default_factory=list)
+    source_group_id: str = ""
+    source_group_title: str = ""
     ideas: list[CanvasWorkspaceIdeaInput] = Field(default_factory=list)
+    source_child_item_ids: list[str] = Field(default_factory=list)
     discussion_items: list[CanvasProblemDiscussionInput] = Field(default_factory=list)
+    linked_group_ids: list[str] = Field(default_factory=list)
     source_summary_items: list[str] = Field(default_factory=list)
     conclusion: str = ""
     conclusion_user_edited: bool = False
     status: str = "draft"
     source_signature: str = ""
     source_agenda_signatures: dict[str, str] = Field(default_factory=dict)
+    source_idea_signatures: dict[str, str] = Field(default_factory=dict)
 
 
 class CanvasWorkspaceSolutionTopicInput(BaseModel):
@@ -2305,90 +2328,136 @@ def _md_text(raw: Any) -> str:
     return re.sub(r"\s+", " ", _safe_text(raw)).strip()
 
 
+def _compact_problem_source_text(raw: Any, max_chars: int = 140) -> str:
+    text = re.sub(r"\s+", " ", _safe_text(raw)).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
 def _build_problem_definition_groups_local(payload: ProblemDefinitionGenerateInput) -> list[dict[str, Any]]:
     agendas = payload.agendas or []
     ideas = payload.ideas or []
-    if not agendas:
+    if not agendas and not ideas:
         return []
 
-    groups: list[dict[str, Any]] = []
-    for agenda in agendas:
-        agenda_keywords = [
+    agenda_by_id = {_safe_text(agenda.agenda_id): agenda for agenda in agendas if _safe_text(agenda.agenda_id)}
+    source_group_id = _safe_text(payload.source_group_id)
+    source_group_title = _safe_text(payload.source_group_title)
+    if not source_group_id and len(agendas) == 1:
+        source_group_id = _safe_text(agendas[0].agenda_id)
+    if not source_group_title and len(agendas) == 1:
+        source_group_title = _safe_text(agendas[0].title)
+    normalized_ideas: list[dict[str, Any]] = []
+    for idea in ideas:
+        idea_id = _safe_text(idea.id)
+        title = _safe_text(idea.title)
+        body = _safe_text(idea.body)
+        if not idea_id or not (title or body):
+            continue
+        normalized_ideas.append(
+            {
+                "id": idea_id,
+                "agenda_id": _safe_text(idea.agenda_id),
+                "kind": _safe_text(idea.kind, "note"),
+                "title": title,
+                "body": body,
+            }
+        )
+
+    def build_group(group_index: int, source_ideas: list[dict[str, Any]]) -> dict[str, Any]:
+        source_ids = [_safe_text(idea.get("id")) for idea in source_ideas if _safe_text(idea.get("id"))]
+        agenda_ids = list(dict.fromkeys([_safe_text(idea.get("agenda_id")) for idea in source_ideas if _safe_text(idea.get("agenda_id"))]))
+        agenda_titles = [
+            _safe_text(agenda_by_id.get(agenda_id).title)
+            for agenda_id in agenda_ids
+            if agenda_by_id.get(agenda_id)
+        ]
+        keyword_candidates: list[str] = []
+        for idea in source_ideas:
+            keyword_candidates.extend(_keyword_tokens(_safe_text(idea.get("title"))))
+            keyword_candidates.extend(_keyword_tokens(_safe_text(idea.get("body"))))
+        keywords = [
             tok
-            for tok in (
-                [_normalize_keyword_token(x) for x in (agenda.keywords or [])]
-                + _keyword_tokens(agenda.title)
-            )
+            for tok in ([_normalize_keyword_token(item) for item in keyword_candidates])
             if tok and not _is_title_keyword_noise(tok)
         ]
-        dedup_keywords = list(dict.fromkeys(agenda_keywords))
-
-        best_group_idx = -1
-        best_score = 0
-        for idx, group in enumerate(groups):
-            overlap = len(set(dedup_keywords) & set(group.get("keywords") or []))
-            if overlap > best_score:
-                best_score = overlap
-                best_group_idx = idx
-
-        if best_group_idx < 0 or best_score == 0:
-            groups.append(
-                {
-                    "group_id": f"problem-group-{len(groups) + 1}",
-                    "topic": _safe_text(dedup_keywords[0] if dedup_keywords else agenda.title, agenda.title),
-                    "keywords": dedup_keywords[:8],
-                    "agenda_ids": [_safe_text(agenda.agenda_id)],
-                    "agenda_titles": [_safe_text(agenda.title)],
-                    "source_summary_items": [_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)],
-                }
+        keywords = list(dict.fromkeys(keywords))[:8]
+        topic_seed = keywords[0] if keywords else source_ideas[0].get("title") if source_ideas else f"주제 {group_index}"
+        summaries = [
+            _to_summary_point(
+                " ".join([_safe_text(idea.get("title")), _safe_text(idea.get("body"))]).strip(),
+                max_len=80,
             )
-            continue
+            for idea in source_ideas
+        ]
+        summaries = [_safe_text(item) for item in summaries if _safe_text(item)]
+        return {
+            "group_id": f"problem-group-{group_index}",
+            "topic": _normalize_problem_topic_label(topic_seed, _safe_text(topic_seed, f"주제 {group_index}")),
+            "insight_lens": "원본 아이디어의 공통 문제 관점",
+            "keywords": keywords[:6],
+            "agenda_ids": agenda_ids,
+            "agenda_titles": agenda_titles,
+            "source_group_id": source_group_id or (agenda_ids[0] if agenda_ids else ""),
+            "source_group_title": source_group_title or (agenda_titles[0] if agenda_titles else ""),
+            "ideas": source_ideas[:24],
+            "source_child_item_ids": source_ids,
+            "source_summary_items": summaries[:8],
+            "conclusion": summaries[0] if summaries else f"{_safe_text(topic_seed)} 방향 구체화",
+        }
 
-        group = groups[best_group_idx]
-        group["agenda_ids"].append(_safe_text(agenda.agenda_id))
-        group["agenda_titles"].append(_safe_text(agenda.title))
-        group["keywords"] = list(dict.fromkeys([*(group.get("keywords") or []), *dedup_keywords]))[:8]
-        group["source_summary_items"] = [
-            *(group.get("source_summary_items") or []),
-            *[_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)],
-        ][:12]
+    if normalized_ideas:
+        fallback_groups: list[list[dict[str, Any]]] = []
+        for idea in normalized_ideas:
+            idea_tokens = set(_keyword_tokens(_safe_text(idea.get("title"))) + _keyword_tokens(_safe_text(idea.get("body"))))
+            best_index = -1
+            best_score = 0
+            for index, group_items in enumerate(fallback_groups):
+                group_tokens: set[str] = set()
+                for group_idea in group_items:
+                    group_tokens.update(_keyword_tokens(_safe_text(group_idea.get("title"))))
+                    group_tokens.update(_keyword_tokens(_safe_text(group_idea.get("body"))))
+                score = len(idea_tokens & group_tokens)
+                if score > best_score:
+                    best_score = score
+                    best_index = index
+            if best_index >= 0 and best_score > 0:
+                fallback_groups[best_index].append(idea)
+            else:
+                fallback_groups.append([idea])
 
-    idea_by_agenda: dict[str, list[dict[str, Any]]] = {}
-    for idea in ideas:
-        agenda_id = _safe_text(idea.agenda_id)
-        if not agenda_id:
-            continue
-        idea_by_agenda.setdefault(agenda_id, []).append(
-            {
-                "id": _safe_text(idea.id),
-                "kind": _safe_text(idea.kind, "note"),
-                "title": _safe_text(idea.title),
-                "body": _safe_text(idea.body),
-            }
-        )
+        fallback_target_count = max(1, min(5, (len(normalized_ideas) + 2) // 3))
+        if len(fallback_groups) > fallback_target_count:
+            compacted_groups: list[list[dict[str, Any]]] = []
+            for index in range(0, len(normalized_ideas), 3):
+                compacted_groups.append(normalized_ideas[index:index + 3])
+            fallback_groups = compacted_groups
 
-    out: list[dict[str, Any]] = []
-    for idx, group in enumerate(groups, start=1):
-        linked_ideas: list[dict[str, Any]] = []
-        for agenda_id in group.get("agenda_ids") or []:
-            linked_ideas.extend(idea_by_agenda.get(_safe_text(agenda_id), []))
+        return [build_group(index + 1, source_ideas) for index, source_ideas in enumerate(fallback_groups)]
 
-        topic = _safe_text(group.get("topic"), f"주제 {idx}")
-        summaries = [_safe_text(x) for x in (group.get("source_summary_items") or []) if _safe_text(x)]
-        out.append(
-            {
-                "group_id": _safe_text(group.get("group_id"), f"problem-group-{idx}"),
-                "topic": _normalize_problem_topic_label(topic, f"주제 {idx}"),
-                "insight_lens": "공통 행동과 니즈를 묶어 해석",
-                "keywords": [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)][:6],
-                "agenda_ids": [_safe_text(x) for x in (group.get("agenda_ids") or []) if _safe_text(x)],
-                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
-                "ideas": linked_ideas[:24],
-                "source_summary_items": summaries[:8],
-                "conclusion": _to_summary_point(summaries[0], max_len=None) if summaries else f"{_safe_text(topic)} 방향 구체화",
-            }
-        )
-    return out
+    return [
+        {
+            "group_id": f"problem-group-{index + 1}",
+            "topic": _normalize_problem_topic_label(agenda.title, _safe_text(agenda.title, f"주제 {index + 1}")),
+            "insight_lens": "안건 흐름에서 문제 관점 도출",
+            "keywords": [
+                tok
+                for tok in ([_normalize_keyword_token(x) for x in (agenda.keywords or [])] + _keyword_tokens(agenda.title))
+                if tok and not _is_title_keyword_noise(tok)
+            ][:6],
+            "agenda_ids": [_safe_text(agenda.agenda_id)],
+            "agenda_titles": [_safe_text(agenda.title)],
+            "source_group_id": source_group_id or _safe_text(agenda.agenda_id),
+            "source_group_title": source_group_title or _safe_text(agenda.title),
+            "ideas": [],
+            "source_child_item_ids": [],
+            "source_summary_items": [_safe_text(x) for x in (agenda.summary_bullets or []) if _safe_text(x)][:8],
+            "conclusion": _to_summary_point((agenda.summary_bullets or [agenda.title])[0], max_len=None),
+        }
+        for index, agenda in enumerate(agendas)
+        if _safe_text(agenda.agenda_id) or _safe_text(agenda.title)
+    ]
 
 
 def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
@@ -2830,30 +2899,48 @@ def _compute_idea_assimilation_result(payload: CanvasIdeaAssimilationInput) -> d
 
 
 def _build_problem_definition_prompt(topic: str, groups: list[dict[str, Any]]) -> str:
-    prompt_groups: list[dict[str, Any]] = []
+    source_items: list[dict[str, Any]] = []
+    seen_source_ids: set[str] = set()
     for group in groups:
-        prompt_groups.append(
-            {
-                "group_id": _safe_text(group.get("group_id")),
-                "draft_topic": _safe_text(group.get("topic")),
-                "draft_insight_lens": _safe_text(group.get("insight_lens"), "공통 행동과 니즈를 묶어 해석"),
-                "keywords": [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)],
-                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
-                "ideas": group.get("ideas") or [],
-                "source_summary_items": [_safe_text(x) for x in (group.get("source_summary_items") or []) if _safe_text(x)],
-            }
-        )
+        ideas = group.get("ideas") if isinstance(group.get("ideas"), list) else []
+        for idea in ideas:
+            if not isinstance(idea, dict):
+                continue
+            idea_id = _safe_text(idea.get("id"))
+            if not idea_id or idea_id in seen_source_ids:
+                continue
+            seen_source_ids.add(idea_id)
+            source_items.append(
+                {
+                    "id": idea_id,
+                    "kind": _safe_text(idea.get("kind"), "note"),
+                    "title": _compact_problem_source_text(idea.get("title"), 60),
+                    "body": _compact_problem_source_text(idea.get("body"), 140),
+                    "agenda_ids": [_safe_text(x) for x in (group.get("agenda_ids") or []) if _safe_text(x)][:2],
+                    "agenda_titles": [_compact_problem_source_text(x, 40) for x in (group.get("agenda_titles") or []) if _safe_text(x)][:2],
+                    "draft_keywords": [_compact_problem_source_text(x, 24) for x in (group.get("keywords") or []) if _safe_text(x)][:6],
+                }
+            )
     payload = {
         "meeting_topic": _safe_text(topic),
-        "groups": prompt_groups,
+        "source_group": {
+            "id": _safe_text(groups[0].get("source_group_id")) if groups else "",
+            "title": _safe_text(groups[0].get("source_group_title")) if groups else "",
+        },
+        "source_items": source_items,
     }
     return (
-        "너는 회의 아이디어를 문제 정의 단계용 주제 묶음으로 정리하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "너는 아이디어 단계의 1차 자식 노드들을 문제 정의 단계용 그룹으로 재분류하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
         "[목표]\n"
-        "- 각 묶음의 draft_topic은 초안일 뿐이다. 이를 그대로 복사하지 말고, 묶음 전체를 더 잘 설명하는 최종 topic을 다시 정제해 작성한다.\n"
-        "- 유사한 안건/아이디어 묶음마다 '주제 결론'을 새로 작성한다.\n"
-        "- 주제 결론은 기존 문장을 그대로 복사하지 말고, 입력 내용을 종합해서 새 한국어 문장 1개로 재작성한다.\n"
-        "- topic은 너무 길지 않은 키워드/짧은 구 형태로 유지한다.\n\n"
+        "- 입력 source_items는 source_group에 해당하는 그룹분류 아래의 1차 자식들이다.\n"
+        "- source_items를 그대로 복사하지 말고, 문제 관점이 비슷한 것끼리 문제정의 그룹으로 재분류한다.\n"
+        "- 그룹 개수는 source_items의 의미적 차이를 보고 스스로 결정한다.\n"
+        "- 권장 그룹 수는 1~5개이며, 서로 명확히 다른 문제 관점일 때만 그룹을 늘린다.\n"
+        "- source_item 개수와 같은 수의 그룹을 만들지 않는다. 단, 모든 source_item이 서로 완전히 다른 문제일 때만 예외다.\n"
+        "- 각 그룹에는 반드시 포함한 source_item id 목록(source_child_item_ids)을 넣는다.\n"
+        "- 각 source_item id는 가급적 정확히 한 그룹에만 포함한다.\n"
+        "- topic은 문제 관점을 드러내는 짧은 명사구로 쓴다.\n"
+        "- conclusion은 해당 그룹의 문제 정의 결과를 1문장으로 쓴다.\n\n"
         "[입력 JSON]\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
         "[출력 JSON 스키마]\n"
@@ -2861,15 +2948,17 @@ def _build_problem_definition_prompt(topic: str, groups: list[dict[str, Any]]) -
         '  "groups": [\n'
         "    {\n"
         '      "group_id": "problem-group-1",\n'
-        '      "topic": "트렌드",\n'
-        '      "insight_lens": "사용자의 행동에서 드러난 숨은 니즈를 정리",\n'
-        '      "conclusion": "키링을 통해 자신을 표현하려는 수요가 강하게 드러난다."\n'
+        '      "topic": "진입 장벽",\n'
+        '      "insight_lens": "사용 흐름의 마찰",\n'
+        '      "conclusion": "초기 사용자가 핵심 가치를 이해하기 전에 이탈할 가능성이 크다.",\n'
+        '      "source_child_item_ids": ["idea-1", "idea-3"]\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
         "[규칙]\n"
-        "- group_id는 입력값을 그대로 유지한다.\n"
-        "- topic은 draft_topic 재사용이 아니라, 묶음의 안건/아이디어/요약을 보고 다시 정제한 최종 주제명이어야 한다.\n"
+        "- group_id는 problem-group-1부터 순서대로 부여한다.\n"
+        "- source_child_item_ids는 입력 source_items에 존재하는 id만 사용한다.\n"
+        "- source_child_item_ids가 비어 있는 그룹은 만들지 않는다.\n"
         "- insight_lens는 이 묶음의 인사이트를 어떤 관점으로 정리했는지 설명하는 짧은 문구다.\n"
         "- insight_lens는 예를 들면 '행동에서 드러난 니즈', '의사결정 기준의 충돌', '실행 제약과 우선순위' 같은 식으로 쓴다.\n"
         "- insight_lens는 반드시 8~20자 이내의 짧은 한국어 구로 쓴다.\n"
@@ -2883,6 +2972,113 @@ def _build_problem_definition_prompt(topic: str, groups: list[dict[str, Any]]) -
         "- conclusion은 요약문 재인용이 아니라 새로 쓴 문장.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
+
+
+def _materialize_problem_definition_groups_from_llm(
+    base_groups: list[dict[str, Any]],
+    parsed_groups: list[Any],
+) -> list[dict[str, Any]]:
+    idea_by_id: dict[str, dict[str, Any]] = {}
+    meta_by_idea_id: dict[str, dict[str, Any]] = {}
+    keyword_by_idea_id: dict[str, list[str]] = {}
+    for group in base_groups:
+        for idea in group.get("ideas") or []:
+            if not isinstance(idea, dict):
+                continue
+            idea_id = _safe_text(idea.get("id"))
+            if not idea_id:
+                continue
+            idea_by_id[idea_id] = copy.deepcopy(idea)
+            meta_by_idea_id[idea_id] = {
+                "agenda_ids": [_safe_text(x) for x in (group.get("agenda_ids") or []) if _safe_text(x)],
+                "agenda_titles": [_safe_text(x) for x in (group.get("agenda_titles") or []) if _safe_text(x)],
+                "source_group_id": _safe_text(group.get("source_group_id")),
+                "source_group_title": _safe_text(group.get("source_group_title")),
+            }
+            keyword_by_idea_id[idea_id] = [_safe_text(x) for x in (group.get("keywords") or []) if _safe_text(x)]
+
+    if not idea_by_id:
+        return base_groups
+
+    used_source_ids: set[str] = set()
+    output: list[dict[str, Any]] = []
+
+    def build_group(index: int, raw_group: dict[str, Any] | None, source_ids: list[str]) -> dict[str, Any]:
+        source_ideas = [copy.deepcopy(idea_by_id[source_id]) for source_id in source_ids if source_id in idea_by_id]
+        agenda_ids: list[str] = []
+        agenda_titles: list[str] = []
+        source_group_ids: list[str] = []
+        source_group_titles: list[str] = []
+        keywords: list[str] = []
+        summaries: list[str] = []
+        for source_id in source_ids:
+            meta = meta_by_idea_id.get(source_id) or {}
+            agenda_ids.extend([_safe_text(x) for x in (meta.get("agenda_ids") or []) if _safe_text(x)])
+            agenda_titles.extend([_safe_text(x) for x in (meta.get("agenda_titles") or []) if _safe_text(x)])
+            source_group_ids.append(_safe_text(meta.get("source_group_id")))
+            source_group_titles.append(_safe_text(meta.get("source_group_title")))
+            keywords.extend(keyword_by_idea_id.get(source_id) or [])
+        for idea in source_ideas:
+            summaries.append(
+                _to_summary_point(
+                    " ".join([_safe_text(idea.get("title")), _safe_text(idea.get("body"))]).strip(),
+                    max_len=80,
+                )
+            )
+        agenda_ids = list(dict.fromkeys([item for item in agenda_ids if item]))
+        agenda_titles = list(dict.fromkeys([item for item in agenda_titles if item]))
+        source_group_ids = list(dict.fromkeys([item for item in source_group_ids if item]))
+        source_group_titles = list(dict.fromkeys([item for item in source_group_titles if item]))
+        keywords = list(dict.fromkeys([item for item in keywords if item]))[:6]
+        summaries = [_safe_text(item) for item in summaries if _safe_text(item)][:8]
+        topic_seed = _safe_text((raw_group or {}).get("topic"))
+        if not topic_seed and source_ideas:
+            topic_seed = _safe_text(source_ideas[0].get("title"))
+        return {
+            "group_id": _safe_text((raw_group or {}).get("group_id"), f"problem-group-{index}"),
+            "topic": _normalize_problem_topic_label(topic_seed, _safe_text(topic_seed, f"주제 {index}")),
+            "insight_lens": _safe_text((raw_group or {}).get("insight_lens"), "원본 아이디어의 공통 문제 관점"),
+            "keywords": keywords,
+            "agenda_ids": agenda_ids,
+            "agenda_titles": agenda_titles,
+            "source_group_id": source_group_ids[0] if source_group_ids else (agenda_ids[0] if agenda_ids else ""),
+            "source_group_title": source_group_titles[0] if source_group_titles else (agenda_titles[0] if agenda_titles else ""),
+            "ideas": source_ideas[:24],
+            "source_child_item_ids": source_ids,
+            "source_summary_items": summaries,
+            "conclusion": _safe_text((raw_group or {}).get("conclusion")) or (summaries[0] if summaries else f"{topic_seed} 방향 구체화"),
+        }
+
+    for raw_index, raw_group in enumerate(parsed_groups, start=1):
+        if not isinstance(raw_group, dict):
+            continue
+        source_ids = []
+        for raw_id in raw_group.get("source_child_item_ids") or []:
+            source_id = _safe_text(raw_id)
+            if source_id and source_id in idea_by_id and source_id not in used_source_ids:
+                used_source_ids.add(source_id)
+                source_ids.append(source_id)
+        if not source_ids:
+            continue
+        output.append(build_group(len(output) + 1, raw_group, source_ids))
+
+    for missing_id in idea_by_id:
+        if missing_id in used_source_ids:
+            continue
+        output.append(build_group(len(output) + 1, None, [missing_id]))
+
+    used_group_ids: set[str] = set()
+    for index, group in enumerate(output, start=1):
+        base_id = _safe_text(group.get("group_id"), f"problem-group-{index}")
+        next_id = base_id
+        suffix = 2
+        while next_id in used_group_ids:
+            next_id = f"{base_id}-{suffix}"
+            suffix += 1
+        used_group_ids.add(next_id)
+        group["group_id"] = next_id
+
+    return output or base_groups
 
 
 def _build_problem_group_conclusion_local(payload: ProblemConclusionGenerateInput) -> str:
@@ -7264,11 +7460,13 @@ def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
 
 
 def _canvas_idea_visible_target(workspace: dict[str, Any]) -> int:
-    return 3 + (_canvas_idea_create_stack_value(workspace) // 2)
+    source_count = max(1, _canvas_idea_create_stack_value(workspace))
+    return max(3, min(7, int(round(2 + math.log2(source_count)))))
 
 
 def _canvas_topic_cluster_target(workspace: dict[str, Any]) -> int:
-    return 3 + (_canvas_idea_create_stack_value(workspace) // 4)
+    source_count = max(1, _canvas_idea_create_stack_value(workspace))
+    return max(3, min(7, int(round(2 + math.log2(source_count)))))
 
 
 def _canvas_idea_compaction_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
@@ -7297,6 +7495,44 @@ def _pick_canvas_idea_compaction_pair(items: list[dict[str, Any]]) -> tuple[dict
             if score > best_score:
                 best_score = score
                 best_pair = (left, right)
+    return best_pair
+
+
+def _pick_similar_topic_child_idea_pair(
+    workspace: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], float] | None:
+    items = [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if _is_canvas_clusterable_item(item)
+        and _safe_text(item.get("kind"), "note") != "comment"
+        and not bool(item.get("user_edited"))
+        and _safe_text(item.get("parent_topic_id"))
+    ]
+    children_by_topic_id: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        children_by_topic_id.setdefault(_safe_text(item.get("parent_topic_id")), []).append(item)
+
+    best_pair: tuple[dict[str, Any], dict[str, Any], float] | None = None
+    best_score = -1.0
+    for topic_id, topic_children in children_by_topic_id.items():
+        if len(topic_children) < 2:
+            continue
+        ordered_child_ids = _canvas_topic_child_ids(workspace, topic_id)
+        order_by_id = {child_id: index for index, child_id in enumerate(ordered_child_ids)}
+        sorted_children = sorted(
+            topic_children,
+            key=lambda item: order_by_id.get(_safe_text(item.get("id")), 10**9),
+        )
+        for left_index, left in enumerate(sorted_children):
+            for right in sorted_children[left_index + 1 :]:
+                score = _canvas_idea_compaction_similarity(left, right)
+                if score > best_score:
+                    best_score = score
+                    best_pair = (left, right, score)
+
+    if not best_pair or best_score < CANVAS_TOPIC_CHILD_IDEA_MERGE_MIN_SCORE:
+        return None
     return best_pair
 
 
@@ -7455,7 +7691,29 @@ def _apply_canvas_idea_compaction_pair(
         for item in canvas_items
         if _safe_text(item.get("id")) != right_id
     ]
-    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+    next_parent_topic_id = _safe_text(parent.get("parent_topic_id"))
+    workspace["canvas_items"] = [
+        {
+            **item,
+            "child_item_ids": _dedup_preserve(
+                [
+                    left_id if _safe_text(child_id) == right_id else _safe_text(child_id)
+                    for child_id in (item.get("child_item_ids") or [])
+                    if _safe_text(child_id)
+                ]
+                + ([left_id] if _safe_text(item.get("id")) == next_parent_topic_id else []),
+                limit=400,
+            ),
+        }
+        if _is_canvas_topic_item(item)
+        else item
+        for item in workspace["canvas_items"]
+    ]
+    node_positions = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+    ideation_positions = dict(node_positions.get("ideation") or {})
+    ideation_positions.pop(f"canvas-item-{right_id}", None)
+    node_positions["ideation"] = ideation_positions
+    workspace["node_positions"] = node_positions
 
 
 def _maybe_compact_canvas_idea_nodes(workspace: dict[str, Any]) -> dict[str, Any]:
@@ -7479,6 +7737,28 @@ def _maybe_compact_canvas_idea_nodes(workspace: dict[str, Any]) -> dict[str, Any
         merged += 1
 
     return {"merged": merged, "target": target, "visible": len(_canvas_idea_visible_items(workspace))}
+
+
+def _maybe_merge_similar_topic_child_ideas(workspace: dict[str, Any]) -> dict[str, Any]:
+    merged = 0
+    last_score = 0.0
+    while merged < CANVAS_TOPIC_CHILD_IDEA_MERGE_MAX_MERGES_PER_JOB:
+        pair = _pick_similar_topic_child_idea_pair(workspace)
+        if not pair:
+            break
+        left, right, score = pair
+        update = _compute_idea_compaction_update(left, right)
+        if not update:
+            break
+        _apply_canvas_idea_compaction_pair(workspace, left, right, update)
+        merged += 1
+        last_score = score
+
+    return {
+        "merged": merged,
+        "threshold": CANVAS_TOPIC_CHILD_IDEA_MERGE_MIN_SCORE,
+        "last_score": round(last_score, 3) if last_score else 0,
+    }
 
 
 def _build_canvas_topic_clustering_prompt(
@@ -7512,9 +7792,10 @@ def _build_canvas_topic_clustering_prompt(
         "nodes": [node_payload(item) for item in candidate_items],
     }
     return (
-        "회의 canvas의 그룹 분류 바로 아래 1차 노드 수가 visibleTarget을 넘었다.\n"
+        "회의 canvas의 그룹 분류 바로 아래 1차 노드 수가 자동 계산된 visibleTarget을 넘었다.\n"
         "너는 아래 direct child 노드 중 의미가 가장 유사한 2개만 골라 계층적 topic으로 묶어야 한다.\n"
         "규칙:\n"
+        "- visibleTarget은 전체 아이디어 source 수를 기준으로 3~7 사이에서 자동 계산된 최적 1차 노드 목표다.\n"
         "- 카운트 기준은 topic node 개수가 아니라 그룹 분류 바로 아래에 있는 1차 노드 전체 개수다.\n"
         "- nodes는 모두 그룹 분류 바로 아래 direct child 후보이다.\n"
         "- 반드시 가장 유사한 2개만 pair로 반환한다. 3개 이상 선택 금지.\n"
@@ -8079,6 +8360,11 @@ def _finalize_canvas_idea_workspace_job(
         starting_create_stack = _canvas_idea_create_stack_value(latest_workspace)
         created_node_count = 0
         clustering_result: dict[str, Any] = {"changed": 0, "target": _canvas_topic_cluster_target(latest_workspace)}
+        topic_child_merge_result: dict[str, Any] = {
+            "merged": 0,
+            "threshold": CANVAS_TOPIC_CHILD_IDEA_MERGE_MIN_SCORE,
+            "last_score": 0,
+        }
 
         if not bool(result.get("used_llm")):
             positions = copy.deepcopy(latest_workspace.get("node_positions") or {})
@@ -8199,12 +8485,18 @@ def _finalize_canvas_idea_workspace_job(
 
         if created_node_count > 0:
             clustering_result = _maybe_cluster_canvas_topic_nodes(latest_workspace)
+            topic_child_merge_result = _maybe_merge_similar_topic_child_ideas(latest_workspace)
 
         _save_canvas_workspace_runtime(meeting_id, latest_workspace)
         clustered_count = _safe_nonnegative_int(clustering_result.get("changed"))
+        merged_child_count = _safe_nonnegative_int(topic_child_merge_result.get("merged"))
         detail = (
-            f"AI 아이디어 정리 완료 · {clustered_count}개 topic 분류 반영"
+            f"AI 아이디어 정리 완료 · {clustered_count}개 topic 분류, {merged_child_count}개 유사 아이디어 병합"
+            if clustered_count > 0 and merged_child_count > 0
+            else f"AI 아이디어 정리 완료 · {clustered_count}개 topic 분류 반영"
             if clustered_count > 0
+            else f"AI 아이디어 정리 완료 · {merged_child_count}개 유사 아이디어 병합"
+            if merged_child_count > 0
             else "AI 아이디어 정리 완료"
         )
         _mark_canvas_idea_job(
@@ -8830,6 +9122,7 @@ def get_canvas_problem_discussion_workspace_job(job_id: str, meeting_id: str):
 @app.post("/api/canvas/problem-definition")
 def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
+    normalized_source_group_id = _safe_text(payload.source_group_id) or "all"
     signature = _canvas_llm_signature(payload)
 
     def _compute() -> dict[str, Any]:
@@ -8852,24 +9145,7 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
                     )
                     parsed_groups = parsed.get("groups") if isinstance(parsed, dict) else None
                     if isinstance(parsed_groups, list):
-                        by_id = {
-                            _safe_text(item.get("group_id")): item
-                            for item in parsed_groups
-                            if isinstance(item, dict) and _safe_text(item.get("group_id"))
-                        }
-                        for group in groups:
-                            llm_item = by_id.get(_safe_text(group.get("group_id")))
-                            if not llm_item:
-                                continue
-                            llm_topic = _normalize_problem_topic_label(llm_item.get("topic"), _safe_text(group.get("topic"), "주제"))
-                            llm_insight_lens = _safe_text(llm_item.get("insight_lens"))
-                            llm_conclusion = _safe_text(llm_item.get("conclusion"))
-                            if llm_topic:
-                                group["topic"] = llm_topic
-                            if llm_insight_lens:
-                                group["insight_lens"] = llm_insight_lens
-                            if llm_conclusion:
-                                group["conclusion"] = llm_conclusion
+                        groups = _materialize_problem_definition_groups_from_llm(groups, parsed_groups)
                         used_llm = True
                         RT.last_llm_parsed_json = {
                             "stage": "canvas_problem_definition",
@@ -8893,7 +9169,7 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
     return _run_canvas_llm_cached_request(
         RT,
         normalized_meeting_id,
-        "problem_definition",
+        f"problem_definition:{normalized_source_group_id}",
         signature,
         _compute,
     )

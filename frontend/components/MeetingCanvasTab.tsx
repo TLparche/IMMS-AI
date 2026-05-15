@@ -82,7 +82,6 @@ type CanvasItemStatus = "discussion" | "confirmed" | "closed";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
-const CANVAS_ITEM_STATUSES: CanvasItemStatus[] = ["discussion", "confirmed", "closed"];
 const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
 const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
 const IDEA_ASSIMILATION_SILENCE_FLUSH_MS = 8_000;
@@ -248,7 +247,10 @@ function buildWorkspaceProblemGroupsPayload(groups: ProblemGroupViewModel[]) {
     keywords: group.keywords,
     agenda_ids: group.agenda_ids,
     agenda_titles: group.agenda_titles,
+    source_group_id: group.source_group_id || "",
+    source_group_title: group.source_group_title || "",
     ideas: group.ideas,
+    source_child_item_ids: group.source_child_item_ids || [],
     source_summary_items: group.source_summary_items,
     discussion_items: group.discussion_items || [],
     linked_group_ids: group.linked_group_ids || [],
@@ -676,6 +678,8 @@ type ProblemGroupDisplayCard = {
   cardKind: "summary" | "idea";
   sourceIndex: number;
   draggable: boolean;
+  depth?: number;
+  rootSourceNodeId?: string;
   ideaId?: string;
   summaryText?: string;
 };
@@ -1510,7 +1514,58 @@ function remapProblemSummaryDiscussionTargets(
   });
 }
 
-function buildProblemGroupDisplayCards(group: ProblemGroupViewModel): ProblemGroupDisplayCard[] {
+function buildProblemGroupDisplayCards(
+  group: ProblemGroupViewModel,
+  canvasItems?: CanvasItemViewModel[],
+): ProblemGroupDisplayCard[] {
+  if (canvasItems && (group.source_child_item_ids || []).length > 0) {
+    const itemById = new Map(canvasItems.map((item) => [item.id, item]));
+    const childItemsByParentId = new Map<string, CanvasItemViewModel[]>();
+    canvasItems.forEach((item) => {
+      if (!item.parent_topic_id) return;
+      const children = childItemsByParentId.get(item.parent_topic_id) || [];
+      children.push(item);
+      childItemsByParentId.set(item.parent_topic_id, children);
+    });
+
+    const cards: ProblemGroupDisplayCard[] = [];
+    const visitedIds = new Set<string>();
+    const appendItem = (item: CanvasItemViewModel, rootId: string, depth: number) => {
+      if (visitedIds.has(item.id)) return;
+      visitedIds.add(item.id);
+      cards.push({
+        id: item.id,
+        title: item.title || (isTopicCanvasItem(item) ? "토픽" : "아이디어"),
+        body: item.body || "내용 없음",
+        kind: item.kind || "note",
+        sourceNodeId: item.id,
+        sourceNodeKind: isTopicCanvasItem(item) ? "topic" : "idea",
+        attachable: true,
+        cardKind: "idea",
+        sourceIndex: cards.length,
+        draggable: false,
+        ideaId: item.id,
+        depth,
+        rootSourceNodeId: rootId,
+      });
+
+      orderProblemDefinitionChildren(item, childItemsByParentId).forEach((child) => {
+        appendItem(child, rootId, depth + 1);
+      });
+    };
+
+    (group.source_child_item_ids || []).forEach((itemId) => {
+      const rootItem = itemById.get(itemId);
+      if (rootItem) {
+        appendItem(rootItem, rootItem.id, 0);
+      }
+    });
+
+    if (cards.length > 0) {
+      return cards;
+    }
+  }
+
   const summaryCards = (group.source_summary_items || []).map((item, index) => {
     const sourceNodeId = makeProblemSummarySourceNodeId(group.group_id, index);
     const hasAttachedDiscussion = (group.discussion_items || []).some(
@@ -1583,6 +1638,11 @@ function hydrateProblemGroups(
     return {
       ...group,
       ideas: mergedIdeas,
+      source_group_id: group.source_group_id || previous?.source_group_id || group.agenda_ids?.[0] || "",
+      source_group_title: group.source_group_title || previous?.source_group_title || group.agenda_titles?.[0] || "",
+      source_child_item_ids: Object.prototype.hasOwnProperty.call(group, "source_child_item_ids")
+        ? [...new Set(group.source_child_item_ids || [])].filter(Boolean)
+        : previous?.source_child_item_ids || [],
       discussion_items: mergedDiscussions,
       insight_user_edited: group.insight_user_edited ?? previous?.insight_user_edited ?? false,
       conclusion_user_edited:
@@ -1646,23 +1706,6 @@ function buildProblemDefinitionAgendaInputs(agendaModels: AgendaViewModel[]) {
   }));
 }
 
-function buildProblemDefinitionIdeaBody(
-  item: CanvasItemViewModel,
-  childItems: CanvasItemViewModel[],
-) {
-  const childSummaries = childItems
-    .map((child) => [child.title, child.body].filter(Boolean).join(": ").trim())
-    .filter(Boolean)
-    .slice(0, 8);
-
-  return [
-    item.body || "",
-    childSummaries.length > 0 ? `하위 아이디어: ${childSummaries.join(" / ")}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
 function orderProblemDefinitionChildren(
   parent: CanvasItemViewModel,
   childItemsByParentId: Map<string, CanvasItemViewModel[]>,
@@ -1678,39 +1721,8 @@ function orderProblemDefinitionChildren(
   });
 }
 
-function collectProblemDefinitionDescendants(
-  item: CanvasItemViewModel,
-  childItemsByParentId: Map<string, CanvasItemViewModel[]>,
-  limit = 24,
-) {
-  const descendants: CanvasItemViewModel[] = [];
-  const visitedIds = new Set<string>();
-  const visit = (parent: CanvasItemViewModel) => {
-    if (descendants.length >= limit) return;
-    orderProblemDefinitionChildren(parent, childItemsByParentId).forEach((child) => {
-      if (descendants.length >= limit || visitedIds.has(child.id)) return;
-      visitedIds.add(child.id);
-      descendants.push(child);
-      visit(child);
-    });
-  };
-
-  visit(item);
-  return descendants;
-}
-
-function buildProblemDefinitionIdeaInputs(
-  canvasItems: CanvasItemViewModel[],
-  personalNotes: PersonalNote[],
-) {
+function buildProblemDefinitionIdeaInputs(canvasItems: CanvasItemViewModel[], targetAgendaId = "") {
   const itemById = new Map(canvasItems.map((item) => [item.id, item]));
-  const childItemsByParentId = new Map<string, CanvasItemViewModel[]>();
-  canvasItems.forEach((item) => {
-    if (!item.parent_topic_id) return;
-    const children = childItemsByParentId.get(item.parent_topic_id) || [];
-    children.push(item);
-    childItemsByParentId.set(item.parent_topic_id, children);
-  });
 
   const canvasIdeas = canvasItems
     .filter((item) => !item.parent_topic_id)
@@ -1719,14 +1731,12 @@ function buildProblemDefinitionIdeaInputs(
       agenda_id: resolveProblemDefinitionAgendaId(item, itemById),
       kind: item.kind || "note",
       title: item.title || "",
-      body: buildProblemDefinitionIdeaBody(
-        item,
-        collectProblemDefinitionDescendants(item, childItemsByParentId),
-      ),
+      body: item.body || "",
       ai_pending: Boolean(item.ai_pending),
     }))
     .filter((item) => (
       item.agenda_id &&
+      (!targetAgendaId || item.agenda_id === targetAgendaId) &&
       !item.ai_pending &&
       Boolean(item.title.trim() || item.body.trim())
     ))
@@ -1738,73 +1748,31 @@ function buildProblemDefinitionIdeaInputs(
       body: item.body,
     }));
 
-  const personalIdeas = personalNotes
-    .map((note) => ({
-      id: note.id,
-      agenda_id: note.agendaId,
-      kind: note.kind,
-      title: note.title,
-      body: note.body,
-    }))
-    .filter((item) => item.agenda_id && Boolean(item.title.trim() || item.body.trim()));
-
-  return [...canvasIdeas, ...personalIdeas];
+  return canvasIdeas;
 }
 
-function buildProblemDefinitionIdeaSourceSignatures(
-  canvasItems: CanvasItemViewModel[],
-  personalNotes: PersonalNote[],
-) {
+function buildProblemDefinitionIdeaSourceSignatures(canvasItems: CanvasItemViewModel[], targetAgendaId = "") {
   const signatures: Record<string, string> = {};
   const itemById = new Map(canvasItems.map((item) => [item.id, item]));
-  const childItemsByParentId = new Map<string, CanvasItemViewModel[]>();
-
-  canvasItems.forEach((item) => {
-    if (!item.parent_topic_id) return;
-    const children = childItemsByParentId.get(item.parent_topic_id) || [];
-    children.push(item);
-    childItemsByParentId.set(item.parent_topic_id, children);
-  });
 
   canvasItems
     .filter((item) => !item.parent_topic_id && !item.ai_pending)
     .forEach((item) => {
-      const descendants = collectProblemDefinitionDescendants(item, childItemsByParentId);
+      const agendaId = resolveProblemDefinitionAgendaId(item, itemById);
+      if (targetAgendaId && agendaId !== targetAgendaId) return;
+
       signatures[item.id] = makeStableSignature({
         root: {
           id: item.id,
-          agenda_id: resolveProblemDefinitionAgendaId(item, itemById),
+          agenda_id: agendaId,
           kind: item.kind || "note",
           title: item.title || "",
           body: item.body || "",
           keywords: item.keywords || [],
           child_item_ids: item.child_item_ids || [],
         },
-        descendants: descendants.map((child) => ({
-          id: child.id,
-          parent_topic_id: child.parent_topic_id || "",
-          kind: child.kind || "note",
-          title: child.title || "",
-          body: child.body || "",
-          keywords: child.keywords || [],
-          child_item_ids: child.child_item_ids || [],
-          compacted_from_ids: child.compacted_from_ids || [],
-          evidence_utterance_ids: child.evidence_utterance_ids || [],
-          ignored_utterance_ids: child.ignored_utterance_ids || [],
-        })),
       });
     });
-
-  personalNotes.forEach((note) => {
-    signatures[note.id] = makeStableSignature({
-      id: note.id,
-      agenda_id: note.agendaId,
-      kind: note.kind,
-      title: note.title,
-      body: note.body,
-      linked_canvas_item_id: note.linkedCanvasItemId || "",
-    });
-  });
 
   return signatures;
 }
@@ -1828,6 +1796,46 @@ function buildProblemDefinitionAgendaSignatures(
   return signatures;
 }
 
+function buildProblemDefinitionSourceGroupSignature(
+  agendaId: string,
+  ideaInputs: Array<{ id: string }>,
+  agendaSignatures: Record<string, string>,
+  ideaSignatures: Record<string, string>,
+) {
+  const sourceIdeaSignatures = Object.fromEntries(
+    ideaInputs
+      .map((idea) => [idea.id, ideaSignatures[idea.id] || ""] as const)
+      .filter(([, signature]) => Boolean(signature)),
+  );
+
+  return makeStableSignature({
+    agenda: agendaSignatures[agendaId] || "",
+    ideas: sourceIdeaSignatures,
+  });
+}
+
+function buildPreviousProblemSourceGroupSignature(
+  agendaId: string,
+  groups: ProblemGroupViewModel[],
+  currentIdeaIds: Set<string>,
+  agendaSignatures: Record<string, string>,
+) {
+  const sourceIdeaSignatures: Record<string, string> = {};
+  groups.forEach((group) => {
+    getProblemGroupSourceIdeaIds(group, currentIdeaIds).forEach((ideaId) => {
+      const signature = group.source_idea_signatures?.[ideaId] || "";
+      if (signature) {
+        sourceIdeaSignatures[ideaId] = signature;
+      }
+    });
+  });
+
+  return makeStableSignature({
+    agenda: agendaSignatures[agendaId] || "",
+    ideas: sourceIdeaSignatures,
+  });
+}
+
 function stampProblemGroupSource(
   group: ProblemGroupViewModel,
   agendaSignatures: Record<string, string>,
@@ -1839,8 +1847,8 @@ function stampProblemGroupSource(
       .filter(([, signature]) => Boolean(signature)),
   );
   const sourceIdeaSignatures = Object.fromEntries(
-    (group.ideas || [])
-      .map((idea) => [idea.id, ideaSignatures[idea.id] || ""] as const)
+    [...new Set([...(group.source_child_item_ids || []), ...(group.ideas || []).map((idea) => idea.id)])]
+      .map((ideaId) => [ideaId, ideaSignatures[ideaId] || ""] as const)
       .filter(([, signature]) => Boolean(signature)),
   );
 
@@ -1859,12 +1867,19 @@ function getProblemGroupSourceIdeaIds(
   group: ProblemGroupViewModel,
   currentIdeaIds: Set<string>,
 ) {
+  const sourceChildIds = (group.source_child_item_ids || []).filter((id) => currentIdeaIds.has(id));
+  if (sourceChildIds.length > 0) return sourceChildIds;
+
   const savedIdeaIds = Object.keys(group.source_idea_signatures || {}).filter((id) => currentIdeaIds.has(id));
   if (savedIdeaIds.length > 0) return savedIdeaIds;
 
   return (group.ideas || [])
     .map((idea) => idea.id)
     .filter((id) => currentIdeaIds.has(id));
+}
+
+function getProblemGroupSourceGroupId(group: ProblemGroupViewModel) {
+  return group.source_group_id || group.agenda_ids?.[0] || "__unassigned__";
 }
 
 function makeUniqueProblemGroupId(baseId: string, usedIds: Set<string>) {
@@ -1881,30 +1896,6 @@ function makeUniqueProblemGroupId(baseId: string, usedIds: Set<string>) {
   const nextId = `${normalizedBase}-${suffix}`;
   usedIds.add(nextId);
   return nextId;
-}
-
-function shouldRefreshProblemGroup(
-  group: ProblemGroupViewModel,
-  agendaSignatures: Record<string, string>,
-  agendaIdSet: Set<string>,
-  ideaSignatures: Record<string, string>,
-) {
-  const currentAgendaIds = (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId));
-  if (currentAgendaIds.length === 0) return false;
-
-  const savedIdeaSignatures = group.source_idea_signatures || {};
-  const savedIdeaIds = Object.keys(savedIdeaSignatures);
-  if (savedIdeaIds.length > 0) {
-    const hasChangedIdea = savedIdeaIds.some(
-      (ideaId) => savedIdeaSignatures[ideaId] !== ideaSignatures[ideaId],
-    );
-    if (hasChangedIdea) return true;
-  }
-
-  const savedSignatures = group.source_agenda_signatures || {};
-  if (!group.source_signature || Object.keys(savedSignatures).length === 0) return true;
-
-  return currentAgendaIds.some((agendaId) => savedSignatures[agendaId] !== agendaSignatures[agendaId]);
 }
 
 function safeDownload(filename: string, content: string, mime: string) {
@@ -2211,6 +2202,11 @@ function getCanvasIdeaCreateStackFallback(items: CanvasItemViewModel[]) {
   return items
     .filter((item) => item.ai_generated && !item.ai_pending && Boolean(item.title.trim() || item.body.trim()))
     .reduce((sum, item) => sum + getCanvasItemMergedSourceCount(item), 0);
+}
+
+function getOptimizedIdeationTarget(sourceCount: number) {
+  const safeSourceCount = Math.max(1, sourceCount);
+  return Math.max(3, Math.min(7, Math.round(2 + Math.log2(safeSourceCount))));
 }
 
 function getTopicChildCount(item: CanvasItemViewModel) {
@@ -3252,8 +3248,10 @@ function serializeSharedProblemGroups(groups: ProblemGroupViewModel[]) {
     agenda_ids: group.agenda_ids,
     agenda_titles: group.agenda_titles,
     ideas: group.ideas,
+    source_child_item_ids: group.source_child_item_ids || [],
     source_summary_items: group.source_summary_items,
     discussion_items: group.discussion_items || [],
+    linked_group_ids: group.linked_group_ids || [],
     conclusion: group.conclusion,
     conclusion_user_edited: group.conclusion_user_edited,
     status: group.status,
@@ -3865,7 +3863,7 @@ export default function MeetingCanvasTab({
   const [meetingGoalContextEditorDraft, setMeetingGoalContextEditorDraft] = useState(meetingGoalContext);
   const [meetingGoalSaving, setMeetingGoalSaving] = useState(false);
   const [conclusionRefreshingGroupId, setConclusionRefreshingGroupId] = useState("");
-  const [conclusionBatchBusy, setConclusionBatchBusy] = useState(false);
+  const conclusionBatchBusy = false;
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
   const [solutionStagePending, setSolutionStagePending] = useState(false);
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
@@ -4074,7 +4072,7 @@ export default function MeetingCanvasTab({
 
     return {
       directChildCount,
-      target: 3 + Math.floor(stack / 4),
+      target: getOptimizedIdeationTarget(stack),
     };
   }, [agendaModels, canvasItems, ideaCreateStack]);
   const activeMeetingGoal = meetingGoalDraft.trim();
@@ -5371,74 +5369,6 @@ export default function MeetingCanvasTab({
       setProblemGroupsLoading,
       sharedSyncEnabled,
     ],
-  );
-
-  const handleGenerateAllProblemGroupConclusions = useCallback(
-    async (groups: ProblemGroupViewModel[], targetGroupIds?: string[]) => {
-      if (groups.length === 0) return;
-
-      const targetGroupIdSet = targetGroupIds?.length ? new Set(targetGroupIds) : null;
-      const targetGroups = groups.filter(
-        (group) =>
-          (!targetGroupIdSet || targetGroupIdSet.has(group.group_id)) &&
-          !(group.insight_user_edited && group.conclusion_user_edited),
-      );
-      if (targetGroups.length === 0) {
-        setActivityMessage("모든 문제 정의 그룹의 Insight와 결론이 수동 수정 상태라 AI 재생성을 건너뜁니다.");
-        return;
-      }
-
-      setConclusionBatchBusy(true);
-      setProblemGroupsLoading(targetGroups.map((group) => group.group_id), true);
-      try {
-        let lastWarning = "";
-        let firstError = "";
-        let workingGroups = groups;
-
-        for (const group of targetGroups) {
-          try {
-            const result = await generateProblemGroupConclusion(buildProblemConclusionPayload(group));
-            workingGroups = workingGroups.map((item) =>
-              item.group_id === group.group_id
-                ? {
-                    ...item,
-                    conclusion: item.conclusion_user_edited
-                      ? item.conclusion
-                      : result.conclusion || item.conclusion,
-                    insight_lens: item.insight_user_edited
-                      ? item.insight_lens
-                      : (result.used_llm ? result.insight_lens : "") || item.insight_lens,
-                  }
-                : item,
-            );
-            setProblemGroups(workingGroups);
-            if (!sharedSyncEnabled) {
-              forceBroadcastSharedCanvas({
-                stage: "problem-definition",
-                problemGroups: workingGroups,
-              });
-            }
-            if (result.warning && !lastWarning) {
-              lastWarning = result.warning;
-            }
-          } catch (error) {
-            if (!firstError) {
-              firstError = error instanceof Error ? error.message : String(error);
-            }
-          } finally {
-            setProblemGroupsLoading([group.group_id], false);
-          }
-        }
-        setActivityMessage(
-          firstError
-            ? `전체 결론 생성 중 일부 실패: ${firstError}`
-            : lastWarning || `문제 정의 그룹 ${targetGroups.length}개의 결론을 생성했습니다.`,
-        );
-      } finally {
-        setConclusionBatchBusy(false);
-      }
-    },
-    [buildProblemConclusionPayload, forceBroadcastSharedCanvas, setProblemGroupsLoading, sharedSyncEnabled],
   );
 
   const handleAttachPersonalNoteToProblemGroup = useCallback((groupId: string, noteId: string) => {
@@ -7115,7 +7045,7 @@ export default function MeetingCanvasTab({
       const agendaTitleById = new Map(agendaModels.map((agenda) => [agenda.id, agenda.title] as const));
       const groupedProblemSections = new Map<string, ProblemGroupViewModel[]>();
       problemGroups.forEach((group) => {
-        const primaryAgendaId = group.agenda_ids?.[0] || "__unassigned__";
+        const primaryAgendaId = getProblemGroupSourceGroupId(group);
         const groups = groupedProblemSections.get(primaryAgendaId) || [];
         groups.push(group);
         groupedProblemSections.set(primaryAgendaId, groups);
@@ -7133,6 +7063,7 @@ export default function MeetingCanvasTab({
         const agendaNodeId = makeProblemAgendaCanvasNodeId(agendaId);
         const agendaTitle =
           agendaTitleById.get(agendaId) ||
+          groups[0]?.source_group_title ||
           groups[0]?.agenda_titles?.[0] ||
           (agendaId === "__unassigned__" ? "연결 그룹 없음" : "그룹분류");
         leftDescriptors.push({
@@ -7156,7 +7087,7 @@ export default function MeetingCanvasTab({
           const loading = loadingProblemGroupIds.includes(group.group_id);
           const dropTarget = dropProblemGroupId === group.group_id;
           const nodeId = `problem-${group.group_id}`;
-          const sourceCount = buildProblemGroupDisplayCards(group).length;
+          const sourceCount = buildProblemGroupDisplayCards(group, canvasItems).length;
           const opinionCount = (group.discussion_items || []).length;
           const nodeHeight = problemGroupHeightById.get(group.group_id) || estimateProblemTopicNodeHeight(group);
 
@@ -7224,7 +7155,7 @@ export default function MeetingCanvasTab({
         });
         nextLeftY += 22;
       });
-      const activeCards = activeGroup ? buildProblemGroupDisplayCards(activeGroup) : [];
+      const activeCards = activeGroup ? buildProblemGroupDisplayCards(activeGroup, canvasItems) : [];
       const activeCardHeights = activeCards.map((card) =>
         estimateProblemSourceCardNodeHeight(
           card,
@@ -7238,15 +7169,38 @@ export default function MeetingCanvasTab({
       const rightCardWidth = 320;
       const rightGapX = 24;
       const rightGapY = 24;
-      const rightColumns = 2;
-      const rightCardPositions = buildColumnPositions(
-        activeCardHeights,
-        rightColumns,
-        rightCardWidth + rightGapX,
-        rightGapY,
-        40,
-        72,
-      );
+      const rightCardPositions: Array<{ x: number; y: number }> = [];
+      let nextRightRowY = 72;
+      let currentRootId = "";
+      let currentRootY = 72;
+      let currentChildY = 72;
+      let currentRowBottom = 72;
+      activeCards.forEach((card, index) => {
+        const depth = Math.min(card.depth || 0, 2);
+        const height = activeCardHeights[index] || 170;
+        if (depth === 0 || card.rootSourceNodeId !== currentRootId) {
+          if (index > 0) {
+            nextRightRowY = currentRowBottom + rightGapY;
+          }
+          currentRootId = card.rootSourceNodeId || card.sourceNodeId;
+          currentRootY = nextRightRowY;
+          currentChildY = nextRightRowY;
+          currentRowBottom = nextRightRowY + height;
+          rightCardPositions.push({
+            x: 40,
+            y: currentRootY,
+          });
+          return;
+        }
+
+        const x = 40 + depth * (rightCardWidth + rightGapX);
+        rightCardPositions.push({
+          x,
+          y: currentChildY,
+        });
+        currentChildY += height + Math.max(12, rightGapY - 8);
+        currentRowBottom = Math.max(currentRowBottom, currentChildY - Math.max(12, rightGapY - 8));
+      });
       const rightCardsBottom = rightCardPositions.reduce(
         (bottom, position, index) => Math.max(bottom, position.y + (activeCardHeights[index] || 0)),
         72,
@@ -7254,7 +7208,7 @@ export default function MeetingCanvasTab({
       const discussionBaseY = rightCardsBottom + (activeLooseDiscussions.length > 0 ? 48 : 0);
       const rightDiscussionPositions = buildColumnPositions(
         activeLooseDiscussionHeights,
-        rightColumns,
+        2,
         340 + rightGapX,
         rightGapY,
         40,
@@ -7272,6 +7226,7 @@ export default function MeetingCanvasTab({
             group.insight_lens || "",
             group.conclusion || "",
             ...(group.linked_group_ids || []),
+            ...(group.source_child_item_ids || []),
             ...(group.source_summary_items || []),
             ...(group.ideas || []).flatMap((idea) => [idea.id, idea.kind, idea.title, idea.body]),
             ...(group.discussion_items || []).flatMap((item) => [
@@ -7311,6 +7266,8 @@ export default function MeetingCanvasTab({
                       card.body,
                       card.cardKind,
                       card.sourceNodeKind,
+                      card.depth || 0,
+                      card.rootSourceNodeId || "",
                       selectedProblemSourceNodeId === card.sourceNodeId,
                       problemIdeaDrag?.sourceGroupId,
                       problemIdeaDrag?.sourceNodeId,
@@ -8907,8 +8864,8 @@ export default function MeetingCanvasTab({
     [problemGroups, selectedProblemGroupId],
   );
   const selectedProblemSourceCards = useMemo(
-    () => (selectedProblemGroup ? buildProblemGroupDisplayCards(selectedProblemGroup).filter((card) => card.attachable) : []),
-    [selectedProblemGroup],
+    () => (selectedProblemGroup ? buildProblemGroupDisplayCards(selectedProblemGroup, canvasItems).filter((card) => card.attachable) : []),
+    [canvasItems, selectedProblemGroup],
   );
   const selectedProblemSourceCard = useMemo(
     () => selectedProblemSourceCards.find((card) => card.sourceNodeId === selectedProblemSourceNodeId) || null,
@@ -8998,7 +8955,7 @@ export default function MeetingCanvasTab({
         badges: [
           problemGroupStatusLabel(selectedGroup.status),
           `${selectedGroup.agenda_titles.length}개 안건`,
-          `${selectedGroup.ideas.length}개 메모`,
+          `${selectedGroup.source_child_item_ids?.length || selectedGroup.ideas.length}개 원본`,
           selectedGroup.insight_user_edited ? "Insight 수동 수정" : "",
           selectedGroup.conclusion_user_edited ? "결론 수동 수정" : "",
         ].filter(Boolean),
@@ -9016,8 +8973,8 @@ export default function MeetingCanvasTab({
             value: selectedGroup.agenda_titles.length > 0 ? selectedGroup.agenda_titles.join(", ") : "연결된 안건이 아직 없습니다.",
           },
           {
-            label: "메모 수",
-            value: `${selectedGroup.ideas.length}개`,
+            label: "원본 수",
+            value: `${selectedGroup.source_child_item_ids?.length || selectedGroup.ideas.length}개`,
           },
           {
             label: "속한 의견",
@@ -9214,175 +9171,163 @@ export default function MeetingCanvasTab({
     setBusy(true);
     try {
       const agendaInputs = buildProblemDefinitionAgendaInputs(agendaModels);
-      const ideaInputs = buildProblemDefinitionIdeaInputs(canvasItems, projectPersonalNotes);
+      const agendaInputById = new Map(agendaInputs.map((agenda) => [agenda.agenda_id, agenda] as const));
+      const ideaInputs = buildProblemDefinitionIdeaInputs(canvasItems);
       const agendaSignatures = buildProblemDefinitionAgendaSignatures(agendaModels);
-      const ideaSignatures = buildProblemDefinitionIdeaSourceSignatures(canvasItems, projectPersonalNotes);
-      const agendaById = new Map(agendaInputs.map((agenda) => [agenda.agenda_id, agenda]));
-      const agendaIdSet = new Set(agendaInputs.map((agenda) => agenda.agenda_id));
+      const ideaSignatures = buildProblemDefinitionIdeaSourceSignatures(canvasItems);
       const ideaIdSet = new Set(ideaInputs.map((idea) => idea.id));
-      const ideasForTarget = (agendaIds: string[], ideaIds?: string[]) => {
-        if (ideaIds?.length) {
-          const targetIdeaIds = new Set(ideaIds);
-          return ideaInputs.filter((idea) => targetIdeaIds.has(idea.id));
-        }
-        const targetAgendaIds = new Set(agendaIds);
-        return ideaInputs.filter((idea) => targetAgendaIds.has(idea.agenda_id));
+      const currentAgendaIds = new Set(agendaModels.map((agenda) => agenda.id));
+      const previousGroupsBySourceGroupId = new Map<string, ProblemGroupViewModel[]>();
+      problemGroups.forEach((group) => {
+        const sourceGroupId = getProblemGroupSourceGroupId(group);
+        const groups = previousGroupsBySourceGroupId.get(sourceGroupId) || [];
+        groups.push(group);
+        previousGroupsBySourceGroupId.set(sourceGroupId, groups);
+      });
+      const sourceKeyForGroup = (group: ProblemGroupViewModel) =>
+        getProblemGroupSourceIdeaIds(group, ideaIdSet).sort().join("|");
+      const previousBySourceKey = new Map(
+        problemGroups
+          .map((group) => [sourceKeyForGroup(group), group] as const)
+          .filter(([sourceKey]) => Boolean(sourceKey)),
+      );
+      const previousTargetedDiscussions = problemGroups.flatMap((group) =>
+        (group.discussion_items || []).filter((item) => item.target_node_id),
+      );
+      const usedGroupIds = new Set<string>();
+      const nextGroups: ProblemGroupViewModel[] = [];
+      const warnings: string[] = [];
+      let requestedGroupCount = 0;
+      let unchangedGroupCount = 0;
+
+      const appendProblemGroups = (groups: ProblemGroupViewModel[]) => {
+        groups.forEach((group) => {
+          const nextGroupId = makeUniqueProblemGroupId(group.group_id || "problem-group", usedGroupIds);
+          nextGroups.push(
+            nextGroupId === group.group_id
+              ? group
+              : {
+                  ...group,
+                  group_id: nextGroupId,
+                },
+          );
+        });
       };
 
-      let nextGroups: ProblemGroupViewModel[] = [];
-      let refreshedGroupIds: string[] = [];
-      let warning = "";
+      for (const agenda of agendaModels) {
+        const agendaInput = agendaInputById.get(agenda.id);
+        if (!agendaInput) continue;
 
-      if (problemGroups.length === 0) {
+        const sourceGroupIdeaInputs = buildProblemDefinitionIdeaInputs(canvasItems, agenda.id);
+        const previousSourceGroups = previousGroupsBySourceGroupId.get(agenda.id) || [];
+        if (sourceGroupIdeaInputs.length === 0) {
+          continue;
+        }
+
+        const currentSourceSignature = buildProblemDefinitionSourceGroupSignature(
+          agenda.id,
+          sourceGroupIdeaInputs,
+          agendaSignatures,
+          ideaSignatures,
+        );
+        const previousSourceSignature = buildPreviousProblemSourceGroupSignature(
+          agenda.id,
+          previousSourceGroups,
+          ideaIdSet,
+          agendaSignatures,
+        );
+
+        if (previousSourceGroups.length > 0 && currentSourceSignature === previousSourceSignature) {
+          unchangedGroupCount += 1;
+          appendProblemGroups(
+            previousSourceGroups.map((group) =>
+              stampProblemGroupSource(
+                {
+                  ...group,
+                  source_group_id: group.source_group_id || agenda.id,
+                  source_group_title: group.source_group_title || agenda.title,
+                },
+                agendaSignatures,
+                ideaSignatures,
+              ),
+            ),
+          );
+          continue;
+        }
+
+        requestedGroupCount += 1;
+        setActivityMessage(
+          `"${agenda.title}" 그룹분류의 1차 아이디어 ${sourceGroupIdeaInputs.length}개를 문제정의로 재분류하는 중입니다.`,
+        );
+
         const result = await generateCanvasProblemDefinition({
           meeting_id: meetingId,
           topic: meetingTopicForAi,
-          agendas: agendaInputs,
-          ideas: ideaInputs,
+          agendas: [agendaInput],
+          source_group_id: agenda.id,
+          source_group_title: agenda.title,
+          ideas: sourceGroupIdeaInputs,
         });
-        warning = result.warning || "";
-        nextGroups = hydrateProblemGroups(result.groups, []).map((group) =>
-          stampProblemGroupSource(group, agendaSignatures, ideaSignatures),
-        );
-        refreshedGroupIds = nextGroups.map((group) => group.group_id);
-      } else {
-        let workingGroups = problemGroups.filter((group) => {
-          const groupAgendaIds = group.agenda_ids || [];
-          if (groupAgendaIds.length === 0) return true;
-          return groupAgendaIds.some((agendaId) => agendaIdSet.has(agendaId));
-        });
-        const usedGroupIds = new Set(workingGroups.map((group) => group.group_id));
-        const refreshTargets: Array<{
-          agendaIds: string[];
-          ideaIds?: string[];
-          previousGroup?: ProblemGroupViewModel;
-        }> = [];
-        const coveredIdeaIds = new Set<string>();
-
-        workingGroups.forEach((group) => {
-          const agendaIds = (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId));
-          const sourceIdeaIds = getProblemGroupSourceIdeaIds(group, ideaIdSet);
-          if (sourceIdeaIds.length > 0) {
-            sourceIdeaIds.forEach((ideaId) => coveredIdeaIds.add(ideaId));
-          } else {
-            const agendaFallbackIds = new Set(agendaIds);
-            ideaInputs
-              .filter((idea) => agendaFallbackIds.has(idea.agenda_id))
-              .forEach((idea) => coveredIdeaIds.add(idea.id));
-          }
-
-          if (shouldRefreshProblemGroup(group, agendaSignatures, agendaIdSet, ideaSignatures)) {
-            refreshTargets.push({
-              agendaIds,
-              ideaIds: sourceIdeaIds.length > 0 ? sourceIdeaIds : undefined,
-              previousGroup: group,
-            });
-          }
-        });
-
-        const coveredAgendaIds = new Set(
-          workingGroups.flatMap((group) => (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId))),
-        );
-        const agendaFallbackTargetIds = new Set<string>();
-        agendaInputs.forEach((agenda) => {
-          if (!coveredAgendaIds.has(agenda.agenda_id)) {
-            refreshTargets.push({
-              agendaIds: [agenda.agenda_id],
-            });
-            agendaFallbackTargetIds.add(agenda.agenda_id);
-          }
-        });
-        const uncoveredIdeaIdsByAgenda = new Map<string, string[]>();
-        ideaInputs.forEach((idea) => {
-          if (coveredIdeaIds.has(idea.id) || agendaFallbackTargetIds.has(idea.agenda_id)) return;
-          const ids = uncoveredIdeaIdsByAgenda.get(idea.agenda_id) || [];
-          ids.push(idea.id);
-          uncoveredIdeaIdsByAgenda.set(idea.agenda_id, ids);
-        });
-        uncoveredIdeaIdsByAgenda.forEach((ideaIds, agendaId) => {
-          if (!agendaById.has(agendaId)) return;
-          refreshTargets.push({
-            agendaIds: [agendaId],
-            ideaIds,
-          });
-        });
-
-        for (const target of refreshTargets) {
-          const targetAgendas = target.agendaIds
-            .map((agendaId) => agendaById.get(agendaId))
-            .filter((agenda): agenda is ReturnType<typeof buildProblemDefinitionAgendaInputs>[number] => Boolean(agenda));
-          if (targetAgendas.length === 0) continue;
-          const targetIdeas = ideasForTarget(target.agendaIds, target.ideaIds);
-          if (target.previousGroup && target.ideaIds?.length && targetIdeas.length === 0) {
-            workingGroups = workingGroups.filter((group) => group.group_id !== target.previousGroup?.group_id);
-            refreshedGroupIds.push(target.previousGroup.group_id);
-            continue;
-          }
-
-          const result = await generateCanvasProblemDefinition({
-            meeting_id: meetingId,
-            topic: meetingTopicForAi,
-            agendas: targetAgendas,
-            ideas: targetIdeas,
-          });
-          if (result.warning && !warning) {
-            warning = result.warning;
-          }
-
-          const generatedGroups = hydrateProblemGroups(result.groups, []).map((group, index) => {
-            const previousGroup = index === 0 ? target.previousGroup : undefined;
-            const nextGroupId =
-              previousGroup?.group_id ||
-              makeUniqueProblemGroupId(
-                group.group_id || `problem-group-${group.agenda_ids[0] || target.agendaIds[0] || Date.now()}`,
-                usedGroupIds,
-              );
-            const mergedGroup: ProblemGroupViewModel = {
-              ...group,
-              group_id: nextGroupId,
-              insight_lens: previousGroup?.insight_user_edited
-                ? previousGroup.insight_lens
-                : group.insight_lens,
-              insight_user_edited: previousGroup?.insight_user_edited ?? group.insight_user_edited ?? false,
-              conclusion: previousGroup?.conclusion_user_edited
-                ? previousGroup.conclusion
-                : group.conclusion,
-              conclusion_user_edited:
-                previousGroup?.conclusion_user_edited ?? group.conclusion_user_edited ?? false,
-              status: "draft",
-            };
-            return stampProblemGroupSource(mergedGroup, agendaSignatures, ideaSignatures);
-          });
-
-          if (target.previousGroup) {
-            const replacement = generatedGroups[0];
-            if (replacement) {
-              workingGroups = workingGroups.map((group) =>
-                group.group_id === target.previousGroup?.group_id ? replacement : group,
-              );
-              refreshedGroupIds.push(replacement.group_id);
-            }
-            if (generatedGroups.length > 1) {
-              const extras = generatedGroups.slice(1);
-              workingGroups = [...workingGroups, ...extras];
-              refreshedGroupIds.push(...extras.map((group) => group.group_id));
-            }
-          } else if (generatedGroups.length > 0) {
-            workingGroups = [...workingGroups, ...generatedGroups];
-            refreshedGroupIds.push(...generatedGroups.map((group) => group.group_id));
-          }
+        if (result.warning) {
+          warnings.push(`${agenda.title}: ${result.warning}`);
         }
 
-        nextGroups = workingGroups.map((group) =>
-          refreshedGroupIds.includes(group.group_id)
-            ? group
-            : stampProblemGroupSource(group, agendaSignatures, ideaSignatures),
-        );
+        const hydratedGroups = hydrateProblemGroups(result.groups, previousSourceGroups);
+        const generatedGroups = hydratedGroups.map((group, index) => {
+          const generatedSourceIds = getProblemGroupSourceIdeaIds(group, ideaIdSet);
+          const generatedSourceIdSet = new Set(generatedSourceIds);
+          const generatedSourceKey = [...generatedSourceIds].sort().join("|");
+          const previousGroup = previousBySourceKey.get(generatedSourceKey);
+          const baseGroupId =
+            previousGroup?.group_id ||
+            group.group_id ||
+            `${agenda.id}-problem-group-${index + 1}`;
+          const nextGroupId = makeUniqueProblemGroupId(baseGroupId, usedGroupIds);
+
+          const mergedGroup: ProblemGroupViewModel = {
+            ...group,
+            group_id: nextGroupId,
+            source_group_id: agenda.id,
+            source_group_title: agenda.title,
+            insight_lens: previousGroup?.insight_user_edited
+              ? previousGroup.insight_lens
+              : group.insight_lens,
+            insight_user_edited: previousGroup?.insight_user_edited ?? group.insight_user_edited ?? false,
+            conclusion: previousGroup?.conclusion_user_edited
+              ? previousGroup.conclusion
+              : group.conclusion,
+            conclusion_user_edited:
+              previousGroup?.conclusion_user_edited ?? group.conclusion_user_edited ?? false,
+            discussion_items:
+              previousGroup?.discussion_items ||
+              previousTargetedDiscussions
+                .filter((item) => item.target_node_id && generatedSourceIdSet.has(item.target_node_id))
+                .map((item) => ({
+                  ...item,
+                  parent_group_id: nextGroupId,
+                })) ||
+              group.discussion_items ||
+              [],
+            linked_group_ids: previousGroup?.linked_group_ids || group.linked_group_ids || [],
+            status: previousGroup?.status || "draft",
+          };
+          return stampProblemGroupSource(mergedGroup, agendaSignatures, ideaSignatures);
+        });
+        nextGroups.push(...generatedGroups);
       }
+
+      const orphanGroups = problemGroups.filter(
+        (group) => !currentAgendaIds.has(getProblemGroupSourceGroupId(group)),
+      );
+      appendProblemGroups(orphanGroups);
+
+      const refreshedGroupIds = nextGroups.map((group) => group.group_id);
 
       problemConclusionEntryHandledRef.current = false;
       setProblemGroups(nextGroups);
-      const nextSelectedGroupId = refreshedGroupIds[0] || nextGroups[0]?.group_id || "";
+      const nextSelectedGroupId = refreshedGroupIds.includes(selectedProblemGroupId)
+        ? selectedProblemGroupId
+        : refreshedGroupIds[0] || nextGroups[0]?.group_id || "";
       setSelectedProblemGroupId(nextSelectedGroupId);
       setSelectedSolutionTopicId("");
       setSelectedNodeId(nextSelectedGroupId ? `problem-${nextSelectedGroupId}` : "");
@@ -9396,15 +9341,11 @@ export default function MeetingCanvasTab({
         });
       }
       setActivityMessage(
-        warning ||
-          (refreshedGroupIds.length > 0
-            ? `변경된 그룹분류 ${refreshedGroupIds.length}개만 문제 정의를 갱신했습니다.`
-            : "변경된 그룹분류가 없어 기존 문제 정의를 유지했습니다."),
+        warnings[0] ||
+          (requestedGroupCount > 0
+            ? `그룹분류 ${requestedGroupCount}개를 재요청하고 ${unchangedGroupCount}개는 기존 문제정의를 유지했습니다.`
+            : `변경된 그룹분류가 없어 기존 문제정의 ${nextGroups.length}개를 유지했습니다.`),
       );
-      if (refreshedGroupIds.length > 0) {
-        problemConclusionEntryHandledRef.current = true;
-        await handleGenerateAllProblemGroupConclusions(nextGroups, refreshedGroupIds);
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setActivityMessage(`문제 정의 생성 실패: ${message}`);
@@ -9416,11 +9357,10 @@ export default function MeetingCanvasTab({
     agendaModels,
     canvasItems,
     forceBroadcastSharedCanvas,
-    handleGenerateAllProblemGroupConclusions,
     meetingId,
     meetingTopicForAi,
-    projectPersonalNotes,
     problemGroups,
+    selectedProblemGroupId,
     sharedSyncEnabled,
   ]);
 
@@ -9734,6 +9674,7 @@ export default function MeetingCanvasTab({
           agenda_ids: [],
           agenda_titles: [],
           ideas: [],
+          source_child_item_ids: [],
           discussion_items: [],
           source_summary_items: [],
           conclusion: "직접 추가한 문제정의 그룹입니다. 관련 의견을 드래그해서 편입해 주세요.",
@@ -11654,50 +11595,6 @@ export default function MeetingCanvasTab({
     }
   };
 
-  const handleSetCanvasItemStatus = (
-    status: CanvasItemStatus,
-    targetItemId = selectedCanvasItem?.id || "",
-    selectAfterChange = true,
-  ) => {
-    const targetItem = canvasItems.find((item) => item.id === targetItemId) || null;
-    if (!targetItem || targetItem.parent_topic_id) return;
-
-    const nextStatus = normalizeCanvasItemStatus(status);
-    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
-      item.id === targetItem.id
-        ? {
-            ...item,
-            status: nextStatus,
-            user_edited: true,
-          }
-        : item,
-    );
-
-    setCanvasItems(nextCanvasItemsSnapshot);
-    if (selectAfterChange) {
-      setSelectedCanvasItemId(targetItem.id);
-      setSelectedNodeId(`canvas-item-${targetItem.id}`);
-    }
-    setActivityMessage(`공용 canvas 아이템 상태를 "${canvasItemStatusLabel(nextStatus)}"로 변경했습니다.`);
-
-    if (sharedSyncEnabled) {
-      latestSharedWorkspaceRef.current = {
-        ...latestSharedWorkspaceRef.current,
-        canvasItems: nextCanvasItemsSnapshot,
-        importedState: persistedSharedImportedState,
-      };
-      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
-      if (meetingId) {
-        void saveCanvasWorkspacePatch({
-          meeting_id: meetingId,
-          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-        }).catch((error) => {
-          console.error("Failed to save shared canvas item status:", error);
-        });
-      }
-    }
-  };
-
   const handleExtractCanvasItemKeywords = (targetItemId?: string) => {
     if (isEditingSelectedCanvasItem) return;
 
@@ -12460,7 +12357,7 @@ export default function MeetingCanvasTab({
 
     const problemGroupIds = new Set(problemGroups.map((group) => group.group_id));
     const agendaEdges = problemGroups.map((group): Edge => {
-      const primaryAgendaId = group.agenda_ids?.[0] || "__unassigned__";
+      const primaryAgendaId = getProblemGroupSourceGroupId(group);
       return {
         id: `problem-agenda-edge::${primaryAgendaId}::${group.group_id}`,
         source: makeProblemAgendaCanvasNodeId(primaryAgendaId),

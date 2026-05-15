@@ -206,12 +206,15 @@ export interface CanvasProblemDefinitionGroup {
   keywords: string[];
   agenda_ids: string[];
   agenda_titles: string[];
+  source_group_id?: string;
+  source_group_title?: string;
   ideas: Array<{
     id: string;
     kind: string;
     title: string;
     body: string;
   }>;
+  source_child_item_ids?: string[];
   discussion_items?: CanvasProblemDiscussionItem[];
   linked_group_ids?: string[];
   source_summary_items: string[];
@@ -371,12 +374,16 @@ export interface CanvasWorkspaceProblemGroup {
   keywords: string[];
   agenda_ids: string[];
   agenda_titles: string[];
+  source_group_id?: string;
+  source_group_title?: string;
   ideas: Array<{
     id: string;
     kind: string;
     title: string;
     body: string;
   }>;
+  source_child_item_ids?: string[];
+  linked_group_ids?: string[];
   discussion_items?: CanvasProblemDiscussionItem[];
   source_summary_items: string[];
   conclusion: string;

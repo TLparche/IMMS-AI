@@ -141,6 +141,8 @@ export async function generateCanvasProblemDefinition(payload: {
     keywords: string[];
     summary_bullets: string[];
   }>;
+  source_group_id?: string;
+  source_group_title?: string;
   ideas: Array<{
     id: string;
     agenda_id: string;
