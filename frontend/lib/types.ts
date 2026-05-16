@@ -102,6 +102,19 @@ export interface AiTasksResponse {
   policies: AiTaskPolicy[];
 }
 
+export interface AiTaskResponseFields extends Partial<AiTaskPolicy> {
+  task_id?: string;
+  cache_key?: string;
+  status?: string;
+  stale_reason?: string;
+  retryable?: boolean;
+  activity_type?: string;
+  activity_line?: string;
+  cache_hit?: boolean;
+  deduped?: boolean;
+  detail?: string;
+}
+
 export interface AgendaActionReason {
   turn_id?: number;
   speaker: string;
@@ -318,7 +331,7 @@ export interface CanvasProblemDiscussionItem {
   created_at?: string;
 }
 
-export interface CanvasProblemDefinitionResponse {
+export interface CanvasProblemDefinitionResponse extends AiTaskResponseFields {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -337,7 +350,7 @@ export interface CanvasPersonalNote {
   body: string;
 }
 
-export interface CanvasProblemConclusionResponse {
+export interface CanvasProblemConclusionResponse extends AiTaskResponseFields {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -651,7 +664,7 @@ export interface CanvasFinalSolutionSummary {
   markdown: string;
 }
 
-export interface MeetingGoalSuggestionResponse {
+export interface MeetingGoalSuggestionResponse extends AiTaskResponseFields {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -706,7 +719,7 @@ export interface CanvasSolutionTopicResponse {
   }>;
 }
 
-export interface CanvasSolutionStageResponse {
+export interface CanvasSolutionStageResponse extends AiTaskResponseFields {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -714,7 +727,7 @@ export interface CanvasSolutionStageResponse {
   topics: CanvasSolutionTopicResponse[];
 }
 
-export interface CanvasIdeationSuggestionResponse {
+export interface CanvasIdeationSuggestionResponse extends AiTaskResponseFields {
   ok: boolean;
   used_llm: boolean;
   warning?: string;

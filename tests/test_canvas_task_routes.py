@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import threading
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -9,7 +10,13 @@ from backend.api import (
     _append_canvas_operation_log_from_change,
     _canvas_activity_events_from_new_operations,
     _canvas_activity_line_from_activity_events,
+    _finish_canvas_llm_inflight_entry_locked,
+    _has_newer_canvas_task_scope_record,
+    _mark_canvas_task_record,
+    _run_canvas_task_cached_request,
+    _supersede_older_canvas_task_scope_records,
     app,
+    RuntimeStore,
 )
 
 
@@ -187,6 +194,135 @@ class CanvasTaskRouteSmokeTest(unittest.TestCase):
         self.assertLessEqual(len(filtered["tasks"]), 1)
         self.assertTrue(all(task["task_type"] == "problem.definition" for task in filtered["tasks"]))
         self.assertEqual(filtered["filters"]["task_type"], ["problem.definition"])
+
+    def test_newer_same_scope_task_supersedes_older_active_task(self) -> None:
+        rt = RuntimeStore()
+        meeting_id = f"task-supersede-{uuid4().hex}"
+        scope_key = "problem_definition:agenda-1"
+        task_type = "problem.definition"
+
+        _mark_canvas_task_record(
+            rt,
+            meeting_id,
+            "old-task",
+            task_type=task_type,
+            scope_key=scope_key,
+            status="processing",
+            target_signature="old-signature",
+            created_epoch=1.0,
+        )
+        _mark_canvas_task_record(
+            rt,
+            meeting_id,
+            "new-task",
+            task_type=task_type,
+            scope_key=scope_key,
+            status="processing",
+            target_signature="new-signature",
+            created_epoch=2.0,
+        )
+
+        superseded_count = _supersede_older_canvas_task_scope_records(
+            rt,
+            meeting_id,
+            "new-task",
+            task_type,
+            scope_key,
+            "new-signature",
+        )
+
+        self.assertEqual(superseded_count, 1)
+        old_record = rt.canvas_task_records_by_meeting[meeting_id]["old-task"]
+        new_record = rt.canvas_task_records_by_meeting[meeting_id]["new-task"]
+        self.assertEqual(old_record["status"], "stale_superseded")
+        self.assertEqual(old_record["stale_reason"], "superseded")
+        self.assertEqual(new_record["status"], "processing")
+        self.assertTrue(
+            _has_newer_canvas_task_scope_record(
+                rt,
+                meeting_id,
+                "old-task",
+                task_type,
+                scope_key,
+                "old-signature",
+            )
+        )
+        self.assertFalse(
+            _has_newer_canvas_task_scope_record(
+                rt,
+                meeting_id,
+                "new-task",
+                task_type,
+                scope_key,
+                "new-signature",
+            )
+        )
+
+    def test_llm_inflight_completion_preserves_newer_signature_entry(self) -> None:
+        rt = RuntimeStore()
+        meeting_id = f"inflight-{uuid4().hex}"
+        cache_key = "problem.definition:agenda-1"
+        old_event = threading.Event()
+        new_event = threading.Event()
+
+        with rt.lock:
+            rt.canvas_llm_inflight_by_meeting[meeting_id] = {
+                cache_key: {"signature": "new-signature", "event": new_event, "error": ""},
+            }
+            _finish_canvas_llm_inflight_entry_locked(
+                rt,
+                meeting_id,
+                cache_key,
+                "old-signature",
+                old_event,
+            )
+
+        self.assertTrue(old_event.is_set())
+        self.assertFalse(new_event.is_set())
+        self.assertIs(rt.canvas_llm_inflight_by_meeting[meeting_id][cache_key]["event"], new_event)
+
+    def test_superseded_task_response_is_marked_stale(self) -> None:
+        rt = RuntimeStore()
+        meeting_id = f"stale-response-{uuid4().hex}"
+        scope_key = "ideation-assimilate:latest"
+
+        def compute() -> dict:
+            records = rt.canvas_task_records_by_meeting[meeting_id]
+            old_task_id, old_record = next(iter(records.items()))
+            _mark_canvas_task_record(
+                rt,
+                meeting_id,
+                "new-task",
+                task_type="ideation.assimilate",
+                scope_key=scope_key,
+                status="processing",
+                target_signature="new-signature",
+                created_epoch=float(old_record["created_epoch"]) + 1.0,
+            )
+            _supersede_older_canvas_task_scope_records(
+                rt,
+                meeting_id,
+                "new-task",
+                "ideation.assimilate",
+                scope_key,
+                "new-signature",
+            )
+            self.assertEqual(records[old_task_id]["status"], "stale_superseded")
+            return {"ok": True, "used_llm": False, "generated_at": "now"}
+
+        response = _run_canvas_task_cached_request(
+            rt,
+            "ideation.assimilate",
+            meeting_id,
+            scope_key,
+            "old-signature",
+            compute,
+        )
+
+        self.assertEqual(response["status"], "stale_superseded")
+        self.assertEqual(response["stale_reason"], "superseded")
+        self.assertFalse(response["retryable"])
+        self.assertIn("적용하지 않았습니다", response["warning"])
 
     def test_operation_log_summarizes_node_names_for_merge(self) -> None:
         previous_workspace = {

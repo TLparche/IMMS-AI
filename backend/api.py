@@ -2127,6 +2127,117 @@ def _mark_canvas_task_record(
         return _upsert_canvas_task_record_locked(rt, meeting_id, task_id, **fields)
 
 
+def _is_active_canvas_task_status(status: str) -> bool:
+    return _safe_text(status) in {"queued", "processing"}
+
+
+def _canvas_task_record_matches_scope(record: dict[str, Any], task_type: str, scope_key: str) -> bool:
+    return (
+        _safe_text(record.get("task_type")) == _safe_text(task_type)
+        and _safe_text(record.get("scope_key")) == _safe_text(scope_key, "default")
+    )
+
+
+def _supersede_older_canvas_task_scope_records(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    current_task_id: str,
+    task_type: str,
+    scope_key: str,
+    input_signature: str,
+) -> int:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_current_task_id = _safe_text(current_task_id)
+    normalized_task_type = _safe_text(task_type, "generic")
+    normalized_scope_key = _safe_text(scope_key, "default")
+    normalized_signature = _safe_text(input_signature)
+    if not normalized_meeting_id or not normalized_current_task_id:
+        return 0
+
+    stale_detail = "더 최신 AI 요청으로 대체되었습니다."
+    superseded_count = 0
+    with rt.lock:
+        records = rt.canvas_task_records_by_meeting.get(normalized_meeting_id)
+        if not isinstance(records, dict):
+            return 0
+        current = records.get(normalized_current_task_id)
+        if not isinstance(current, dict):
+            return 0
+        current_epoch = float(current.get("created_epoch") or time.time())
+        for task_id, record in list(records.items()):
+            if task_id == normalized_current_task_id or not isinstance(record, dict):
+                continue
+            if not _canvas_task_record_matches_scope(record, normalized_task_type, normalized_scope_key):
+                continue
+            if not _is_active_canvas_task_status(_safe_text(record.get("status"))):
+                continue
+            if _safe_text(record.get("target_signature")) == normalized_signature:
+                continue
+            record_epoch = float(record.get("created_epoch") or 0)
+            if record_epoch > current_epoch:
+                continue
+            _upsert_canvas_task_record_locked(
+                rt,
+                normalized_meeting_id,
+                task_id,
+                status="stale_superseded",
+                stale_reason="superseded",
+                retryable=False,
+                detail=stale_detail,
+                warning=stale_detail,
+            )
+            superseded_count += 1
+    return superseded_count
+
+
+def _has_newer_canvas_task_scope_record(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    current_task_id: str,
+    task_type: str,
+    scope_key: str,
+    input_signature: str,
+) -> bool:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_current_task_id = _safe_text(current_task_id)
+    normalized_task_type = _safe_text(task_type, "generic")
+    normalized_scope_key = _safe_text(scope_key, "default")
+    normalized_signature = _safe_text(input_signature)
+    if not normalized_meeting_id or not normalized_current_task_id:
+        return False
+
+    with rt.lock:
+        records = rt.canvas_task_records_by_meeting.get(normalized_meeting_id)
+        if not isinstance(records, dict):
+            return False
+        current = records.get(normalized_current_task_id)
+        if not isinstance(current, dict):
+            return False
+        current_status = _safe_text(current.get("status"))
+        if current_status.startswith("stale_"):
+            return True
+        current_epoch = float(current.get("created_epoch") or 0)
+        for task_id, record in records.items():
+            if task_id == normalized_current_task_id or not isinstance(record, dict):
+                continue
+            if not _canvas_task_record_matches_scope(record, normalized_task_type, normalized_scope_key):
+                continue
+            if _safe_text(record.get("target_signature")) == normalized_signature:
+                continue
+            if _safe_text(record.get("status")) not in {
+                "queued",
+                "processing",
+                "completed",
+                "error",
+                "error_retryable",
+                "error_final",
+            }:
+                continue
+            if float(record.get("created_epoch") or 0) > current_epoch:
+                return True
+    return False
+
+
 def _normalize_canvas_task_activity_events(raw_events: Any, limit: int = 12) -> list[dict[str, Any]]:
     if not isinstance(raw_events, list):
         return []
@@ -2317,6 +2428,14 @@ def _run_canvas_task_cached_request(
         status="processing",
         detail="AI task 처리 중",
     )
+    _supersede_older_canvas_task_scope_records(
+        rt,
+        normalized_meeting_id,
+        task_id,
+        policy.task_type,
+        normalized_scope_key,
+        input_signature,
+    )
     task_meta: dict[str, Any] = {}
     try:
         if policy.cache_policy == "none":
@@ -2343,7 +2462,47 @@ def _run_canvas_task_cached_request(
         )
         raise
 
-    _mark_canvas_task_record(
+    if _has_newer_canvas_task_scope_record(
+        rt,
+        normalized_meeting_id,
+        task_id,
+        policy.task_type,
+        normalized_scope_key,
+        input_signature,
+    ):
+        stale_detail = "더 최신 AI 요청으로 대체되어 결과를 적용하지 않았습니다."
+        stale_record = _mark_canvas_task_record(
+            rt,
+            normalized_meeting_id,
+            task_id,
+            status="stale_superseded",
+            stale_reason="superseded",
+            retryable=False,
+            activity_type=_canvas_task_activity_type(policy.task_type),
+            detail=stale_detail,
+            warning=stale_detail,
+            cache_hit=bool(task_meta.get("cache_hit")),
+            deduped=bool(task_meta.get("deduped")),
+        )
+        if isinstance(result, dict):
+            return {
+                **result,
+                **_canvas_task_job_fields(policy.task_type),
+                "task_id": task_id,
+                "cache_key": cache_key,
+                "cache_hit": bool(task_meta.get("cache_hit")),
+                "deduped": bool(task_meta.get("deduped")),
+                "status": "stale_superseded",
+                "stale_reason": "superseded",
+                "retryable": False,
+                "activity_type": _canvas_task_activity_type(policy.task_type),
+                "activity_line": _safe_text(stale_record.get("activity_line")),
+                "warning": stale_detail,
+                "detail": stale_detail,
+            }
+        return result
+
+    completed_record = _mark_canvas_task_record(
         rt,
         normalized_meeting_id,
         task_id,
@@ -2356,14 +2515,16 @@ def _run_canvas_task_cached_request(
     )
     if isinstance(result, dict):
         return {
+            **result,
             **_canvas_task_job_fields(policy.task_type),
             "task_id": task_id,
             "cache_key": cache_key,
             "cache_hit": bool(task_meta.get("cache_hit")),
             "deduped": bool(task_meta.get("deduped")),
+            "status": _safe_text(completed_record.get("status"), "completed"),
             "activity_type": _canvas_task_activity_type(policy.task_type),
-            "activity_line": _canvas_task_activity_line(policy.task_type, "completed"),
-            **result,
+            "activity_line": _safe_text(completed_record.get("activity_line"))
+            or _canvas_task_activity_line(policy.task_type, "completed"),
         }
     return result
 
@@ -2453,6 +2614,35 @@ def _get_canvas_llm_inflight_entry(
         return None
     entry = meeting_entries.get(_safe_text(cache_key))
     return entry if isinstance(entry, dict) else None
+
+
+def _finish_canvas_llm_inflight_entry_locked(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    cache_key: str,
+    signature: str,
+    event: threading.Event | None,
+    error: str = "",
+) -> None:
+    if event is None:
+        return
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_cache_key = _safe_text(cache_key)
+    normalized_signature = _safe_text(signature)
+    meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
+    inflight = meeting_entries.get(normalized_cache_key)
+    is_current_inflight = (
+        isinstance(inflight, dict)
+        and _safe_text(inflight.get("signature")) == normalized_signature
+        and inflight.get("event") is event
+    )
+    if is_current_inflight:
+        if error:
+            inflight["error"] = error
+        meeting_entries.pop(normalized_cache_key, None)
+        if not meeting_entries:
+            rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+    event.set()
 
 
 def _run_canvas_llm_cached_request(
@@ -2549,13 +2739,14 @@ def _run_canvas_llm_cached_request(
                 result = compute()
         except Exception as exc:
             with rt.lock:
-                meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
-                inflight = meeting_entries.pop(normalized_cache_key, None)
-                if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
-                    inflight["error"] = str(exc)
-                    inflight["event"].set()
-                if not meeting_entries:
-                    rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+                _finish_canvas_llm_inflight_entry_locked(
+                    rt,
+                    normalized_meeting_id,
+                    normalized_cache_key,
+                    normalized_signature,
+                    wait_event,
+                    str(exc),
+                )
             raise
 
         workspace_snapshot: dict[str, Any] | None = None
@@ -2570,12 +2761,13 @@ def _run_canvas_llm_cached_request(
             workspace_snapshot = copy.deepcopy(
                 _ensure_canvas_workspace_entry(rt, normalized_meeting_id),
             )
-            meeting_entries = rt.canvas_llm_inflight_by_meeting.get(normalized_meeting_id) or {}
-            inflight = meeting_entries.pop(normalized_cache_key, None)
-            if isinstance(inflight, dict) and isinstance(inflight.get("event"), threading.Event):
-                inflight["event"].set()
-            if not meeting_entries:
-                rt.canvas_llm_inflight_by_meeting.pop(normalized_meeting_id, None)
+            _finish_canvas_llm_inflight_entry_locked(
+                rt,
+                normalized_meeting_id,
+                normalized_cache_key,
+                normalized_signature,
+                wait_event,
+            )
         if workspace_snapshot:
             _save_canvas_workspace_to_db(normalized_meeting_id, workspace_snapshot)
         return copy.deepcopy(result)

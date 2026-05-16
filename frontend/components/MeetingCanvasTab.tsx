@@ -215,6 +215,14 @@ function isCanvasJobStaleStatus(status: string) {
   return status === "stale" || status.startsWith("stale_");
 }
 
+function isStaleAiTaskResponse(response?: { status?: string } | null) {
+  return isCanvasJobStaleStatus(response?.status || "");
+}
+
+function staleAiTaskResponseMessage(response: { activity_line?: string; warning?: string; detail?: string }, fallback: string) {
+  return response.activity_line || response.warning || response.detail || fallback;
+}
+
 function logCanvasIdeaAssimilationJob(
   label: string,
   job: CanvasIdeaAssimilationJobSnapshot | undefined | null,
@@ -5736,6 +5744,13 @@ export default function MeetingCanvasTab({
       setConclusionRefreshingGroupId(group.group_id);
       try {
         const result = await generateProblemGroupConclusion(buildProblemConclusionPayload(group));
+        if (isStaleAiTaskResponse(result)) {
+          setActivityMessage(
+            staleAiTaskResponseMessage(result, "더 최신 결론 요청이 있어 이전 응답을 적용하지 않았습니다."),
+          );
+          void refreshAiTasks({ silent: true });
+          return;
+        }
         let nextGroups: ProblemGroupViewModel[] = [];
         setProblemGroups((prev) => {
           nextGroups = prev.map((item) =>
@@ -5783,6 +5798,7 @@ export default function MeetingCanvasTab({
       buildProblemConclusionPayload,
       editingProblemGroupId,
       forceBroadcastSharedCanvas,
+      refreshAiTasks,
       setProblemGroupsLoading,
       sharedSyncEnabled,
     ],
@@ -7285,6 +7301,13 @@ export default function MeetingCanvasTab({
             },
           ],
         });
+        if (isStaleAiTaskResponse(result)) {
+          setActivityMessage(
+            staleAiTaskResponseMessage(result, "더 최신 해결책 추천 요청이 있어 이전 응답을 적용하지 않았습니다."),
+          );
+          void refreshAiTasks({ silent: true });
+          return;
+        }
         const generatedTopic = hydrateSolutionTopics(result.topics || [], problemGroups, [targetTopic])
           .find((topic) => topic.group_id === topicId);
 
@@ -7342,7 +7365,7 @@ export default function MeetingCanvasTab({
         setSolutionSuggestionBusyTopicId("");
       }
     },
-    [meetingId, meetingTopicForAi, problemGroups, solutionTopics],
+    [meetingId, meetingTopicForAi, problemGroups, refreshAiTasks, solutionTopics],
   );
 
   const handlePruneSolutionSuggestions = useCallback(
@@ -9726,6 +9749,13 @@ export default function MeetingCanvasTab({
           source_group_title: agenda.title,
           ideas: sourceGroupIdeaInputs,
         });
+        if (isStaleAiTaskResponse(result)) {
+          setActivityMessage(
+            staleAiTaskResponseMessage(result, "더 최신 문제정의 요청이 있어 이전 응답을 적용하지 않았습니다."),
+          );
+          void refreshAiTasks({ silent: true });
+          return;
+        }
         if (result.warning) {
           warnings.push(`${agenda.title}: ${result.warning}`);
         }
@@ -9818,6 +9848,7 @@ export default function MeetingCanvasTab({
     meetingId,
     meetingTopicForAi,
     problemGroups,
+    refreshAiTasks,
     selectedProblemGroupId,
     sharedSyncEnabled,
   ]);
@@ -9849,6 +9880,13 @@ export default function MeetingCanvasTab({
           conclusion: group.conclusion,
         })),
       });
+      if (isStaleAiTaskResponse(result)) {
+        setActivityMessage(
+          staleAiTaskResponseMessage(result, "더 최신 해결책 생성 요청이 있어 이전 응답을 적용하지 않았습니다."),
+        );
+        void refreshAiTasks({ silent: true });
+        return;
+      }
       const nextSolutionTopics = hydrateSolutionTopics(result.topics, problemGroups, solutionTopics);
       setSolutionTopics(nextSolutionTopics);
       setSelectedSolutionTopicId(nextSolutionTopics[0]?.group_id || "");
@@ -13280,6 +13318,13 @@ export default function MeetingCanvasTab({
           keywords: item.keywords || [],
         })),
       });
+      if (isStaleAiTaskResponse(result)) {
+        setActivityMessage(
+          staleAiTaskResponseMessage(result, "더 최신 아이디어 추천 요청이 있어 이전 응답을 적용하지 않았습니다."),
+        );
+        void refreshAiTasks({ silent: true });
+        return;
+      }
       const existingByText = new Map(
         (rootItem.ai_suggestions || []).map((suggestion) => [suggestion.text.trim(), suggestion]),
       );
