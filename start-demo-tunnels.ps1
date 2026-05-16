@@ -172,6 +172,60 @@ function Start-TunnelWithRetry {
   throw "$Name tunnel 생성에 실패했습니다. Cloudflare quick tunnel이 일시적으로 500을 반환했을 수 있습니다."
 }
 
+function Wait-HttpReady {
+  param(
+    [string]$Name,
+    [string]$Url,
+    [int]$TimeoutSeconds = 30
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+      if ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 500) {
+        Write-Host "$Name is ready: $Url"
+        return
+      }
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+
+  throw "$Name health check failed: $Url"
+}
+
+function Test-CorsPreflight {
+  param(
+    [string]$Name,
+    [string]$Url,
+    [string]$Origin
+  )
+
+  try {
+    $response = Invoke-WebRequest `
+      -Uri $Url `
+      -Method Options `
+      -Headers @{
+        "Origin" = $Origin
+        "Access-Control-Request-Method" = "GET"
+        "Access-Control-Request-Headers" = "authorization"
+      } `
+      -UseBasicParsing `
+      -TimeoutSec 10
+
+    $allowOrigin = $response.Headers["Access-Control-Allow-Origin"]
+    if ($allowOrigin -eq $Origin) {
+      Write-Host "$Name CORS preflight OK: $allowOrigin"
+      return
+    }
+
+    Write-Warning "$Name CORS preflight did not return the expected origin. Expected=$Origin Actual=$allowOrigin"
+  } catch {
+    Write-Warning "$Name CORS preflight failed: $($_.Exception.Message)"
+  }
+}
+
 function Stop-StartedProcesses {
   param([object[]]$Started)
 
@@ -225,6 +279,8 @@ try {
   $started += $gatewayProcess
 
   Start-Sleep -Seconds 2
+  Wait-HttpReady -Name "backend" -Url "http://localhost:$BackendPort/api/health" -TimeoutSeconds 30
+  Wait-HttpReady -Name "gateway" -Url "http://localhost:$GatewayPort/gateway/health" -TimeoutSeconds 30
 
   $gatewayTunnelProcess = Start-TunnelWithRetry `
     -Name "gateway" `
@@ -248,6 +304,15 @@ try {
 
   $gatewayTunnel = $gatewayTunnelProcess.Url
   $backendTunnel = $backendTunnelProcess.Url
+  $gatewayBaseUrl = if ($gatewayTunnel) { "$gatewayTunnel/gateway" } else { "" }
+  $gatewayWsUrl = if ($gatewayTunnel) { "$($gatewayTunnel -replace '^https://', 'wss://')/gateway/ws" } else { "" }
+
+  if ($gatewayTunnel) {
+    Test-CorsPreflight `
+      -Name "gateway tunnel" `
+      -Url "$gatewayTunnel/gateway/meetings" `
+      -Origin "https://imms-ai.vercel.app"
+  }
 
   Write-Host ""
   Write-Host "==== Demo Tunnel URLs ===="
@@ -255,12 +320,8 @@ try {
   Write-Host "BACKEND_TUNNEL_URL=$backendTunnel"
   Write-Host ""
   Write-Host "Vercel 환경변수에 넣을 때는 보통:"
-  Write-Host "NEXT_PUBLIC_GATEWAY_URL=$gatewayTunnel"
-  if ($gatewayTunnel) {
-    Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL=$($gatewayTunnel -replace '^https://', 'wss://')/gateway/ws"
-  } else {
-    Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL="
-  }
+  Write-Host "NEXT_PUBLIC_GATEWAY_URL=$gatewayBaseUrl"
+  Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL=$gatewayWsUrl"
   Write-Host "NEXT_PUBLIC_API_BASE_URL=$backendTunnel"
   Write-Host ""
   Write-Host "backend/gateway는 --reload로 실행 중입니다. Python 코드 변경은 이 창을 끄지 않으면 자동 반영됩니다."
