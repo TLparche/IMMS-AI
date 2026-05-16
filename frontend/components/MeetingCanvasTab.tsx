@@ -2260,6 +2260,8 @@ const IDEATION_LEFT_VISIBLE_MAX_DEPTH = IDEATION_LEFT_VISIBLE_LEVELS - 1;
 const IDEATION_LEFT_NODE_HEIGHT = 96;
 const IDEATION_LEFT_ROOT_NODE_HEIGHT = 108;
 const IDEATION_LEFT_NODE_GAP_Y = 10;
+const IDEATION_LEFT_ROOT_NODE_GAP_Y = 8;
+const IDEATION_LEFT_CHILD_SECTION_GAP_Y = 26;
 const IDEATION_LEFT_DEPTH_INDENT = 22;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
@@ -8536,6 +8538,9 @@ export default function MeetingCanvasTab({
         IDEATION_LEFT_VISIBLE_MAX_DEPTH,
         ideationLeftExpandedTopicIds,
       );
+      const rootHierarchyItems = hierarchyItems.filter(({ depth }) => depth === 0);
+      const expandedHierarchyItems = hierarchyItems.filter(({ depth }) => depth > 0);
+      const leftLayoutItems = [...rootHierarchyItems, ...expandedHierarchyItems];
       const descendantIdsByItem = new Map(
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
@@ -8543,17 +8548,22 @@ export default function MeetingCanvasTab({
         ? getCanvasItemDirectChildItems(rightCanvasItems, activeFocusItem.id)
         : [];
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
-      const leftHeights = hierarchyItems.map(({ depth }) =>
+      const leftHeights = leftLayoutItems.map(({ depth }) =>
         depth === 0 ? IDEATION_LEFT_ROOT_NODE_HEIGHT : IDEATION_LEFT_NODE_HEIGHT,
       );
       const leftPositions: Array<{ x: number; y: number }> = [];
       let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
-      leftHeights.forEach((height) => {
+      leftHeights.forEach((height, index) => {
+        const currentLayoutItem = leftLayoutItems[index];
+        const previousLayoutItem = leftLayoutItems[index - 1];
+        if (currentLayoutItem?.depth > 0 && previousLayoutItem?.depth === 0) {
+          nextLeftY += IDEATION_LEFT_CHILD_SECTION_GAP_Y;
+        }
         leftPositions.push({
           x: CANVAS_IDEATION_LEFT_X + 20,
           y: nextLeftY,
         });
-        nextLeftY += height + IDEATION_LEFT_NODE_GAP_Y;
+        nextLeftY += height + (currentLayoutItem?.depth === 0 ? IDEATION_LEFT_ROOT_NODE_GAP_Y : IDEATION_LEFT_NODE_GAP_Y);
       });
 
       const rightUsesGroupSelector = !activeFocusItem;
@@ -8599,7 +8609,8 @@ export default function MeetingCanvasTab({
             contentSignature: buildNodeContentSignature([
               "ideation-left-frame",
               selectedAgendaForIdeation,
-              hierarchyItems.length,
+              rootHierarchyItems.length,
+              expandedHierarchyItems.length,
               frameHeight,
             ]),
             label: makeIdeationFrameLabel(
@@ -8607,7 +8618,9 @@ export default function MeetingCanvasTab({
               selectedAgendaModel
                 ? `${selectedAgendaModel.title}의 1~${IDEATION_LEFT_VISIBLE_LEVELS}차 구조`
                 : "그룹분류를 선택해 주세요.",
-              `${hierarchyItems.length}개`,
+              expandedHierarchyItems.length > 0
+                ? `1차 ${rootHierarchyItems.length}개 · 펼침 ${expandedHierarchyItems.length}개`
+                : `1차 ${rootHierarchyItems.length}개`,
             ),
           },
         },
@@ -8640,7 +8653,7 @@ export default function MeetingCanvasTab({
           },
         },
       ];
-      const leftGroupDescriptors: CanvasNodeDescriptor[] = hierarchyItems.map(({ item, depth }, index) => {
+      const leftGroupDescriptors: CanvasNodeDescriptor[] = leftLayoutItems.map(({ item, depth }, index) => {
         const descendantIds = descendantIdsByItem.get(item.id) || [];
         const directChildItems = getCanvasItemDirectChildItems(canvasItems, item.id);
         const childItems = directChildItems.slice(0, 3);
