@@ -1348,6 +1348,7 @@ def _normalize_canvas_merged_children(raw_children: Any, limit: int = 80, depth:
                 _safe_text(value) for value in (raw.get("compacted_from_ids") or []) if _safe_text(value)
             ][:400],
             "compaction_level": _safe_nonnegative_int(raw.get("compaction_level")),
+            "auto_summary_disabled": bool(raw.get("auto_summary_disabled")),
             "ai_generated": bool(raw.get("ai_generated")),
             "user_edited": bool(raw.get("user_edited")),
         }
@@ -1417,6 +1418,7 @@ def _normalize_canvas_workspace_items(
             "parent_topic_locked": bool(item.parent_topic_locked),
             "child_item_ids": [_safe_text(value) for value in (item.child_item_ids or []) if _safe_text(value)][:400],
             "topic_collapsed": bool(item.topic_collapsed),
+            "auto_summary_disabled": bool(item.auto_summary_disabled),
             "created_by": _safe_text(item.created_by) if _safe_text(item.created_by) in {"ai", "user"} else "",
             "manual_position": False,
             "ai_generated": bool(item.ai_generated),
@@ -2491,6 +2493,7 @@ class CanvasIdeaAssimilationIdeaInput(BaseModel):
     key_evidence: list[str] = Field(default_factory=list)
     refined_utterances: list[CanvasRefinedUtteranceInput] = Field(default_factory=list)
     evidence_utterance_ids: list[str] = Field(default_factory=list)
+    auto_summary_disabled: bool = False
     user_edited: bool = False
 
 
@@ -2592,6 +2595,7 @@ class CanvasWorkspaceCanvasItemInput(BaseModel):
     parent_topic_locked: bool = False
     child_item_ids: list[str] = Field(default_factory=list)
     topic_collapsed: bool = False
+    auto_summary_disabled: bool = False
     created_by: str = ""
     manual_position: bool = False
     ai_generated: bool = False
@@ -3147,6 +3151,7 @@ def _idea_assimilation_existing_idea_dict(item: CanvasIdeaAssimilationIdeaInput)
         "evidence_utterance_ids": [
             _safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)
         ][:40],
+        "auto_summary_disabled": bool(item.auto_summary_disabled),
         "user_edited": bool(item.user_edited),
     }
 
@@ -3396,7 +3401,7 @@ def _build_idea_assimilation_prompt(payload: CanvasIdeaAssimilationInput) -> str
         "- refinedUtterances는 content에서 빠지면 summary 의미가 바뀌는 발화만 포함한다.\n"
         "- 기존 아이디어와 의미가 매우 같을 때만 merge한다. 단순 키워드 1개 겹침, 같은 안건, 같은 화자라는 이유만으로 merge하지 않는다.\n"
         "- merge 확신이 낮거나 기존 아이디어와 핵심 대상/방향이 다르면 반드시 create를 사용한다.\n"
-        "- user_edited가 true인 기존 아이디어는 제목과 요약을 덮어쓰지 않도록 merge 대상으로 삼더라도 근거/키워드 보강 중심으로 응답한다.\n\n"
+        "- auto_summary_disabled가 true인 기존 아이디어는 제목/요약/키워드를 덮어쓰지 않도록 merge 대상으로 삼더라도 근거 보강 중심으로 응답한다.\n\n"
         "[입력 JSON]\n"
         f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}\n\n"
         "[출력 JSON 스키마]\n"
@@ -7688,6 +7693,7 @@ def _canvas_idea_existing_ideas_from_workspace(
                 evidence_utterance_ids=[
                     _safe_text(value) for value in (item.get("evidence_utterance_ids") or []) if _safe_text(value)
                 ],
+                auto_summary_disabled=bool(item.get("auto_summary_disabled")),
                 user_edited=bool(item.get("user_edited")),
             )
         )
@@ -7903,6 +7909,8 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
     target_signature = _safe_text(job.get("target_signature"))
     if target_signature:
         response["target_signature"] = target_signature
+    if isinstance(job.get("patch"), dict):
+        response["patch"] = copy.deepcopy(job.get("patch"))
     return response
 
 
@@ -7951,7 +7959,7 @@ def _canvas_problem_job_response(job: dict[str, Any], workspace: dict[str, Any] 
 
 
 def _apply_idea_update_to_canvas_item(item: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
-    user_edited = bool(item.get("user_edited"))
+    auto_summary_disabled = bool(item.get("auto_summary_disabled"))
     next_evidence_ids = _dedup_preserve(
         [_safe_text(value) for value in (item.get("evidence_utterance_ids") or [])]
         + [_safe_text(value) for value in (update.get("evidenceUtteranceIds") or [])],
@@ -7967,16 +7975,13 @@ def _apply_idea_update_to_canvas_item(item: dict[str, Any], update: dict[str, An
         f"{item.get('title') or ''} {item.get('body') or ''}",
         8,
     )
+    preserved_keywords = [_safe_text(value) for value in (item.get("keywords") or []) if _safe_text(value)][:8]
     update_keywords = _normalize_idea_keywords(
         update.get("keywords") or [],
         f"{update.get('title') or ''} {update.get('summary') or ''}",
         8,
     )
-    next_keywords = (
-        _dedup_preserve(existing_keywords + update_keywords, limit=8)
-        if user_edited
-        else (update_keywords or existing_keywords)
-    )
+    next_keywords = preserved_keywords if auto_summary_disabled else (update_keywords or existing_keywords)
     next_key_evidence = _dedup_preserve(
         [_safe_text(value) for value in (item.get("key_evidence") or [])]
         + [_safe_text(value) for value in (update.get("keyEvidence") or [])],
@@ -7988,8 +7993,8 @@ def _apply_idea_update_to_canvas_item(item: dict[str, Any], update: dict[str, An
     )
     next_item = {
         **item,
-        "title": _safe_text(item.get("title")) if user_edited else (_safe_text(update.get("title")) or _safe_text(item.get("title"))),
-        "body": _safe_text(item.get("body")) if user_edited else (_safe_text(update.get("summary")) or _safe_text(item.get("body"))),
+        "title": _safe_text(item.get("title")) if auto_summary_disabled else (_safe_text(update.get("title")) or _safe_text(item.get("title"))),
+        "body": _safe_text(item.get("body")) if auto_summary_disabled else (_safe_text(update.get("summary")) or _safe_text(item.get("body"))),
         "keywords": next_keywords,
         "key_evidence": next_key_evidence,
         "refined_utterances": next_refined,
@@ -8089,6 +8094,7 @@ def _canvas_idea_child_snapshot(item: dict[str, Any]) -> dict[str, Any]:
         "merged_children": _normalize_canvas_merged_children(item.get("merged_children") or []),
         "compacted_from_ids": _canvas_idea_leaf_ids(item),
         "compaction_level": _safe_nonnegative_int(item.get("compaction_level")),
+        "auto_summary_disabled": bool(item.get("auto_summary_disabled")),
         "ai_generated": bool(item.get("ai_generated")),
         "user_edited": bool(item.get("user_edited")),
     }
@@ -8125,7 +8131,7 @@ def _is_canvas_topic_clustering_candidate(item: dict[str, Any]) -> bool:
         _is_canvas_clusterable_item(item)
         or (
             _is_canvas_topic_item(item)
-            and not bool(item.get("user_edited"))
+            and not bool(item.get("auto_summary_disabled"))
             and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
         )
     )
@@ -8465,7 +8471,7 @@ def _run_queued_canvas_topic_summary_retry(
             **item,
             "ai_pending": True,
             "ai_generated": True,
-            "user_edited": False,
+            "user_edited": bool(item.get("user_edited")),
         }
         if _safe_text(item.get("id")) == topic_id
         else item
@@ -8533,7 +8539,7 @@ def _canvas_idea_compaction_similarity(left: dict[str, Any], right: dict[str, An
 
 
 def _pick_canvas_idea_compaction_pair(items: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    candidates = [item for item in items if not bool(item.get("user_edited"))]
+    candidates = [item for item in items if not bool(item.get("auto_summary_disabled"))]
     if len(candidates) < 2:
         return None
 
@@ -8556,7 +8562,7 @@ def _pick_similar_topic_child_idea_pair(
         for item in (workspace.get("canvas_items") or [])
         if _is_canvas_clusterable_item(item)
         and _safe_text(item.get("kind"), "note") != "comment"
-        and not bool(item.get("user_edited"))
+        and not bool(item.get("auto_summary_disabled"))
         and _safe_text(item.get("parent_topic_id"))
     ]
     children_by_topic_id: dict[str, list[dict[str, Any]]] = {}
@@ -8983,6 +8989,94 @@ def _compute_canvas_topic_summary_update(
     }
 
 
+def _build_canvas_topic_summary_patch(
+    topic_id: str,
+    target_signature: str,
+    update: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(update, dict):
+        return None
+    patch: dict[str, Any] = {}
+    title = _safe_text(update.get("title"))
+    body = _safe_text(update.get("body"))
+    keywords = [_safe_text(value) for value in (update.get("keywords") or []) if _safe_text(value)][:6]
+    if title:
+        patch["title"] = title
+    if body:
+        patch["body"] = body
+    if keywords:
+        patch["keywords"] = keywords
+    if not patch:
+        return None
+    return {
+        "operation": "update_topic_summary",
+        "target_id": _safe_text(topic_id),
+        "base_signature": _safe_text(target_signature),
+        "patch": patch,
+        "created_at": _utc_iso_now(),
+        "created_epoch": time.time(),
+    }
+
+
+def _apply_canvas_topic_summary_patch(
+    workspace: dict[str, Any],
+    patch_payload: dict[str, Any],
+    expected_signature: str = "",
+) -> tuple[dict[str, Any], bool, str]:
+    next_workspace = _clone_runtime_workspace_state(
+        _safe_text(workspace.get("meeting_id")),
+        workspace,
+        _now_ts(),
+    )
+    target_id = _safe_text(patch_payload.get("target_id"))
+    if not target_id:
+        return next_workspace, False, "missing_target"
+
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (next_workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    target_item = next((item for item in canvas_items if _safe_text(item.get("id")) == target_id), None)
+    if not target_item or not _is_canvas_topic_item(target_item):
+        return next_workspace, False, "target_missing"
+
+    expected = _safe_text(expected_signature or patch_payload.get("base_signature"))
+    if expected and _canvas_topic_summary_signature(next_workspace, target_id) != expected:
+        return next_workspace, False, "input_changed"
+
+    raw_patch = patch_payload.get("patch")
+    if not isinstance(raw_patch, dict):
+        return next_workspace, False, "empty_patch"
+
+    title = _safe_text(raw_patch.get("title"))
+    body = _safe_text(raw_patch.get("body"))
+    keywords = [_safe_text(value) for value in (raw_patch.get("keywords") or []) if _safe_text(value)][:6]
+
+    def apply_to_item(item: dict[str, Any]) -> dict[str, Any]:
+        if _safe_text(item.get("id")) != target_id:
+            return item
+        auto_summary_disabled = bool(item.get("auto_summary_disabled"))
+        next_item = {
+            **item,
+            "ai_pending": False,
+            "ai_generated": True,
+            "manual_position": False,
+        }
+        if not auto_summary_disabled:
+            if title:
+                next_item["title"] = title
+            if body:
+                next_item["body"] = body
+            if keywords:
+                next_item["keywords"] = keywords
+            next_item["user_edited"] = False
+        return next_item
+
+    next_workspace["canvas_items"] = [apply_to_item(item) for item in canvas_items]
+    return next_workspace, True, "applied"
+
+
 def _finalize_canvas_topic_summary_workspace_job(
     meeting_id: str,
     job_id: str,
@@ -9053,6 +9147,7 @@ def _finalize_canvas_topic_summary_workspace_job(
             if _safe_text(item.get("id")) in child_id_set and not _is_canvas_topic_item(item)
         ]
         update = _compute_canvas_topic_summary_update(meeting_topic, topic, child_items)
+        patch_payload = _build_canvas_topic_summary_patch(topic_id, job_target_signature, update)
 
         latest_workspace = _clone_runtime_workspace_state(
             meeting_id,
@@ -9100,7 +9195,7 @@ def _finalize_canvas_topic_summary_workspace_job(
             )
             return
 
-        if not update:
+        if not patch_payload:
             warning = "LLM 응답을 받지 못해 topic 내용을 생성하지 못했습니다."
             latest_workspace["canvas_items"] = [
                 {
@@ -9128,28 +9223,33 @@ def _finalize_canvas_topic_summary_workspace_job(
             _schedule_canvas_topic_summary_retry(updated_job)
             return
 
-        latest_workspace["canvas_items"] = [
-            {
-                **item,
-                "title": _safe_text(update.get("title")) or _safe_text(item.get("title")),
-                "body": _safe_text(update.get("body")) or _safe_text(item.get("body")),
-                "keywords": [_safe_text(value) for value in (update.get("keywords") or []) if _safe_text(value)][:6],
-                "ai_pending": False,
-                "ai_generated": True,
-                "user_edited": False,
-                "manual_position": False,
-            }
-            if _safe_text(item.get("id")) == topic_id
-            else item
-            for item in canvas_items
-        ]
-        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+        patched_workspace, patch_applied, patch_status = _apply_canvas_topic_summary_patch(
+            latest_workspace,
+            patch_payload,
+            job_target_signature,
+        )
+        if not patch_applied:
+            status = "stale_rebasable" if patch_status == "input_changed" else "stale_obsolete"
+            stale_reason = "input_changed" if patch_status == "input_changed" else "obsolete"
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "topic 상태가 바뀌어 AI patch를 적용하지 않았습니다.",
+                status=status,
+                stale_reason=stale_reason,
+                retryable=patch_status == "input_changed",
+            )
+            return
+
+        _save_canvas_workspace_runtime(meeting_id, patched_workspace)
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
             status="completed",
             detail="AI topic 정리 완료",
-            workspace=copy.deepcopy(latest_workspace),
+            workspace=copy.deepcopy(patched_workspace),
+            patch=copy.deepcopy(patch_payload),
             used_llm=True,
             warning="",
             pending_item_id=topic_id,
@@ -9410,7 +9510,7 @@ def _apply_canvas_topic_clustering_result(
             next_children = _dedup_preserve(current_children + assigned_by_topic.get(item_id, []), limit=400)
             next_item["child_item_ids"] = next_children
             next_item.setdefault("topic_collapsed", True)
-            if not bool(next_item.get("user_edited")):
+            if not bool(next_item.get("auto_summary_disabled")):
                 raw_update = topic_updates.get(item_id)
                 if raw_update:
                     if _safe_text(raw_update.get("title")):
@@ -9929,7 +10029,7 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
             **item,
             "ai_pending": True,
             "ai_generated": True,
-            "user_edited": False,
+            "user_edited": bool(item.get("user_edited")),
         }
         if _safe_text(item.get("id")) == topic_item_id
         else item

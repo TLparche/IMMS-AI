@@ -301,6 +301,7 @@ export interface CanvasWorkspaceItem {
   parent_topic_locked?: boolean;
   child_item_ids?: string[];
   topic_collapsed?: boolean;
+  auto_summary_disabled?: boolean;
   created_by?: "ai" | "user" | "";
   manual_position?: boolean;
   ai_generated?: boolean;

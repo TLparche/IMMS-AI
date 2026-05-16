@@ -121,7 +121,7 @@ stale_superseded:
 stale_obsolete:
   retry하지 않음
 
-user_edited conflict:
+auto_summary_disabled conflict:
   자동 재시도하지 않고 로그만 남김
 ```
 
@@ -274,16 +274,15 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 - node lineage는 최근 2000개 record로 제한하며 C -> E, A -> C -> E 같은 체인을 최종 current node 기준으로 갱신
 - topic summary 작업은 `error_retryable` 또는 `stale_rebasable`이면 retry queue에 넣고 20초, 60초 간격으로 최대 2회 현재 canvas 기준 재시도
 - retry queue는 `queued` job으로 남기며, 대기 중 더 최신 작업이 생기거나 대상 노드가 사라지면 조용히 superseded/obsolete 처리
+- topic summary LLM 결과는 `update_topic_summary` patch로 변환한 뒤 현재 workspace에 적용
+- patch 적용 직전에 target/signature를 다시 확인하고, `auto_summary_disabled`가 켜진 노드이면 제목/본문/키워드를 덮어쓰지 않음
+- 사용자가 만든 노드도 기본적으로 자동요약 대상이며, 노드 패널에서 `자동요약 방지`를 켠 경우에만 보호
 
 현재 상태는 "늦은 응답이 workspace를 망가뜨리지 않게 하면서, 이후 retry queue가 판단할 수 있는 상태값을 남기는 안전장치"에 가깝다.
 
 ## 다음 구현 순서
 
-1. Patch 기반 응답 적용
-   - 전체 workspace 대신 작업별 patch 적용
-   - 사용자 편집 필드는 덮어쓰지 않음
-
-2. AI 진행 로그 패널 데이터화
+1. AI 진행 로그 패널 데이터화
    - 사용자별로 접어둔 상태
    - 열면 AI 작업 처리 이력 확인
 

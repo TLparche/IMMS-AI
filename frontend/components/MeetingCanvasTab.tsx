@@ -167,6 +167,7 @@ type CanvasIdeaAssimilationJobSnapshot = {
   retry_after_epoch?: number;
   retry_job_id?: string;
   retry_source_job_id?: string;
+  patch?: Record<string, unknown>;
   target_count?: number;
   target_signature?: string;
   job_type?: string;
@@ -246,6 +247,7 @@ function logCanvasIdeaAssimilationJob(
     retryAfterEpoch: job?.retry_after_epoch || 0,
     retryJobId: job?.retry_job_id || "",
     retrySourceJobId: job?.retry_source_job_id || "",
+    hasPatch: Boolean(job?.patch),
     targetCount: job?.target_count || 0,
     targetSignature: job?.target_signature || "",
     ok: Boolean(job?.ok),
@@ -415,6 +417,7 @@ function buildWorkspaceCanvasItemsPayload(items: CanvasItemViewModel[]): CanvasW
     parent_topic_locked: Boolean(item.parent_topic_locked),
     child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean),
     topic_collapsed: Boolean(item.topic_collapsed),
+    auto_summary_disabled: Boolean(item.auto_summary_disabled),
     created_by: item.created_by || "",
     manual_position: false,
     ai_generated: Boolean(item.ai_generated),
@@ -3416,6 +3419,7 @@ function hydrateCanvasItems(items: CanvasItemViewModel[] = []): CanvasItemViewMo
       child_item_ids: (item.child_item_ids || []).map((value) => value.trim()).filter(Boolean).slice(0, 400),
       status: normalizeCanvasItemStatus(item.status),
       topic_collapsed: Boolean(item.topic_collapsed),
+      auto_summary_disabled: Boolean(item.auto_summary_disabled),
       created_by: item.created_by || "",
       manual_position: false,
       ai_generated: Boolean(item.ai_generated),
@@ -9274,6 +9278,7 @@ export default function MeetingCanvasTab({
           toolLabel((selectedCanvasItem.kind as ComposerTool) || "note"),
           childIdeaItems.length > 0 ? `하위 아이디어 ${childIdeaItems.length}개` : "",
           commentItems.length > 0 ? `댓글 ${commentItems.length}개` : "",
+          selectedCanvasItem.auto_summary_disabled ? "자동요약 방지" : "",
         ].filter(Boolean),
         insightLens: "",
         keywords: (selectedCanvasItem.keywords || []).slice(0, 5),
@@ -11834,6 +11839,40 @@ export default function MeetingCanvasTab({
     }
   };
 
+  const handleToggleCanvasItemAutoSummaryLock = () => {
+    if (!selectedCanvasItem) return;
+
+    const nextLocked = !Boolean(selectedCanvasItem.auto_summary_disabled);
+    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+      item.id === selectedCanvasItem.id
+        ? {
+            ...item,
+            auto_summary_disabled: nextLocked,
+          }
+        : item,
+    );
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    setActivityMessage(nextLocked ? "선택한 노드의 자동요약을 막았습니다." : "선택한 노드의 자동요약을 허용했습니다.");
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared canvas item auto summary setting:", error);
+        });
+      }
+    }
+  };
+
   const handleDeleteCanvasItem = () => {
     if (!selectedCanvasItem) return;
 
@@ -13535,6 +13574,17 @@ export default function MeetingCanvasTab({
               </button>
             ))}
           </div>
+        ) : stage === "ideation" && selectedCanvasItem ? (
+          <label className="mt-4 flex items-center gap-3 text-sm font-medium text-slate-700">
+            <input
+              type="checkbox"
+              checked={Boolean(selectedCanvasItem.auto_summary_disabled)}
+              onChange={handleToggleCanvasItemAutoSummaryLock}
+              disabled={isEditingSelectedCanvasItem}
+              className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-900"
+            />
+            자동요약 방지
+          </label>
         ) : stage === "solution" && selectedSolutionTopic ? (
           <div className="mt-4 flex flex-wrap gap-2">
             {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
