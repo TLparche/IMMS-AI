@@ -3,7 +3,8 @@ param(
   [int]$GatewayPort = 8001,
   [int]$TunnelTimeoutSeconds = 90,
   [int]$TunnelMaxAttempts = 4,
-  [switch]$KeepExistingPortProcesses
+  [switch]$KeepExistingPortProcesses,
+  [switch]$CleanupOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,7 +111,7 @@ function Stop-ProcessTree {
         & $taskkill.Source /PID $id /T /F | Out-Null
         Write-Host "Stopped PID $id with taskkill for $displayName"
       } catch {
-        Write-Warning "taskkill failed for PID $id in $displayName: $($_.Exception.Message)"
+        Write-Warning "taskkill failed for PID $id in ${displayName}: $($_.Exception.Message)"
       }
     }
 
@@ -341,11 +342,6 @@ $projectRoot = Resolve-ProjectRoot
 Set-Location -LiteralPath $projectRoot
 
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
-$cloudflaredCommand = Get-Command cloudflared -ErrorAction SilentlyContinue
-if (-not $cloudflaredCommand) {
-  throw "cloudflared를 찾을 수 없습니다. cloudflared 설치 후 PATH에 추가해 주세요."
-}
-
 $logDir = Join-Path $projectRoot ".codex-temp\demo-tunnels"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $script:DemoTunnelRunId = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -353,6 +349,16 @@ $script:DemoTunnelRunId = Get-Date -Format "yyyyMMdd-HHmmss"
 if (-not $KeepExistingPortProcesses) {
   Stop-PortListeners -Ports @($BackendPort, $GatewayPort)
   Start-Sleep -Milliseconds 500
+}
+
+if ($CleanupOnly) {
+  Write-Host "Cleanup only mode completed."
+  exit 0
+}
+
+$cloudflaredCommand = Get-Command cloudflared -ErrorAction SilentlyContinue
+if (-not $cloudflaredCommand) {
+  throw "cloudflared를 찾을 수 없습니다. cloudflared 설치 후 PATH에 추가해 주세요."
 }
 
 $started = @()
