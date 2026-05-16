@@ -2302,13 +2302,20 @@ const IDEATION_LEFT_CHILD_NODE_GAP_Y = 8;
 const IDEATION_LEFT_BRANCH_GAP_Y = 14;
 const IDEATION_LEFT_DEPTH_INDENT = 22;
 const IDEATION_LEFT_NODE_INDENT_X = 18;
-const IDEATION_RIGHT_CHILD_GAP_X = 36;
-const IDEATION_RIGHT_PARENT_GAP_Y = 34;
-const IDEATION_RIGHT_CHILD_GAP_Y = 16;
+const IDEATION_RIGHT_CLUSTER_CARD_WIDTH = 360;
+const IDEATION_RIGHT_CLUSTER_COLUMNS = 2;
+const IDEATION_RIGHT_CLUSTER_GAP_X = 28;
+const IDEATION_RIGHT_CLUSTER_GAP_Y = 28;
+const IDEATION_RIGHT_CLUSTER_CHILD_PREVIEW_LIMIT = 6;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
 const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
+
+function shouldUseCompactViewport() {
+  if (typeof window === "undefined") return false;
+  return window.innerWidth <= 1440 || window.innerHeight <= 900;
+}
 
 function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
   const pending = Boolean(item.ai_pending);
@@ -2322,6 +2329,24 @@ function estimateCanvasItemNodeHeight(item: CanvasItemViewModel) {
   return Math.max(
     CANVAS_ITEM_NODE_MIN_HEIGHT,
     88 + titleLines * 26 + bodyLines * 25 + keywordRows * 28 + footerLines * 18,
+  );
+}
+
+function estimateIdeationDetailClusterHeight(item: CanvasItemViewModel, childItems: CanvasItemViewModel[]) {
+  const pending = Boolean(item.ai_pending);
+  const titleLines = Math.min(3, estimateWrappedLines(pending ? "AI 정리 중" : item.title || "내용 상세보기", 21));
+  const body = pending ? "요약 생성 중" : cleanCanvasNodeBodyText(item.body);
+  const bodyLines = body ? Math.min(4, estimateWrappedLines(body, 34)) : 0;
+  const keywordCount = pending ? 0 : (item.keywords || []).filter(Boolean).length;
+  const keywordRows = keywordCount > 0 ? Math.ceil(Math.min(keywordCount, 4) / 2) : 0;
+  const visibleChildCount = Math.min(childItems.length, IDEATION_RIGHT_CLUSTER_CHILD_PREVIEW_LIMIT);
+  const childRows = visibleChildCount > 0 ? Math.ceil(visibleChildCount / 2) : 0;
+  const overflowRows = childItems.length > visibleChildCount ? 1 : 0;
+  const childSectionHeight = childRows > 0 ? 46 + childRows * 86 + overflowRows * 28 : 0;
+
+  return Math.max(
+    270,
+    132 + titleLines * 24 + bodyLines * 21 + keywordRows * 26 + childSectionHeight,
   );
 }
 
@@ -2883,6 +2908,135 @@ function makeCanvasItemNodeLabel(
             연결 노드: {item.point_id}
           </p>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+function makeIdeationDetailClusterNodeLabel(
+  item: CanvasItemViewModel,
+  selected: boolean,
+  childItems: CanvasItemViewModel[],
+  highlighted = false,
+  onSelectItem?: (itemId: string) => void,
+  onOpenItem?: (itemId: string) => void,
+) {
+  const tone = canvasItemTone((item.kind as ComposerTool) || "note");
+  const keywords = (item.keywords || []).filter(Boolean).slice(0, 4);
+  const pending = Boolean(item.ai_pending);
+  const title = pending ? "AI 정리 중" : item.title || "내용 상세보기";
+  const body = pending ? "요약 생성 중" : cleanCanvasNodeBodyText(item.body);
+  const status = normalizeCanvasItemStatus(item.status);
+  const childPreview = childItems.slice(0, IDEATION_RIGHT_CLUSTER_CHILD_PREVIEW_LIMIT);
+  const hiddenChildCount = Math.max(0, childItems.length - childPreview.length);
+  const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fff3ed_0%,#ffffff_100%)]" : tone.shell;
+  const borderClass = selected
+    ? "border-black shadow-[0_16px_34px_rgba(15,23,42,0.16)]"
+    : "border-black/10 shadow-[0_10px_28px_rgba(15,23,42,0.08)]";
+
+  return (
+    <div className="h-full min-w-0">
+      <div
+        className={`nopan imms-canvas-node-drag-handle flex h-full min-h-[242px] cursor-grab flex-col rounded-[18px] border px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] transition active:cursor-grabbing ${backgroundClass} ${borderClass}`}
+      >
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="shrink-0 rounded-md bg-[#1b59f8] px-2 py-1 text-[11px] font-semibold text-white">
+                하위
+              </span>
+              <span className={`shrink-0 rounded-md border px-2 py-1 text-[11px] font-semibold ${canvasItemStatusTone(status)}`}>
+                {canvasItemStatusLabel(status)}
+              </span>
+              {highlighted ? (
+                <span className="shrink-0 rounded-md bg-[#fff1e7] px-2 py-1 text-[11px] font-semibold text-[#c2410c]">
+                  방금 정리됨
+                </span>
+              ) : null}
+            </div>
+            <strong className="mt-3 block max-w-full break-words text-[18px] font-semibold leading-6 text-black line-clamp-3">
+              {title}
+            </strong>
+          </div>
+          {childItems.length > 0 ? (
+            <button
+              type="button"
+              className="nodrag nopan shrink-0 rounded-[8px] border border-black/10 bg-white/85 px-2.5 py-1.5 text-[11px] font-semibold text-[#1b59f8] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition hover:border-[#1b59f8]/40 hover:bg-[#eef4ff]"
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenItem?.(item.id);
+              }}
+            >
+              열기
+            </button>
+          ) : null}
+        </div>
+
+        {body ? (
+          <p className="mt-3 max-w-full whitespace-pre-wrap break-words text-[14px] leading-5 text-[#4d4d4d] line-clamp-4">
+            {body}
+          </p>
+        ) : null}
+
+        {keywords.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {keywords.map((keyword, index) => (
+              <span key={`${item.id}-cluster-keyword-${keyword}-${index}`} className="max-w-[9rem] truncate rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-[#555]">
+                #{keyword}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="mt-auto pt-4">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-semibold uppercase text-[#777]">
+              하위 {childItems.length}
+            </span>
+            {hiddenChildCount > 0 ? (
+              <span className="rounded-md bg-black/[0.04] px-2 py-1 text-[11px] font-semibold text-[#555]">
+                +{hiddenChildCount}
+              </span>
+            ) : null}
+          </div>
+          {childPreview.length > 0 ? (
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {childPreview.map((child) => {
+                const childBody = cleanCanvasNodeBodyText(child.body);
+                return (
+                  <button
+                    key={`${item.id}-cluster-child-${child.id}`}
+                    type="button"
+                    className="nodrag nopan min-h-[78px] min-w-0 rounded-[10px] border border-black/10 bg-white/82 px-2.5 py-2 text-left transition hover:border-[#1b59f8]/45 hover:bg-[#eef4ff]"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                    }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelectItem?.(child.id);
+                    }}
+                  >
+                    <span className="block whitespace-normal break-words text-[12px] font-semibold leading-4 text-black line-clamp-2">
+                      {child.ai_pending ? "AI 정리 중" : child.title || toolLabel((child.kind as ComposerTool) || "note")}
+                    </span>
+                    {childBody ? (
+                      <span className="mt-1 block whitespace-normal break-words text-[11px] leading-4 text-[#666] line-clamp-3">
+                        {childBody}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="mt-2 rounded-[10px] border border-dashed border-black/10 bg-white/60 px-3 py-3 text-center text-[12px] font-medium text-[#777]">
+              아직 하위 없음
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -4339,6 +4493,7 @@ export default function MeetingCanvasTab({
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
+  const [isCompactLayout, setIsCompactLayout] = useState(false);
   const [solutionRightPaneWidth, setSolutionRightPaneWidth] = useState(0);
   const [placementFeedback, setPlacementFeedback] = useState<{
     id: string;
@@ -5337,6 +5492,7 @@ export default function MeetingCanvasTab({
   useEffect(() => {
     const syncViewportMode = () => {
       setIsDesktopLayout(window.innerWidth >= 1280);
+      setIsCompactLayout(shouldUseCompactViewport());
     };
 
     syncViewportMode();
@@ -7497,6 +7653,54 @@ export default function MeetingCanvasTab({
     [canvasItems, meetingId, userId],
   );
 
+  const handleSelectIdeationDetailItem = useCallback(
+    (itemId: string) => {
+      const targetItem = canvasItems.find((item) => item.id === itemId) || null;
+      if (!targetItem) return;
+      if (pendingIdeationFocusUpdate) {
+        setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
+        return;
+      }
+
+      setSelectedCanvasItemId(targetItem.id);
+      setSelectedNodeId(`canvas-item-${targetItem.id}`);
+      if (targetItem.agenda_id) {
+        setSelectedAgendaId(targetItem.agenda_id);
+      }
+      setSelectedProblemGroupId("");
+      setSelectedSolutionTopicId("");
+      setFocusedCanvasItemId(targetItem.id);
+      setRightDrawerCollapsed(false);
+      setLeftPanelTab("detail");
+    },
+    [canvasItems, pendingIdeationFocusUpdate],
+  );
+
+  const handleOpenIdeationDetailItem = useCallback(
+    (itemId: string) => {
+      const targetItem = canvasItems.find((item) => item.id === itemId) || null;
+      if (!targetItem) return;
+      if (pendingIdeationFocusUpdate) {
+        setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
+        return;
+      }
+
+      setPendingIdeationFocusUpdate(null);
+      setSelectedCanvasItemId(targetItem.id);
+      setIdeationFocusItemId(targetItem.id);
+      setSelectedNodeId(`canvas-item-${targetItem.id}`);
+      if (targetItem.agenda_id) {
+        setSelectedAgendaId(targetItem.agenda_id);
+      }
+      setSelectedProblemGroupId("");
+      setSelectedSolutionTopicId("");
+      setFocusedCanvasItemId(targetItem.id);
+      setRightDrawerCollapsed(false);
+      setLeftPanelTab("detail");
+    },
+    [canvasItems, pendingIdeationFocusUpdate],
+  );
+
   const handleGenerateSolutionSuggestions = useCallback(
     async (topicId: string) => {
       const targetTopic = solutionTopics.find((topic) => topic.group_id === topicId);
@@ -8659,7 +8863,6 @@ export default function MeetingCanvasTab({
       const selectedAgendaForIdeation = selectedAgendaId || agendaModels[0]?.id || "";
       const rightCanvasItems = pendingIdeationFocusUpdate?.snapshotCanvasItems || canvasItems;
       const rightCanvasItemById = new Map(rightCanvasItems.map((item) => [item.id, item]));
-      const rightCanvasItemHeights = new Map(rightCanvasItems.map((item) => [item.id, estimateCanvasItemNodeHeight(item)]));
       const rightFocusItemId = pendingIdeationFocusUpdate?.focusItemId || ideationFocusItemId || selectedCanvasItemId;
       const selectedFocusCandidate = rightFocusItemId
         ? rightCanvasItemById.get(rightFocusItemId) || null
@@ -8696,17 +8899,25 @@ export default function MeetingCanvasTab({
       const descendantIdsByItem = new Map(
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
-      const rightDetailEntries = activeFocusItem
+      const rightHierarchyEntries = activeFocusItem
         ? getCanvasItemVisibleDescendantHierarchyItems(
             rightCanvasItems,
             activeFocusItem.id,
             IDEATION_RIGHT_VISIBLE_MAX_DEPTH,
           )
         : [];
+      const rightDetailEntries = rightHierarchyEntries.filter(({ depth }) => depth === 0);
+      const rightChildItemsByParentId = new Map<string, CanvasItemViewModel[]>();
+      rightHierarchyEntries
+        .filter(({ depth }) => depth > 0)
+        .forEach(({ item, parentId }) => {
+          const childItems = rightChildItemsByParentId.get(parentId) || [];
+          childItems.push(item);
+          rightChildItemsByParentId.set(parentId, childItems);
+        });
       const activeDirectChildItems = rightDetailEntries
-        .filter(({ depth }) => depth === 0)
         .map(({ item }) => item);
-      const activeNestedChildCount = rightDetailEntries.length - activeDirectChildItems.length;
+      const activeNestedChildCount = rightHierarchyEntries.length - activeDirectChildItems.length;
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
       const leftHeights = leftLayoutEntries.map((entry) =>
         entry.kind === "agenda"
@@ -8753,56 +8964,11 @@ export default function MeetingCanvasTab({
       const rightDetailHeightsById = new Map(
         rightDetailEntries.map(({ item }) => [
           item.id,
-          rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item),
+          estimateIdeationDetailClusterHeight(item, rightChildItemsByParentId.get(item.id) || []),
         ] as const),
       );
-      const rightPositionsById = new Map<string, { x: number; y: number }>();
-      const rightChildEntriesByParentId = new Map<string, typeof rightDetailEntries>();
-      rightDetailEntries
-        .filter(({ depth }) => depth > 0)
-        .forEach((entry) => {
-          const entries = rightChildEntriesByParentId.get(entry.parentId) || [];
-          entries.push(entry);
-          rightChildEntriesByParentId.set(entry.parentId, entries);
-        });
-
       const rightBaseX = CANVAS_IDEATION_RIGHT_X + 28;
       const rightBaseY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
-      let nextRightY = rightBaseY;
-      rightDetailEntries
-        .filter(({ depth }) => depth === 0)
-        .forEach((entry, index) => {
-          if (index > 0) {
-            nextRightY += IDEATION_RIGHT_PARENT_GAP_Y;
-          }
-
-          const parentHeight = rightDetailHeightsById.get(entry.item.id) || estimateCanvasItemNodeHeight(entry.item);
-          rightPositionsById.set(entry.item.id, {
-            x: rightBaseX,
-            y: nextRightY,
-          });
-
-          const childEntries = rightChildEntriesByParentId.get(entry.item.id) || [];
-          let childY = nextRightY;
-          let previousChildHeight = 0;
-          let childStackHeight = 0;
-          childEntries.forEach((childEntry, childIndex) => {
-            if (childIndex > 0) {
-              childY += previousChildHeight + IDEATION_RIGHT_CHILD_GAP_Y;
-            }
-
-            const childHeight = rightDetailHeightsById.get(childEntry.item.id) || estimateCanvasItemNodeHeight(childEntry.item);
-            rightPositionsById.set(childEntry.item.id, {
-              x: rightBaseX + CANVAS_ITEM_NODE_WIDTH + IDEATION_RIGHT_CHILD_GAP_X,
-              y: childY,
-            });
-            childStackHeight = Math.max(childStackHeight, childY - nextRightY + childHeight);
-            previousChildHeight = childHeight;
-          });
-
-          nextRightY += Math.max(parentHeight, childStackHeight);
-        });
-
       const rightPositions = rightUsesEmptyDetail
         ? [
             {
@@ -8810,7 +8976,14 @@ export default function MeetingCanvasTab({
               y: CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 60,
             },
           ]
-        : rightDetailEntries.map(({ item }) => rightPositionsById.get(item.id) || { x: rightBaseX, y: rightBaseY });
+        : buildColumnPositions(
+            rightDetailEntries.map(({ item }) => rightDetailHeightsById.get(item.id) || estimateIdeationDetailClusterHeight(item, [])),
+            IDEATION_RIGHT_CLUSTER_COLUMNS,
+            IDEATION_RIGHT_CLUSTER_CARD_WIDTH + IDEATION_RIGHT_CLUSTER_GAP_X,
+            IDEATION_RIGHT_CLUSTER_GAP_Y,
+            rightBaseX,
+            rightBaseY,
+          );
       const leftBottom = leftPositions.reduce(
         (maxBottom, position, index) => Math.max(maxBottom, position.y + (leftHeights[index] || 0)),
         CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 180,
@@ -9014,12 +9187,12 @@ export default function MeetingCanvasTab({
         };
       });
       const rightDetailDescriptors: CanvasNodeDescriptor[] = rightDetailEntries.length > 0
-          ? rightDetailEntries.map(({ item, depth: relativeDepth, parentId }, index) => {
+          ? rightDetailEntries.map(({ item, parentId }, index) => {
               const nodeId = `canvas-item-${item.id}`;
-              const linkedAgendaTitle =
-                agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
-              const itemHeight = rightDetailHeightsById.get(item.id) || estimateCanvasItemNodeHeight(item);
+              const childItems = rightChildItemsByParentId.get(item.id) || [];
+              const itemHeight = rightDetailHeightsById.get(item.id) || estimateIdeationDetailClusterHeight(item, childItems);
               const depth = getCanvasItemDepth(rightCanvasItems, item.id);
+              const highlighted = isTopicCanvasItem(item) && latestHighlightedTopicId === item.id;
 
               return {
                 id: nodeId,
@@ -9032,7 +9205,7 @@ export default function MeetingCanvasTab({
                 targetPosition: Position.Top,
                 className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
                 style: {
-                  width: CANVAS_ITEM_NODE_WIDTH,
+                  width: IDEATION_RIGHT_CLUSTER_CARD_WIDTH,
                   height: itemHeight,
                   background: "transparent",
                   border: "none",
@@ -9057,17 +9230,26 @@ export default function MeetingCanvasTab({
                     item.parent_topic_id || "",
                     parentId,
                     depth,
-                    relativeDepth,
                     selectedCanvasItemId === item.id,
+                    highlighted,
                     Boolean(pendingIdeationFocusUpdate),
                     ...(item.child_item_ids || []),
+                    ...childItems.flatMap((child) => [
+                      child.id,
+                      child.kind,
+                      child.status || "",
+                      child.title,
+                      child.body,
+                      ...(child.keywords || []),
+                    ]),
                   ]),
-                  label: makeCanvasItemNodeLabel(
+                  label: makeIdeationDetailClusterNodeLabel(
                     item,
                     selectedCanvasItemId === item.id,
-                    linkedAgendaTitle,
-                    handleToggleTopicCollapsed,
-                    isTopicCanvasItem(item) && latestHighlightedTopicId === item.id,
+                    childItems,
+                    highlighted,
+                    handleSelectIdeationDetailItem,
+                    handleOpenIdeationDetailItem,
                   ),
                 },
               };
@@ -9529,6 +9711,8 @@ export default function MeetingCanvasTab({
     handleSaveSolutionNoteEdit,
     handleStartSolutionNoteEdit,
     handleToggleTopicCollapsed,
+    handleSelectIdeationDetailItem,
+    handleOpenIdeationDetailItem,
     handleAttachPersonalNoteToProblemGroup,
     handleProblemIdeaDragEnd,
     handleProblemIdeaDragMove,
@@ -13301,7 +13485,9 @@ export default function MeetingCanvasTab({
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
   const rightDrawerShowsDetailPanel = stage === "ideation";
-  const rightDrawerExpandedWidth = `clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
+  const rightDrawerExpandedWidth = isCompactLayout
+    ? `clamp(15rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 20.5rem)`
+    : `clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
   const rightDrawerBodyClassName = rightDrawerContentVisible
     ? `imms-drawer-body imms-overlay-scroll box-border h-full translate-x-0 overflow-y-auto px-[clamp(1rem,1.6vw,1.35rem)] py-[clamp(1rem,2vh,1.5rem)] opacity-100 xl:overflow-y-auto ${
         rightDrawerShowsDetailPanel ? "max-h-[min(48vh,500px)] xl:max-h-none" : "max-h-none"
@@ -13310,15 +13496,15 @@ export default function MeetingCanvasTab({
   const rightDrawerBodyStyle = isDesktopLayout && !rightDrawerCollapsed
     ? { width: rightDrawerExpandedWidth }
     : undefined;
-  const rightDrawerWrapperClassName = `imms-drawer-pane imms-side-panel relative order-2 flex min-h-[min(34vh,420px)] flex-col overflow-visible border-b border-black/10 shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:min-h-0 xl:border-b-0 ${rightDrawerCollapsed ? "border border-black/10 bg-[#f7f8fb]" : "bg-white"}`;
+  const rightDrawerWrapperClassName = `imms-drawer-pane imms-right-drawer imms-side-panel relative order-2 flex min-h-[min(34vh,420px)] flex-col overflow-visible border-b border-black/10 shadow-[inset_1px_0_0_rgba(0,0,0,0.04)] xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:min-h-0 xl:border-b-0 ${rightDrawerCollapsed ? "border border-black/10 bg-[#f7f8fb]" : "bg-white"}`;
   const rightDrawerPanelStackClassName = "flex min-h-0 flex-1 flex-col overflow-hidden";
-  const rightDrawerTopPanelClassName = "imms-drawer-pane imms-side-panel imms-left-panel relative min-h-[min(34vh,420px)] flex-1 overflow-hidden bg-transparent";
-  const rightDrawerToggleClassName = `pointer-events-auto absolute top-1/2 z-50 flex h-[clamp(2.25rem,3vw,2.75rem)] w-[clamp(2.25rem,3vw,2.75rem)] items-center justify-center rounded-full border border-black/10 bg-white text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-all duration-300 hover:bg-[#f5f6f8] ${
+  const rightDrawerTopPanelClassName = "imms-drawer-pane imms-drawer-top-panel imms-side-panel imms-left-panel relative min-h-[min(34vh,420px)] flex-1 overflow-hidden bg-transparent";
+  const rightDrawerToggleClassName = `imms-drawer-toggle pointer-events-auto absolute top-1/2 z-50 flex h-[clamp(2.25rem,3vw,2.75rem)] w-[clamp(2.25rem,3vw,2.75rem)] items-center justify-center rounded-full border border-black/10 bg-white text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition-all duration-300 hover:bg-[#f5f6f8] ${
     rightDrawerCollapsed ? "left-1/2 -translate-x-1/2 -translate-y-1/2" : "left-0 -translate-x-1/2 -translate-y-1/2"
   }`;
   const rightDrawerToggleIconClassName = `h-5 w-5 transition-transform duration-200 ${rightDrawerCollapsed ? "" : "rotate-180"}`;
   const rightDrawerResizeHandleClassName = "absolute left-[-7px] top-0 hidden h-full w-4 cursor-ew-resize xl:block";
-  const rightDrawerBottomPanelClassName = `imms-drawer-pane imms-side-panel imms-right-panel relative flex-1 overflow-hidden bg-transparent ${
+  const rightDrawerBottomPanelClassName = `imms-drawer-pane imms-drawer-bottom-panel imms-side-panel imms-right-panel relative flex-1 overflow-hidden bg-transparent ${
     rightDrawerShowsDetailPanel ? "min-h-[min(34vh,420px)] max-h-[min(48vh,500px)] xl:min-h-0 xl:max-h-none" : "min-h-0 max-h-none"
   } ${
     rightDrawerCollapsed && !rightDrawerContentVisible
@@ -13326,8 +13512,21 @@ export default function MeetingCanvasTab({
       : `${rightDrawerShowsDetailPanel ? "border-t-4 border-[#d5d5d5]" : ""} translate-x-0 opacity-100`
   }`;
   const workspaceGridColumns = rightDrawerCollapsed
-    ? "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
+    ? isCompactLayout
+      ? "minmax(0, 1fr) clamp(3rem, 3.6vw, 3.75rem)"
+      : "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
+  const canvasDefaultZoom = isCompactLayout ? 0.86 : 1;
+  const canvasDefaultViewport = useMemo(
+    () => ({ x: 0, y: 0, zoom: canvasDefaultZoom }),
+    [canvasDefaultZoom],
+  );
+  const applyInitialCanvasViewport = useCallback((instance: ReactFlowInstance<Node, Edge>) => {
+    if (!shouldUseCompactViewport()) return;
+    window.requestAnimationFrame(() => {
+      void instance.setViewport({ x: 0, y: 0, zoom: 0.86 });
+    });
+  }, []);
   const selectedAgendaForIdeationCanvas = selectedAgendaId || agendaModels[0]?.id || "";
   const selectedRootItemForIdeationCanvas = useMemo(() => {
     const focusItemId = ideationFocusItemId || selectedCanvasItemId;
@@ -13407,7 +13606,9 @@ export default function MeetingCanvasTab({
             visibleIdeationRightCanvasItems,
             visibleRootItemForIdeationCanvas.id,
             IDEATION_RIGHT_VISIBLE_MAX_DEPTH,
-          ).map(({ item }) => item.id)
+          )
+            .filter(({ depth }) => depth === 0)
+            .map(({ item }) => item.id)
         : [],
     );
 
@@ -13579,12 +13780,12 @@ export default function MeetingCanvasTab({
           selectedSolutionTopic?.problem_conclusion ||
           selectedSolutionTopic?.conclusion ||
           "문제 정의에서 이어지는 해결책 인사이트를 확인합니다.";
-  const canvasHeaderGridClassName = `relative grid min-h-[clamp(86px,9.5vh,112px)] shrink-0 grid-cols-1 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] ${
+  const canvasHeaderGridClassName = `imms-canvas-header relative grid min-h-[clamp(86px,9.5vh,112px)] shrink-0 grid-cols-1 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] ${
     stage === "solution"
       ? "xl:grid-cols-[minmax(17rem,36%)_minmax(0,1fr)]"
       : "xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]"
   }`;
-  const canvasHeaderCellClassName = "min-h-[clamp(86px,9.5vh,112px)] px-[clamp(18px,2.8vw,38px)] py-[clamp(12px,1.7vh,18px)]";
+  const canvasHeaderCellClassName = "imms-canvas-header-cell min-h-[clamp(86px,9.5vh,112px)] px-[clamp(18px,2.8vw,38px)] py-[clamp(12px,1.7vh,18px)]";
   const canvasFloatingStatusInactiveClassName =
     "border-black/10 bg-[#eff0f6] text-[#4d4d4d] hover:bg-[#e3e5ee]";
   const selectedIdeationSuggestions = selectedRootItemForIdeationCanvas?.ai_suggestions || [];
@@ -15043,16 +15244,16 @@ export default function MeetingCanvasTab({
   };
 
   return (
-    <div className="h-full min-h-0 bg-[#f9f9f9] text-black">
-      <section className="flex h-full min-h-0 flex-col bg-[#f9f9f9]">
-        <div className="relative z-20 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)]">
-          <div className="grid min-h-[clamp(96px,13vh,141px)] grid-cols-1 items-center justify-items-center gap-3 px-[clamp(16px,2.4vw,33px)] py-[clamp(12px,1.8vh,16px)] lg:grid-cols-[minmax(0,1fr)_minmax(260px,1.35fr)_minmax(0,1fr)] lg:justify-items-stretch">
+    <div className={`imms-meeting-canvas h-full min-h-0 bg-[#f9f9f9] text-black ${isCompactLayout ? "imms-compact-layout" : ""}`}>
+      <section className="imms-meeting-shell flex h-full min-h-0 flex-col bg-[#f9f9f9]">
+        <div className="imms-topbar relative z-20 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+          <div className="imms-topbar-grid grid min-h-[clamp(96px,13vh,141px)] grid-cols-1 items-center justify-items-center gap-3 px-[clamp(16px,2.4vw,33px)] py-[clamp(12px,1.8vh,16px)] lg:grid-cols-[minmax(0,1fr)_minmax(260px,1.35fr)_minmax(0,1fr)] lg:justify-items-stretch">
             <div className="flex w-full flex-wrap items-center justify-center gap-2 lg:justify-start lg:justify-self-start">
               <button
                 type="button"
                 onClick={() => void handleEndMeetingClick()}
                 disabled={endMeetingSaving}
-                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#ef4e4e] px-[clamp(14px,1.7vw,24px)] text-[clamp(16px,1.2vw,20px)] font-semibold text-white hover:bg-[#df3f3f] disabled:cursor-not-allowed disabled:opacity-60"
+                className="imms-topbar-button h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#ef4e4e] px-[clamp(14px,1.7vw,24px)] text-[clamp(16px,1.2vw,20px)] font-semibold text-white hover:bg-[#df3f3f] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {endMeetingSaving ? "종료 중" : "종료"}
               </button>
@@ -15065,7 +15266,7 @@ export default function MeetingCanvasTab({
                     void onToggleRecording?.();
                   }
                 }}
-                className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(12px,1.2vw,16px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
+                className={`imms-topbar-button h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(12px,1.2vw,16px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
                   isRecording ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100" : "bg-[#1b59f8] text-white"
                 }`}
               >
@@ -15084,14 +15285,14 @@ export default function MeetingCanvasTab({
                     return next;
                   });
                 }}
-                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee]"
+                className="imms-topbar-button h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee]"
               >
                 {syncModeLabel(sharedSyncEnabled)}
               </button>
               <button
                 type="button"
                 onClick={handleMoveToCurrentDiscussionGroup}
-                className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
+                className={`imms-topbar-button h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
                   latestDiscussionRootItem
                     ? "bg-[#eef4ff] text-[#1b59f8] hover:bg-[#e0ebff]"
                     : "bg-[#eff0f6] text-[#8b8f9a]"
@@ -15103,17 +15304,17 @@ export default function MeetingCanvasTab({
                 type="button"
                 disabled={audioImportBusy}
                 onClick={() => fileInputRef.current?.click()}
-                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
+                className="imms-topbar-button h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 불러오기
               </button>
-              <span className="inline-flex h-[30px] items-center rounded-full border border-black/10 bg-[#f9f9f9] px-3 text-[11px] font-semibold leading-none text-[#6f6f6f]">
+              <span className="imms-node-count-chip inline-flex h-[30px] items-center rounded-full border border-black/10 bg-[#f9f9f9] px-3 text-[11px] font-semibold leading-none text-[#6f6f6f]">
                 1차 노드 {ideationNodeCountSummary.directChildCount} · 기준 {ideationNodeCountSummary.target}
               </span>
             </div>
 
             <div className="relative min-w-0 justify-self-center text-center">
-              <div className="flex items-center justify-center gap-2 text-[clamp(14px,1.2vw,20px)] font-normal leading-[1.25] text-[#4d4d4d]">
+              <div className="imms-meeting-title flex items-center justify-center gap-2 text-[clamp(14px,1.2vw,20px)] font-normal leading-[1.25] text-[#4d4d4d]">
                 <span>{meetingTitle || "회의 제목"}</span>
                 <span className={`h-2.5 w-2.5 rounded-full ${isRecording ? "bg-[#34c759]" : "bg-[#d9d9d9]"}`} />
               </div>
@@ -15123,13 +15324,13 @@ export default function MeetingCanvasTab({
                 className="mx-auto mt-2 block w-full max-w-[min(760px,100%)] rounded-xl border border-transparent px-3 py-1 text-center transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#1b59f8]/10"
               >
                 <span
-                  className={`block truncate text-[clamp(20px,2.2vw,32px)] font-semibold leading-[1.2] tracking-normal ${
+                  className={`imms-meeting-goal-title block truncate text-[clamp(20px,2.2vw,32px)] font-semibold leading-[1.2] tracking-normal ${
                     meetingGoalDraft.trim() ? "text-black" : "text-black/30"
                   }`}
                 >
                   {meetingGoalDraft.trim() || "회의 목표를 입력해 주세요"}
                 </span>
-                <span className="mt-1 block truncate text-[clamp(11px,0.85vw,13px)] font-normal leading-[1.35] text-[#4d4d4d]">
+                <span className="imms-meeting-context mt-1 block truncate text-[clamp(11px,0.85vw,13px)] font-normal leading-[1.35] text-[#4d4d4d]">
                   {meetingGoalContextDraft.trim()
                     ? `관련 맥락: ${meetingGoalContextDraft.trim()}`
                     : "클릭해서 회의 목표와 관련 맥락을 입력"}
@@ -15213,7 +15414,7 @@ export default function MeetingCanvasTab({
                     <button
                       type="button"
                       onClick={() => void handleStageSelect(item)}
-                      className={`rounded-[8px] border px-[clamp(12px,1.2vw,16px)] py-[clamp(7px,0.9vh,8px)] text-[clamp(14px,1.2vw,20px)] font-semibold leading-[1.25] transition ${
+                      className={`imms-stage-button rounded-[8px] border px-[clamp(12px,1.2vw,16px)] py-[clamp(7px,0.9vh,8px)] text-[clamp(14px,1.2vw,20px)] font-semibold leading-[1.25] transition ${
                         stage === item
                           ? "border-[#1b59f8]/20 bg-[rgba(27,89,248,0.1)] text-[#1b59f8]"
                           : "border-black/10 bg-white text-black/50 hover:border-[#1b59f8]/20 hover:bg-[rgba(27,89,248,0.1)] hover:text-[#1b59f8]"
@@ -15298,7 +15499,7 @@ export default function MeetingCanvasTab({
           className="imms-workspace-grid grid flex-1 min-h-0 grid-cols-1 overflow-y-auto bg-black/10 xl:grid-rows-[minmax(0,1fr)_minmax(0,1fr)] xl:overflow-hidden xl:gap-[clamp(0.25rem,0.45vw,0.5rem)] xl:border-x xl:border-b xl:border-black/10"
           style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
-          <section ref={canvasSurfaceRef} className="relative order-1 flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:col-start-1 xl:row-span-2 xl:row-start-1 xl:h-full xl:min-h-0 xl:border-b-0">
+          <section ref={canvasSurfaceRef} className="imms-canvas-surface relative order-1 flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:col-start-1 xl:row-span-2 xl:row-start-1 xl:h-full xl:min-h-0 xl:border-b-0">
             <div className={canvasHeaderGridClassName}>
               <div className={`${canvasHeaderCellClassName} flex items-center border-b border-black/10 xl:border-b-0 xl:border-r`}>
                 <div className="flex w-full min-w-0 items-start justify-between gap-[clamp(12px,1.5vw,20px)]">
@@ -15388,10 +15589,10 @@ export default function MeetingCanvasTab({
               {renderCanvasFloatingStatusControls()}
               {renderAiTaskPanel()}
               {stage === "ideation" ? (
-                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]">
+                <div className="imms-canvas-split grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]">
                   <div
                     ref={ideationLeftPaneRef}
-                    className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r"
+                    className="imms-split-pane imms-split-pane-left flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r"
                     onMouseEnter={() => {
                       if (stableIdeationDragRef.current) {
                         return;
@@ -15406,6 +15607,7 @@ export default function MeetingCanvasTab({
                         onInit={(instance) => {
                           ideationLeftFlowRef.current = instance;
                           flowRef.current = instance;
+                          applyInitialCanvasViewport(instance);
                         }}
                         onNodeClick={handleCanvasNodeClick}
                         onPaneClick={(event) => handleCanvasPaneClick(event, "ideation-left")}
@@ -15418,6 +15620,7 @@ export default function MeetingCanvasTab({
                         autoPanOnNodeDrag={false}
                         noPanClassName="nopan"
                         nodesDraggable
+                        defaultViewport={canvasDefaultViewport}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -15427,7 +15630,7 @@ export default function MeetingCanvasTab({
 
                   <div
                     ref={ideationRightPaneRef}
-                    className="flex min-h-[420px] flex-col overflow-hidden bg-white"
+                    className="imms-split-pane imms-split-pane-right flex min-h-[420px] flex-col overflow-hidden bg-white"
                     onMouseEnter={() => {
                       if (stableIdeationDragRef.current) {
                         return;
@@ -15437,7 +15640,7 @@ export default function MeetingCanvasTab({
                   >
                     <div className="flex min-h-0 flex-1 flex-col bg-[#f5f6f8]">
                       {pendingIdeationFocusUpdate ? (
-                        <section className="shrink-0 border-b border-[#f4c36a] bg-[#fff8e6] px-5 py-3">
+                        <section className="imms-focus-update-banner shrink-0 border-b border-[#f4c36a] bg-[#fff8e6] px-5 py-3">
                           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                             <div className="min-w-0">
                               <p className="text-sm font-semibold text-[#6d4b00]">
@@ -15459,7 +15662,7 @@ export default function MeetingCanvasTab({
                         </section>
                       ) : null}
                       {selectedRootItemForIdeationCanvas && !pendingIdeationFocusUpdate ? (
-                        <section className={`shrink-0 border-b border-black/10 bg-white px-5 ${ideationSuggestionCollapsed ? "py-2.5" : "py-4"}`}>
+                        <section className={`imms-ideation-suggestions shrink-0 border-b border-black/10 bg-white px-5 ${ideationSuggestionCollapsed ? "py-2.5" : "py-4"}`}>
                           <div className={`flex justify-between gap-4 ${ideationSuggestionCollapsed ? "items-center" : "items-start"}`}>
                             <div className="min-w-0">
                               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">AI 추천 아이디어</p>
@@ -15548,6 +15751,7 @@ export default function MeetingCanvasTab({
                         onInit={(instance) => {
                           ideationRightFlowRef.current = instance;
                           flowRef.current = instance;
+                          applyInitialCanvasViewport(instance);
                         }}
                         onNodeClick={handleCanvasNodeClick}
                         onPaneClick={(event) => handleCanvasPaneClick(event, "ideation-right")}
@@ -15560,6 +15764,7 @@ export default function MeetingCanvasTab({
                         autoPanOnNodeDrag={false}
                         noPanClassName="nopan"
                         nodesDraggable={!pendingIdeationFocusUpdate}
+                        defaultViewport={canvasDefaultViewport}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -15576,14 +15781,15 @@ export default function MeetingCanvasTab({
                   </div>
                 </div>
               ) : stage === "problem-definition" ? (
-                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]">
-                  <div ref={problemLeftPaneRef} className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
+                <div className="imms-canvas-split grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]">
+                  <div ref={problemLeftPaneRef} className="imms-split-pane imms-split-pane-left flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
                     <div className="min-h-0 flex-1 bg-[#f5f6f8]">
                       <ReactFlow<Node, Edge>
                         nodes={problemSplitNodes.left}
                         edges={problemSplitEdges.left}
                         onInit={(instance) => {
                           flowRef.current = instance;
+                          applyInitialCanvasViewport(instance);
                         }}
                         onNodeClick={handleCanvasNodeClick}
                         onPaneClick={(event) => handleCanvasPaneClick(event, "problem-left")}
@@ -15596,6 +15802,7 @@ export default function MeetingCanvasTab({
                         autoPanOnNodeDrag={false}
                         noPanClassName="nopan"
                         nodesDraggable={false}
+                        defaultViewport={canvasDefaultViewport}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -15603,13 +15810,14 @@ export default function MeetingCanvasTab({
                     </div>
                   </div>
 
-                  <div ref={problemRightPaneRef} className="flex min-h-[420px] flex-col overflow-hidden bg-white">
+                  <div ref={problemRightPaneRef} className="imms-split-pane imms-split-pane-right flex min-h-[420px] flex-col overflow-hidden bg-white">
                     <div className="min-h-0 flex-1 bg-[#f5f6f8]">
                       <ReactFlow<Node, Edge>
                         nodes={problemSplitNodes.right}
                         edges={problemSplitEdges.right}
                         onInit={(instance) => {
                           flowRef.current = instance;
+                          applyInitialCanvasViewport(instance);
                         }}
                         onNodeClick={handleCanvasNodeClick}
                         onPaneClick={(event) => handleCanvasPaneClick(event, "problem-right")}
@@ -15622,6 +15830,7 @@ export default function MeetingCanvasTab({
                         autoPanOnNodeDrag={false}
                         noPanClassName="nopan"
                         nodesDraggable
+                        defaultViewport={canvasDefaultViewport}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -15637,14 +15846,15 @@ export default function MeetingCanvasTab({
                   </div>
                 </div>
               ) : stage === "solution" ? (
-                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,36%)_minmax(0,1fr)]">
-                  <div className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
+                <div className="imms-canvas-split imms-solution-split grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,36%)_minmax(0,1fr)]">
+                  <div className="imms-split-pane imms-split-pane-left flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
                     <div className="min-h-0 flex-1 bg-[#f5f6f8]">
                       <ReactFlow<Node, Edge>
                         nodes={solutionSplitNodes.left}
                         edges={[] as Edge[]}
                         onInit={(instance) => {
                           flowRef.current = instance;
+                          applyInitialCanvasViewport(instance);
                         }}
                         onNodeClick={handleCanvasNodeClick}
                         onPaneClick={handleCanvasPaneClick}
@@ -15652,6 +15862,7 @@ export default function MeetingCanvasTab({
                         nodesDraggable={false}
                         panOnDrag
                         noPanClassName="nopan"
+                        defaultViewport={canvasDefaultViewport}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -15659,13 +15870,14 @@ export default function MeetingCanvasTab({
                     </div>
                   </div>
 
-                  <div ref={solutionRightPaneRef} className="flex min-h-[420px] flex-col overflow-hidden bg-white">
+                  <div ref={solutionRightPaneRef} className="imms-split-pane imms-split-pane-right flex min-h-[420px] flex-col overflow-hidden bg-white">
                     <div className="min-h-0 flex-1 bg-[#f5f6f8]">
                       <ReactFlow<Node, Edge>
                         nodes={solutionSplitNodes.right}
                         edges={[] as Edge[]}
                         onInit={(instance) => {
                           flowRef.current = instance;
+                          applyInitialCanvasViewport(instance);
                         }}
                         onNodeClick={handleCanvasNodeClick}
                         onPaneClick={handleCanvasPaneClick}
@@ -15673,6 +15885,7 @@ export default function MeetingCanvasTab({
                         nodesDraggable={false}
                         panOnDrag
                         noPanClassName="nopan"
+                        defaultViewport={canvasDefaultViewport}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
@@ -15694,6 +15907,7 @@ export default function MeetingCanvasTab({
                   edges={renderedEdges}
                   onInit={(instance) => {
                     flowRef.current = instance;
+                    applyInitialCanvasViewport(instance);
                   }}
                   onNodeClick={handleCanvasNodeClick}
                   onEdgeClick={handleCanvasEdgeClick}
@@ -15707,6 +15921,7 @@ export default function MeetingCanvasTab({
                   nodesConnectable={false}
                   elevateEdgesOnSelect
                   connectionLineStyle={{ stroke: "#0f172a", strokeOpacity: 0.9, strokeWidth: 2 }}
+                  defaultViewport={canvasDefaultViewport}
                   minZoom={0.45}
                   maxZoom={1.6}
                   defaultEdgeOptions={{

@@ -148,6 +148,168 @@
   transition: grid-template-columns 430ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.imms-meeting-canvas {
+  --imms-topbar-height: clamp(96px, 13vh, 141px);
+  --imms-topbar-padding-x: clamp(16px, 2.4vw, 33px);
+  --imms-topbar-padding-y: clamp(12px, 1.8vh, 16px);
+  --imms-topbar-gap: 12px;
+  --imms-control-height: clamp(36px, 4.4vh, 43px);
+  --imms-control-padding-x: clamp(10px, 1vw, 14px);
+  --imms-control-font-size: 13px;
+  --imms-stage-padding-x: clamp(12px, 1.2vw, 16px);
+  --imms-stage-padding-y: clamp(7px, 0.9vh, 8px);
+  --imms-stage-font-size: 15px;
+  --imms-meeting-title-size: 16px;
+  --imms-meeting-goal-size: 26px;
+  --imms-canvas-header-height: clamp(86px, 9.5vh, 112px);
+  --imms-canvas-header-padding-x: clamp(18px, 2.8vw, 38px);
+  --imms-canvas-header-padding-y: clamp(12px, 1.7vh, 18px);
+  --imms-split-left-min-height: 320px;
+  --imms-split-right-min-height: 420px;
+  --imms-drawer-padding-x: clamp(1rem, 1.6vw, 1.35rem);
+  --imms-drawer-padding-y: clamp(1rem, 2vh, 1.5rem);
+  --imms-drawer-toggle-size: clamp(2.25rem, 3vw, 2.75rem);
+  --imms-suggestion-padding-x: 20px;
+  --imms-suggestion-padding-y: 16px;
+}
+
+.imms-meeting-canvas .imms-topbar-grid {
+  min-height: var(--imms-topbar-height) !important;
+  gap: var(--imms-topbar-gap) !important;
+  padding: var(--imms-topbar-padding-y) var(--imms-topbar-padding-x) !important;
+}
+
+.imms-meeting-canvas .imms-topbar-button {
+  height: var(--imms-control-height) !important;
+  padding-left: var(--imms-control-padding-x) !important;
+  padding-right: var(--imms-control-padding-x) !important;
+  font-size: var(--imms-control-font-size) !important;
+  line-height: 1.2 !important;
+}
+
+.imms-meeting-canvas .imms-stage-button {
+  padding: var(--imms-stage-padding-y) var(--imms-stage-padding-x) !important;
+  font-size: var(--imms-stage-font-size) !important;
+}
+
+.imms-meeting-canvas .imms-node-count-chip {
+  height: calc(var(--imms-control-height) - 8px) !important;
+  padding-left: 10px !important;
+  padding-right: 10px !important;
+}
+
+.imms-meeting-canvas .imms-meeting-title {
+  font-size: var(--imms-meeting-title-size) !important;
+}
+
+.imms-meeting-canvas .imms-meeting-goal-title {
+  font-size: var(--imms-meeting-goal-size) !important;
+}
+
+.imms-meeting-canvas .imms-canvas-header {
+  min-height: var(--imms-canvas-header-height) !important;
+}
+
+.imms-meeting-canvas .imms-canvas-header-cell {
+  min-height: var(--imms-canvas-header-height) !important;
+  padding: var(--imms-canvas-header-padding-y) var(--imms-canvas-header-padding-x) !important;
+}
+
+.imms-meeting-canvas .imms-split-pane-left {
+  min-height: var(--imms-split-left-min-height) !important;
+}
+
+.imms-meeting-canvas .imms-split-pane-right {
+  min-height: var(--imms-split-right-min-height) !important;
+}
+
+.imms-meeting-canvas .imms-drawer-body {
+  padding: var(--imms-drawer-padding-y) var(--imms-drawer-padding-x) !important;
+}
+
+.imms-meeting-canvas .imms-drawer-toggle {
+  height: var(--imms-drawer-toggle-size) !important;
+  width: var(--imms-drawer-toggle-size) !important;
+}
+
+.imms-meeting-canvas .imms-ideation-suggestions {
+  padding-left: var(--imms-suggestion-padding-x) !important;
+  padding-right: var(--imms-suggestion-padding-x) !important;
+  padding-top: var(--imms-suggestion-padding-y) !important;
+  padding-bottom: var(--imms-suggestion-padding-y) !important;
+}
+
+.imms-meeting-canvas.imms-compact-layout {
+  --imms-topbar-height: clamp(74px, 9.5vh, 104px);
+  --imms-topbar-padding-x: 18px;
+  --imms-topbar-padding-y: 8px;
+  --imms-topbar-gap: 8px;
+  --imms-control-height: 34px;
+  --imms-control-padding-x: 10px;
+  --imms-control-font-size: 12px;
+  --imms-stage-padding-x: 10px;
+  --imms-stage-padding-y: 6px;
+  --imms-stage-font-size: 13px;
+  --imms-meeting-title-size: 14px;
+  --imms-meeting-goal-size: 22px;
+  --imms-canvas-header-height: clamp(68px, 8vh, 88px);
+  --imms-canvas-header-padding-x: 20px;
+  --imms-canvas-header-padding-y: 8px;
+  --imms-split-left-min-height: 280px;
+  --imms-split-right-min-height: 360px;
+  --imms-drawer-padding-x: 14px;
+  --imms-drawer-padding-y: 12px;
+  --imms-drawer-toggle-size: 2.25rem;
+  --imms-suggestion-padding-x: 14px;
+  --imms-suggestion-padding-y: 10px;
+}
+
+@media (max-width: 1440px), (max-height: 900px) {
+  .imms-meeting-canvas {
+    --imms-topbar-height: clamp(74px, 9.5vh, 104px);
+    --imms-topbar-padding-x: 18px;
+    --imms-topbar-padding-y: 8px;
+    --imms-topbar-gap: 8px;
+    --imms-control-height: 34px;
+    --imms-control-padding-x: 10px;
+    --imms-control-font-size: 12px;
+    --imms-stage-padding-x: 10px;
+    --imms-stage-padding-y: 6px;
+    --imms-stage-font-size: 13px;
+    --imms-meeting-title-size: 14px;
+    --imms-meeting-goal-size: 22px;
+    --imms-canvas-header-height: clamp(68px, 8vh, 88px);
+    --imms-canvas-header-padding-x: 20px;
+    --imms-canvas-header-padding-y: 8px;
+    --imms-split-left-min-height: 280px;
+    --imms-split-right-min-height: 360px;
+    --imms-drawer-padding-x: 14px;
+    --imms-drawer-padding-y: 12px;
+    --imms-drawer-toggle-size: 2.25rem;
+    --imms-suggestion-padding-x: 14px;
+    --imms-suggestion-padding-y: 10px;
+  }
+
+  .imms-meeting-canvas .imms-workspace-grid {
+    gap: 4px !important;
+  }
+
+  .imms-meeting-canvas .react-flow__minimap {
+    transform: scale(0.86);
+    transform-origin: right bottom;
+  }
+}
+
+@media (min-width: 1280px) and (max-width: 1440px), (min-width: 1280px) and (max-height: 900px) {
+  .imms-meeting-canvas .imms-canvas-split {
+    grid-template-columns: minmax(15rem, 34%) minmax(0, 1fr) !important;
+  }
+
+  .imms-meeting-canvas .imms-solution-split {
+    grid-template-columns: minmax(15rem, 33%) minmax(0, 1fr) !important;
+  }
+}
+
 .imms-drawer-pane {
   will-change: transform, opacity;
   transition:
