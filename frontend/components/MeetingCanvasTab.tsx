@@ -163,6 +163,10 @@ type CanvasIdeaAssimilationJobSnapshot = {
   warning?: string;
   pending_item_id?: string;
   resolved_node_id?: string;
+  retry_count?: number;
+  retry_after_epoch?: number;
+  retry_job_id?: string;
+  retry_source_job_id?: string;
   target_count?: number;
   target_signature?: string;
   job_type?: string;
@@ -238,6 +242,10 @@ function logCanvasIdeaAssimilationJob(
     retryable: Boolean(job?.retryable),
     pendingItemId: job?.pending_item_id || "",
     resolvedNodeId: job?.resolved_node_id || "",
+    retryCount: job?.retry_count || 0,
+    retryAfterEpoch: job?.retry_after_epoch || 0,
+    retryJobId: job?.retry_job_id || "",
+    retrySourceJobId: job?.retry_source_job_id || "",
     targetCount: job?.target_count || 0,
     targetSignature: job?.target_signature || "",
     ok: Boolean(job?.ok),

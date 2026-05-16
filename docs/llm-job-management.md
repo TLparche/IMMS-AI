@@ -272,21 +272,18 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 - operation log는 최근 400개만 유지하며 `node_created`, `node_moved`, `node_merged`, `node_compacted`, `node_deleted`를 기록
 - 병합/삭제된 노드는 `node_lineage`에 최근 계보를 저장하고, 늦게 도착한 topic summary 작업은 흡수된 최종 노드 ID를 확인해 `stale_obsolete`로 종료
 - node lineage는 최근 2000개 record로 제한하며 C -> E, A -> C -> E 같은 체인을 최종 current node 기준으로 갱신
+- topic summary 작업은 `error_retryable` 또는 `stale_rebasable`이면 retry queue에 넣고 20초, 60초 간격으로 최대 2회 현재 canvas 기준 재시도
+- retry queue는 `queued` job으로 남기며, 대기 중 더 최신 작업이 생기거나 대상 노드가 사라지면 조용히 superseded/obsolete 처리
 
 현재 상태는 "늦은 응답이 workspace를 망가뜨리지 않게 하면서, 이후 retry queue가 판단할 수 있는 상태값을 남기는 안전장치"에 가깝다.
 
 ## 다음 구현 순서
 
-1. Retry queue 추가
-   - error retryable만 지연 재시도
-   - stale rebasable은 현재 상태 기준으로 새 요청
-   - obsolete/superseded는 재시도하지 않음
-
-2. Patch 기반 응답 적용
+1. Patch 기반 응답 적용
    - 전체 workspace 대신 작업별 patch 적용
    - 사용자 편집 필드는 덮어쓰지 않음
 
-3. AI 진행 로그 패널 데이터화
+2. AI 진행 로그 패널 데이터화
    - 사용자별로 접어둔 상태
    - 열면 AI 작업 처리 이력 확인
 

@@ -43,6 +43,7 @@ LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
 CANVAS_OPERATION_LOG_MAX = 400
 CANVAS_NODE_LINEAGE_MAX = 2000
+CANVAS_TOPIC_SUMMARY_RETRY_DELAYS_SECONDS = (20, 60)
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
 CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
@@ -7743,6 +7744,16 @@ def _canvas_job_created_epoch(job: dict[str, Any]) -> float:
         return 0.0
 
 
+def _canvas_job_retry_count(job: dict[str, Any]) -> int:
+    return _safe_nonnegative_int(job.get("retry_count"))
+
+
+def _canvas_topic_summary_retry_delay_seconds(retry_count: int) -> int:
+    if retry_count < 0 or retry_count >= len(CANVAS_TOPIC_SUMMARY_RETRY_DELAYS_SECONDS):
+        return 0
+    return int(CANVAS_TOPIC_SUMMARY_RETRY_DELAYS_SECONDS[retry_count])
+
+
 def _has_newer_canvas_idea_scope_job(
     meeting_id: str,
     job_id: str,
@@ -7767,7 +7778,7 @@ def _has_newer_canvas_idea_scope_job(
                 continue
             if _safe_text(candidate.get("scope_key")) != normalized_scope_key:
                 continue
-            if _safe_text(candidate.get("status")) not in {"processing", "completed"}:
+            if _safe_text(candidate.get("status")) not in {"queued", "processing", "completed"}:
                 continue
             if _canvas_job_created_epoch(candidate) > current_epoch:
                 return True
@@ -7780,11 +7791,13 @@ def _supersede_processing_canvas_idea_scope_jobs(
     scope_key: str,
     next_target_signature: str,
     workspace: dict[str, Any],
+    exclude_job_id: str = "",
 ) -> int:
     normalized_meeting_id = _safe_text(meeting_id)
     normalized_job_type = _safe_text(job_type)
     normalized_scope_key = _safe_text(scope_key)
     normalized_signature = _safe_text(next_target_signature)
+    normalized_exclude_job_id = _safe_text(exclude_job_id)
     if not normalized_meeting_id or not normalized_job_type or not normalized_scope_key:
         return 0
 
@@ -7794,7 +7807,9 @@ def _supersede_processing_canvas_idea_scope_jobs(
         for job_id, job in list(meeting_jobs.items()):
             if not isinstance(job, dict):
                 continue
-            if _safe_text(job.get("status")) != "processing":
+            if normalized_exclude_job_id and _safe_text(job_id) == normalized_exclude_job_id:
+                continue
+            if _safe_text(job.get("status")) not in {"queued", "processing"}:
                 continue
             if _canvas_job_type(job) != normalized_job_type:
                 continue
@@ -7841,7 +7856,7 @@ def _finish_stale_canvas_topic_summary_job(
         ]
         _save_canvas_workspace_runtime(meeting_id, latest_workspace)
 
-    _mark_canvas_idea_job(
+    updated_job = _mark_canvas_idea_job(
         meeting_id,
         job_id,
         status=status,
@@ -7854,6 +7869,8 @@ def _finish_stale_canvas_topic_summary_job(
         pending_item_id=topic_id,
         resolved_node_id=_safe_text(resolved_node_id),
     )
+    if retryable and status in {"stale_rebasable", "error_retryable"}:
+        _schedule_canvas_topic_summary_retry(updated_job)
 
 
 def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -7871,6 +7888,10 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
         "warning": _safe_text(job.get("warning")),
         "pending_item_id": _safe_text(job.get("pending_item_id")),
         "resolved_node_id": _safe_text(job.get("resolved_node_id")),
+        "retry_count": _canvas_job_retry_count(job),
+        "retry_after_epoch": _safe_operation_epoch(job.get("retry_after_epoch")),
+        "retry_job_id": _safe_text(job.get("retry_job_id")),
+        "retry_source_job_id": _safe_text(job.get("retry_source_job_id")),
         "target_count": int(job.get("target_count") or 0),
         "created_at": _safe_text(job.get("created_at")),
         "updated_at": _safe_text(job.get("updated_at")),
@@ -8255,6 +8276,229 @@ def _canvas_topic_summary_signature(workspace: dict[str, Any], topic_id: str) ->
             "leaf_child_ids": child_ids,
             "children": child_payload,
         }
+    )
+
+
+def _schedule_canvas_topic_summary_retry(source_job: dict[str, Any]) -> dict[str, Any] | None:
+    normalized_meeting_id = _safe_text(source_job.get("meeting_id"))
+    source_job_id = _safe_text(source_job.get("job_id"))
+    topic_id = _safe_text(source_job.get("pending_item_id") or source_job.get("scope_key"))
+    if (
+        not normalized_meeting_id
+        or not source_job_id
+        or _canvas_job_type(source_job) != "topic_summary"
+        or not topic_id
+        or not bool(source_job.get("retryable"))
+    ):
+        return None
+
+    retry_count = _canvas_job_retry_count(source_job)
+    retry_delay = _canvas_topic_summary_retry_delay_seconds(retry_count)
+    if retry_delay <= 0:
+        return _mark_canvas_idea_job(
+            normalized_meeting_id,
+            source_job_id,
+            retryable=False,
+            retry_scheduled=False,
+            detail=(
+                _safe_text(source_job.get("detail"))
+                or "AI topic 정리 재시도 한도에 도달했습니다."
+            ),
+        )
+
+    if _has_newer_canvas_idea_scope_job(normalized_meeting_id, source_job_id, "topic_summary", topic_id):
+        return None
+
+    retry_after_epoch = time.time() + retry_delay
+    retry_job_id = uuid4().hex
+    meeting_topic = _safe_text(source_job.get("meeting_topic"), "회의 주제")
+    workspace = _clone_runtime_workspace_state(
+        normalized_meeting_id,
+        _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        _now_ts(),
+    )
+
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        existing_retry = next(
+            (
+                copy.deepcopy(job)
+                for job in meeting_jobs.values()
+                if isinstance(job, dict)
+                and _safe_text(job.get("status")) == "queued"
+                and _canvas_job_type(job) == "topic_summary"
+                and _safe_text(job.get("scope_key")) == topic_id
+                and _safe_text(job.get("retry_source_job_id")) == source_job_id
+            ),
+            None,
+        )
+    if existing_retry:
+        return existing_retry
+
+    queued_job = _mark_canvas_idea_job(
+        normalized_meeting_id,
+        retry_job_id,
+        job_type="topic_summary",
+        scope_key=topic_id,
+        status="queued",
+        stale_reason="",
+        retryable=False,
+        retry_count=retry_count + 1,
+        retry_after_epoch=retry_after_epoch,
+        retry_source_job_id=source_job_id,
+        meeting_topic=meeting_topic,
+        detail=f"AI topic 정리 재시도 대기 중 · {retry_delay}초",
+        pending_item_id=topic_id,
+        target_count=0,
+        target_signature="",
+        created_at=_now_ts(),
+        created_epoch=time.time(),
+        workspace=copy.deepcopy(workspace),
+    )
+    _mark_canvas_idea_job(
+        normalized_meeting_id,
+        source_job_id,
+        retry_scheduled=True,
+        retry_job_id=retry_job_id,
+        retry_after_epoch=retry_after_epoch,
+    )
+    threading.Thread(
+        target=_run_queued_canvas_topic_summary_retry,
+        args=(normalized_meeting_id, retry_job_id, topic_id, meeting_topic, retry_after_epoch),
+        daemon=True,
+        name=f"canvas-topic-retry-{retry_job_id[:8]}",
+    ).start()
+    return queued_job
+
+
+def _run_queued_canvas_topic_summary_retry(
+    meeting_id: str,
+    job_id: str,
+    topic_item_id: str,
+    meeting_topic: str,
+    retry_after_epoch: float,
+) -> None:
+    wait_seconds = max(0.0, float(retry_after_epoch or 0) - time.time())
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_job_id = _safe_text(job_id)
+    topic_id = _safe_text(topic_item_id)
+    with RT.lock:
+        queued_job = copy.deepcopy(
+            (RT.canvas_idea_jobs_by_meeting.get(normalized_meeting_id) or {}).get(normalized_job_id) or {}
+        )
+    if _safe_text(queued_job.get("status")) != "queued":
+        return
+
+    workspace = _clone_runtime_workspace_state(
+        normalized_meeting_id,
+        _warm_canvas_workspace_cache(RT, normalized_meeting_id),
+        _now_ts(),
+    )
+    canvas_items = [
+        copy.deepcopy(item)
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_id), None)
+    if not topic or not _is_canvas_topic_item(topic):
+        missing_state = _canvas_missing_topic_summary_state(workspace, topic_id)
+        _mark_canvas_idea_job(
+            normalized_meeting_id,
+            normalized_job_id,
+            status="stale_obsolete",
+            stale_reason=_safe_text(missing_state.get("stale_reason"), "obsolete"),
+            retryable=False,
+            detail=_safe_text(missing_state.get("detail")),
+            resolved_node_id=_safe_text(missing_state.get("resolved_node_id")),
+            workspace=copy.deepcopy(workspace),
+            pending_item_id=topic_id,
+        )
+        return
+
+    if _has_newer_canvas_idea_scope_job(normalized_meeting_id, normalized_job_id, "topic_summary", topic_id):
+        _mark_canvas_idea_job(
+            normalized_meeting_id,
+            normalized_job_id,
+            status="stale_superseded",
+            stale_reason="superseded",
+            retryable=False,
+            detail="재시도 대기 중 더 최신 AI topic 정리 요청으로 대체되었습니다.",
+            workspace=copy.deepcopy(workspace),
+            pending_item_id=topic_id,
+        )
+        return
+
+    target_signature = _canvas_topic_summary_signature(workspace, topic_id)
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        same_signature_running = next(
+            (
+                copy.deepcopy(job)
+                for candidate_id, job in meeting_jobs.items()
+                if _safe_text(candidate_id) != normalized_job_id
+                and isinstance(job, dict)
+                and _safe_text(job.get("status")) == "processing"
+                and _canvas_job_type(job) == "topic_summary"
+                and _safe_text(job.get("scope_key")) == topic_id
+                and _safe_text(job.get("target_signature")) == target_signature
+            ),
+            None,
+        )
+    if same_signature_running:
+        _mark_canvas_idea_job(
+            normalized_meeting_id,
+            normalized_job_id,
+            status="stale_superseded",
+            stale_reason="superseded",
+            retryable=False,
+            detail="같은 topic 정리 요청이 이미 처리 중이어서 재시도를 생략했습니다.",
+            workspace=copy.deepcopy(workspace),
+            pending_item_id=topic_id,
+        )
+        return
+
+    workspace["canvas_items"] = [
+        {
+            **item,
+            "ai_pending": True,
+            "ai_generated": True,
+            "user_edited": False,
+        }
+        if _safe_text(item.get("id")) == topic_id
+        else item
+        for item in canvas_items
+    ]
+    workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
+    _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
+    _supersede_processing_canvas_idea_scope_jobs(
+        normalized_meeting_id,
+        "topic_summary",
+        topic_id,
+        target_signature,
+        workspace,
+        exclude_job_id=normalized_job_id,
+    )
+    _mark_canvas_idea_job(
+        normalized_meeting_id,
+        normalized_job_id,
+        status="processing",
+        stale_reason="",
+        retryable=False,
+        detail="AI가 topic 제목과 content를 재시도 중",
+        pending_item_id=topic_id,
+        target_count=len(_canvas_topic_leaf_child_ids(workspace, topic_id)),
+        target_signature=target_signature,
+        workspace=copy.deepcopy(workspace),
+        processing_started_at=_now_ts(),
+    )
+    _finalize_canvas_topic_summary_workspace_job(
+        normalized_meeting_id,
+        normalized_job_id,
+        topic_id,
+        _safe_text(meeting_topic, "회의 주제"),
     )
 
 
@@ -8869,7 +9113,7 @@ def _finalize_canvas_topic_summary_workspace_job(
                 for item in canvas_items
             ]
             _save_canvas_workspace_runtime(meeting_id, latest_workspace)
-            _mark_canvas_idea_job(
+            updated_job = _mark_canvas_idea_job(
                 meeting_id,
                 job_id,
                 status="error_retryable",
@@ -8881,6 +9125,7 @@ def _finalize_canvas_topic_summary_workspace_job(
                 pending_item_id=topic_id,
                 failed_at_epoch=time.time(),
             )
+            _schedule_canvas_topic_summary_retry(updated_job)
             return
 
         latest_workspace["canvas_items"] = [
@@ -8936,7 +9181,7 @@ def _finalize_canvas_topic_summary_workspace_job(
             for item in (latest_workspace.get("canvas_items") or [])
         ]
         _save_canvas_workspace_runtime(meeting_id, latest_workspace)
-        _mark_canvas_idea_job(
+        updated_job = _mark_canvas_idea_job(
             meeting_id,
             job_id,
             status="error_retryable",
@@ -8948,6 +9193,7 @@ def _finalize_canvas_topic_summary_workspace_job(
             pending_item_id=_safe_text(topic_item_id),
             failed_at_epoch=time.time(),
         )
+        _schedule_canvas_topic_summary_retry(updated_job)
 
 
 def _compute_canvas_topic_clustering_result(
@@ -9710,6 +9956,8 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
         pending_item_id=topic_item_id,
         target_count=len(_canvas_topic_leaf_child_ids(workspace, topic_item_id)),
         target_signature=target_signature,
+        meeting_topic=_safe_text(payload.meeting_topic, "회의 주제"),
+        retry_count=0,
         created_at=_now_ts(),
         created_epoch=time.time(),
         workspace=copy.deepcopy(workspace),
