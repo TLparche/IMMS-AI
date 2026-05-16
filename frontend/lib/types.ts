@@ -29,6 +29,62 @@ export interface LlmStatus {
   last_finish_reason?: string;
 }
 
+export interface AiTaskPolicy {
+  task_type: string;
+  queue_name: string;
+  worker_name: string;
+  model_policy: string;
+  cache_policy: string;
+  stale_policy: string;
+  output_policy: string;
+  priority: number;
+  description?: string;
+}
+
+export interface AiTaskRecord extends AiTaskPolicy {
+  task_id: string;
+  meeting_id: string;
+  source?: string;
+  job_id?: string;
+  job_type?: string;
+  scope_key?: string;
+  status: string;
+  stale_reason?: string;
+  retryable?: boolean;
+  detail?: string;
+  warning?: string;
+  cache_key?: string;
+  cache_hit?: boolean;
+  deduped?: boolean;
+  input_signature?: string;
+  pending_item_id?: string;
+  resolved_node_id?: string;
+  target_count?: number;
+  target_signature?: string;
+  retry_count?: number;
+  retry_after_epoch?: number;
+  retry_job_id?: string;
+  retry_source_job_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  started_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+}
+
+export interface AiTaskPoliciesResponse {
+  ok: boolean;
+  policies: AiTaskPolicy[];
+}
+
+export interface AiTasksResponse {
+  ok: boolean;
+  meeting_id?: string;
+  queues: Record<string, Record<string, number>>;
+  tasks: AiTaskRecord[];
+  policies: AiTaskPolicy[];
+}
+
 export interface AgendaActionReason {
   turn_id?: number;
   speaker: string;

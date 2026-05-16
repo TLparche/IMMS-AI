@@ -43,6 +43,7 @@ LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
 CANVAS_OPERATION_LOG_MAX = 400
 CANVAS_NODE_LINEAGE_MAX = 2000
+CANVAS_TASK_RECORD_MAX = 800
 CANVAS_TOPIC_SUMMARY_RETRY_DELAYS_SECONDS = (20, 60)
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
@@ -1829,6 +1830,122 @@ def _canvas_task_job_fields(task_type: str) -> dict[str, Any]:
     }
 
 
+def _canvas_task_signature_preview(raw: Any) -> str:
+    signature = _safe_text(raw)
+    if not signature:
+        return ""
+    if len(signature) <= 160:
+        return signature
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()
+
+
+def _upsert_canvas_task_record_locked(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    task_id: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return {}
+
+    normalized_task_id = _safe_text(task_id) or uuid4().hex
+    records = rt.canvas_task_records_by_meeting.setdefault(normalized_meeting_id, {})
+    current = records.get(normalized_task_id) if isinstance(records.get(normalized_task_id), dict) else {}
+    task_type = _safe_text(fields.get("task_type") or current.get("task_type"), "generic")
+    now = _now_ts()
+    current_status = _safe_text(fields.get("status") or current.get("status"), "processing")
+
+    record = {
+        **current,
+        **_canvas_task_job_fields(task_type),
+        **fields,
+        "task_id": normalized_task_id,
+        "meeting_id": normalized_meeting_id,
+        "status": current_status,
+        "created_at": _safe_text(current.get("created_at") or fields.get("created_at"), now),
+        "updated_at": now,
+    }
+    if not record.get("created_epoch"):
+        record["created_epoch"] = float(fields.get("created_epoch") or time.time())
+    if current_status in {"processing"} and not record.get("started_at"):
+        record["started_at"] = now
+        record["started_epoch"] = time.time()
+    if current_status in {
+        "completed",
+        "error",
+        "error_retryable",
+        "error_final",
+        "stale_superseded",
+        "stale_obsolete",
+        "stale_rebasable",
+        "missing",
+        "idle",
+    }:
+        record.setdefault("completed_at", now)
+        record.setdefault("completed_epoch", time.time())
+    started_epoch = float(record.get("started_epoch") or record.get("created_epoch") or 0)
+    completed_epoch = float(record.get("completed_epoch") or 0)
+    if started_epoch > 0 and completed_epoch >= started_epoch:
+        record["duration_ms"] = int((completed_epoch - started_epoch) * 1000)
+
+    records[normalized_task_id] = record
+    if len(records) > CANVAS_TASK_RECORD_MAX:
+        ordered = sorted(
+            records.items(),
+            key=lambda item: float((item[1] or {}).get("created_epoch") or 0),
+        )
+        for remove_id, _ in ordered[: max(0, len(records) - CANVAS_TASK_RECORD_MAX)]:
+            records.pop(remove_id, None)
+    return copy.deepcopy(record)
+
+
+def _mark_canvas_task_record(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    task_id: str = "",
+    **fields: Any,
+) -> dict[str, Any]:
+    with rt.lock:
+        return _upsert_canvas_task_record_locked(rt, meeting_id, task_id, **fields)
+
+
+def _canvas_task_record_response(record: dict[str, Any]) -> dict[str, Any]:
+    task_type = _safe_text(record.get("task_type"), "generic")
+    policy_fields = _canvas_task_job_fields(task_type)
+    return {
+        **policy_fields,
+        "task_id": _safe_text(record.get("task_id")),
+        "meeting_id": _safe_text(record.get("meeting_id")),
+        "source": _safe_text(record.get("source")),
+        "job_id": _safe_text(record.get("job_id")),
+        "job_type": _safe_text(record.get("job_type")),
+        "scope_key": _safe_text(record.get("scope_key")),
+        "status": _safe_text(record.get("status"), "idle"),
+        "stale_reason": _safe_text(record.get("stale_reason")),
+        "retryable": bool(record.get("retryable")),
+        "detail": _safe_text(record.get("detail")),
+        "warning": _safe_text(record.get("warning")),
+        "cache_key": _safe_text(record.get("cache_key")),
+        "cache_hit": bool(record.get("cache_hit")),
+        "deduped": bool(record.get("deduped")),
+        "input_signature": _safe_text(record.get("input_signature")),
+        "pending_item_id": _safe_text(record.get("pending_item_id")),
+        "resolved_node_id": _safe_text(record.get("resolved_node_id")),
+        "target_count": int(record.get("target_count") or 0),
+        "target_signature": _safe_text(record.get("target_signature")),
+        "retry_count": _safe_nonnegative_int(record.get("retry_count")),
+        "retry_after_epoch": _safe_operation_epoch(record.get("retry_after_epoch")),
+        "retry_job_id": _safe_text(record.get("retry_job_id")),
+        "retry_source_job_id": _safe_text(record.get("retry_source_job_id")),
+        "created_at": _safe_text(record.get("created_at")),
+        "updated_at": _safe_text(record.get("updated_at")),
+        "started_at": _safe_text(record.get("started_at")),
+        "completed_at": _safe_text(record.get("completed_at")),
+        "duration_ms": int(record.get("duration_ms") or 0),
+    }
+
+
 def _canvas_task_job_summary(job: dict[str, Any], source: str = "") -> dict[str, Any]:
     normalized_source = _safe_text(source)
     task_type = _safe_text(job.get("task_type"))
@@ -1841,6 +1958,7 @@ def _canvas_task_job_summary(job: dict[str, Any], source: str = "") -> dict[str,
     policy_fields = _canvas_task_job_fields(task_type)
     return {
         **policy_fields,
+        "task_id": _safe_text(job.get("task_id") or job.get("job_id")),
         "source": normalized_source,
         "job_id": _safe_text(job.get("job_id")),
         "meeting_id": _safe_text(job.get("meeting_id")),
@@ -1851,8 +1969,13 @@ def _canvas_task_job_summary(job: dict[str, Any], source: str = "") -> dict[str,
         "retryable": bool(job.get("retryable")),
         "detail": _safe_text(job.get("detail")),
         "pending_item_id": _safe_text(job.get("pending_item_id")),
+        "resolved_node_id": _safe_text(job.get("resolved_node_id")),
         "target_count": int(job.get("target_count") or 0),
         "target_signature": _safe_text(job.get("target_signature")),
+        "retry_count": _safe_nonnegative_int(job.get("retry_count")),
+        "retry_after_epoch": _safe_operation_epoch(job.get("retry_after_epoch")),
+        "retry_job_id": _safe_text(job.get("retry_job_id")),
+        "retry_source_job_id": _safe_text(job.get("retry_source_job_id")),
         "created_at": _safe_text(job.get("created_at")),
         "updated_at": _safe_text(job.get("updated_at")),
     }
@@ -1914,20 +2037,67 @@ def _run_canvas_task_cached_request(
     compute: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
     policy = _canvas_task_policy(task_type)
-    if policy.cache_policy == "none":
-        result = compute()
-    else:
-        result = _run_canvas_llm_cached_request(
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_scope_key = _safe_text(scope_key, "default")
+    normalized_signature = _safe_text(signature)
+    cache_key = f"{policy.task_type}:{normalized_scope_key}"
+    task_id = uuid4().hex
+    input_signature = _canvas_task_signature_preview(normalized_signature)
+    _mark_canvas_task_record(
+        rt,
+        normalized_meeting_id,
+        task_id,
+        **_canvas_task_job_fields(policy.task_type),
+        source="cached_request",
+        scope_key=normalized_scope_key,
+        cache_key=cache_key,
+        input_signature=input_signature,
+        target_signature=input_signature,
+        status="processing",
+        detail="AI task 처리 중",
+    )
+    task_meta: dict[str, Any] = {}
+    try:
+        if policy.cache_policy == "none":
+            result = compute()
+            task_meta["cache_hit"] = False
+        else:
+            result = _run_canvas_llm_cached_request(
+                rt,
+                normalized_meeting_id,
+                cache_key,
+                normalized_signature,
+                compute,
+                task_type=policy.task_type,
+                task_meta=task_meta,
+            )
+    except Exception as exc:
+        _mark_canvas_task_record(
             rt,
-            meeting_id,
-            f"{policy.task_type}:{_safe_text(scope_key, 'default')}",
-            signature,
-            compute,
-            task_type=policy.task_type,
+            normalized_meeting_id,
+            task_id,
+            status="error",
+            detail=f"AI task 실패: {exc}",
+            warning=_safe_text(exc),
         )
+        raise
+
+    _mark_canvas_task_record(
+        rt,
+        normalized_meeting_id,
+        task_id,
+        status="completed",
+        detail="AI task 완료",
+        cache_hit=bool(task_meta.get("cache_hit")),
+        deduped=bool(task_meta.get("deduped")),
+    )
     if isinstance(result, dict):
         return {
             **_canvas_task_job_fields(policy.task_type),
+            "task_id": task_id,
+            "cache_key": cache_key,
+            "cache_hit": bool(task_meta.get("cache_hit")),
+            "deduped": bool(task_meta.get("deduped")),
             **result,
         }
     return result
@@ -2027,6 +2197,7 @@ def _run_canvas_llm_cached_request(
     signature: str,
     compute: Callable[[], dict[str, Any]],
     task_type: str = "generic",
+    task_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_meeting_id = _safe_text(meeting_id)
     normalized_cache_key = _safe_text(cache_key)
@@ -2049,6 +2220,9 @@ def _run_canvas_llm_cached_request(
                 normalized_signature,
             )
             if cached:
+                if task_meta is not None:
+                    task_meta["cache_hit"] = True
+                    task_meta["cache_key"] = normalized_cache_key
                 return cached
 
             meeting_entries = rt.canvas_llm_inflight_by_meeting.setdefault(normalized_meeting_id, {})
@@ -2060,6 +2234,8 @@ def _run_canvas_llm_cached_request(
             ):
                 wait_event = inflight["event"]
                 wait_error = _safe_text(inflight.get("error"))
+                if task_meta is not None:
+                    task_meta["deduped"] = True
             else:
                 wait_event = threading.Event()
                 meeting_entries[normalized_cache_key] = {
@@ -2079,6 +2255,10 @@ def _run_canvas_llm_cached_request(
                     normalized_signature,
                 )
                 if cached:
+                    if task_meta is not None:
+                        task_meta["cache_hit"] = False
+                        task_meta["deduped"] = True
+                        task_meta["cache_key"] = normalized_cache_key
                     return cached
 
                 inflight = _get_canvas_llm_inflight_entry(rt, normalized_meeting_id, normalized_cache_key)
@@ -2098,6 +2278,9 @@ def _run_canvas_llm_cached_request(
         try:
             request_lock = _canvas_task_lock(rt, task_type, "request")
             with request_lock:
+                if task_meta is not None:
+                    task_meta["cache_hit"] = False
+                    task_meta["cache_key"] = normalized_cache_key
                 result = compute()
         except Exception as exc:
             with rt.lock:
@@ -3051,6 +3234,7 @@ class RuntimeStore:
     canvas_last_placement: dict[str, Any] = field(default_factory=dict)
     canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_task_records_by_meeting: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     canvas_task_request_locks: dict[str, threading.Lock] = field(default_factory=dict)
     canvas_task_worker_locks: dict[str, threading.Lock] = field(default_factory=dict)
     canvas_idea_jobs_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -3095,6 +3279,7 @@ class RuntimeStore:
         self.canvas_last_placement = {}
         self.canvas_workspace_by_meeting = {}
         self.canvas_llm_inflight_by_meeting = {}
+        self.canvas_task_records_by_meeting = {}
         self.canvas_task_request_locks = {}
         self.canvas_task_worker_locks = {}
         self.canvas_idea_jobs_by_meeting = {}
@@ -6956,6 +7141,7 @@ def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> Non
     canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
     canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
     canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_task_records_by_meeting = copy.deepcopy(rt.canvas_task_records_by_meeting)
     canvas_idea_jobs_by_meeting = copy.deepcopy(rt.canvas_idea_jobs_by_meeting)
     canvas_problem_jobs_by_meeting = copy.deepcopy(rt.canvas_problem_jobs_by_meeting)
     canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
@@ -6972,6 +7158,7 @@ def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> Non
     rt.canvas_last_placement = canvas_last_placement
     rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
     rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_task_records_by_meeting = canvas_task_records_by_meeting
     rt.canvas_idea_jobs_by_meeting = canvas_idea_jobs_by_meeting
     rt.canvas_problem_jobs_by_meeting = canvas_problem_jobs_by_meeting
     rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
@@ -6983,6 +7170,7 @@ def _reset_runtime_preserving_canvas(rt: RuntimeStore) -> None:
     canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
     canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
     canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_task_records_by_meeting = copy.deepcopy(rt.canvas_task_records_by_meeting)
     canvas_idea_jobs_by_meeting = copy.deepcopy(rt.canvas_idea_jobs_by_meeting)
     canvas_problem_jobs_by_meeting = copy.deepcopy(rt.canvas_problem_jobs_by_meeting)
     canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
@@ -6993,6 +7181,7 @@ def _reset_runtime_preserving_canvas(rt: RuntimeStore) -> None:
     rt.canvas_last_placement = canvas_last_placement
     rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
     rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_task_records_by_meeting = canvas_task_records_by_meeting
     rt.canvas_idea_jobs_by_meeting = canvas_idea_jobs_by_meeting
     rt.canvas_problem_jobs_by_meeting = canvas_problem_jobs_by_meeting
     rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
@@ -7371,39 +7560,84 @@ def get_ai_task_policies():
 @app.get("/api/ai/tasks")
 def get_ai_tasks(meeting_id: str = ""):
     normalized_meeting_id = _safe_text(meeting_id)
-    jobs: list[dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
+    seen_task_ids: set[str] = set()
     with RT.lock:
+        task_records = copy.deepcopy(RT.canvas_task_records_by_meeting)
         idea_meetings = copy.deepcopy(RT.canvas_idea_jobs_by_meeting)
         problem_meetings = copy.deepcopy(RT.canvas_problem_jobs_by_meeting)
+
+    for current_meeting_id, meeting_records in task_records.items():
+        if normalized_meeting_id and _safe_text(current_meeting_id) != normalized_meeting_id:
+            continue
+        for record in (meeting_records or {}).values():
+            if not isinstance(record, dict):
+                continue
+            response = _canvas_task_record_response(record)
+            task_id = _safe_text(response.get("task_id"))
+            if task_id:
+                seen_task_ids.add(task_id)
+            tasks.append(response)
 
     for current_meeting_id, meeting_jobs in idea_meetings.items():
         if normalized_meeting_id and _safe_text(current_meeting_id) != normalized_meeting_id:
             continue
         for job in (meeting_jobs or {}).values():
             if isinstance(job, dict):
-                jobs.append(_canvas_task_job_summary(job, "canvas_idea"))
+                summary = _canvas_task_job_summary(job, "canvas_idea")
+                if _safe_text(summary.get("task_id")) in seen_task_ids:
+                    continue
+                tasks.append(summary)
 
     for current_meeting_id, meeting_jobs in problem_meetings.items():
         if normalized_meeting_id and _safe_text(current_meeting_id) != normalized_meeting_id:
             continue
         for job in (meeting_jobs or {}).values():
             if isinstance(job, dict):
-                jobs.append(_canvas_task_job_summary(job, "canvas_problem"))
+                summary = _canvas_task_job_summary(job, "canvas_problem")
+                if _safe_text(summary.get("task_id")) in seen_task_ids:
+                    continue
+                tasks.append(summary)
 
     queue_counts: dict[str, dict[str, int]] = {}
-    for job in jobs:
-        queue_name = _safe_text(job.get("queue_name"), "generic")
-        status = _safe_text(job.get("status"), "idle")
+    for task in tasks:
+        queue_name = _safe_text(task.get("queue_name"), "generic")
+        status = _safe_text(task.get("status"), "idle")
         queue_counts.setdefault(queue_name, {})
         queue_counts[queue_name][status] = queue_counts[queue_name].get(status, 0) + 1
 
-    jobs.sort(key=lambda item: _safe_text(item.get("updated_at")), reverse=True)
+    tasks.sort(key=lambda item: _safe_text(item.get("updated_at")), reverse=True)
     return {
         "ok": True,
         "meeting_id": normalized_meeting_id,
         "queues": queue_counts,
-        "tasks": jobs[:200],
+        "tasks": tasks[:200],
         "policies": [_canvas_task_policy_response(policy) for policy in CANVAS_TASK_POLICIES.values()],
+    }
+
+
+@app.get("/api/ai/tasks/{task_id}")
+def get_ai_task(task_id: str, meeting_id: str = ""):
+    normalized_task_id = _safe_text(task_id)
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_task_id:
+        raise HTTPException(status_code=400, detail="task_id is required")
+    with RT.lock:
+        task_records = copy.deepcopy(RT.canvas_task_records_by_meeting)
+    for current_meeting_id, meeting_records in task_records.items():
+        if normalized_meeting_id and _safe_text(current_meeting_id) != normalized_meeting_id:
+            continue
+        record = meeting_records.get(normalized_task_id) if isinstance(meeting_records, dict) else None
+        if isinstance(record, dict):
+            return {
+                "ok": True,
+                "task": _canvas_task_record_response(record),
+            }
+    return {
+        "ok": False,
+        "task_id": normalized_task_id,
+        "meeting_id": normalized_meeting_id,
+        "detail": "작업 정보를 찾을 수 없습니다.",
     }
 
 
@@ -8066,15 +8300,42 @@ def _mark_canvas_idea_job(
             or current.get("task_type")
             or _canvas_task_type_for_idea_job(_safe_text(fields.get("job_type") or current.get("job_type"))),
         )
+        task_id = _safe_text(fields.get("task_id") or current.get("task_id") or job_id)
         current = {
             **current,
             **_canvas_task_job_fields(task_type),
             **fields,
+            "task_id": task_id,
             "job_id": job_id,
             "meeting_id": normalized_meeting_id,
             "updated_at": _now_ts(),
         }
         meeting_jobs[job_id] = current
+        _upsert_canvas_task_record_locked(
+            RT,
+            normalized_meeting_id,
+            task_id,
+            **_canvas_task_job_fields(task_type),
+            source="canvas_idea_job",
+            job_id=job_id,
+            job_type=_canvas_job_type(current),
+            scope_key=_safe_text(current.get("scope_key")),
+            status=_safe_text(current.get("status"), "idle"),
+            stale_reason=_safe_text(current.get("stale_reason")),
+            retryable=bool(current.get("retryable")),
+            detail=_safe_text(current.get("detail")),
+            warning=_safe_text(current.get("warning")),
+            pending_item_id=_safe_text(current.get("pending_item_id")),
+            resolved_node_id=_safe_text(current.get("resolved_node_id")),
+            target_count=int(current.get("target_count") or 0),
+            target_signature=_canvas_task_signature_preview(current.get("target_signature")),
+            retry_count=_safe_nonnegative_int(current.get("retry_count")),
+            retry_after_epoch=_safe_operation_epoch(current.get("retry_after_epoch")),
+            retry_job_id=_safe_text(current.get("retry_job_id")),
+            retry_source_job_id=_safe_text(current.get("retry_source_job_id")),
+            created_at=_safe_text(current.get("created_at")),
+            created_epoch=float(current.get("created_epoch") or time.time()),
+        )
         return copy.deepcopy(current)
 
 
@@ -8162,7 +8423,7 @@ def _supersede_processing_canvas_idea_scope_jobs(
                 continue
             if normalized_signature and _safe_text(job.get("target_signature")) == normalized_signature:
                 continue
-            meeting_jobs[job_id] = {
+            updated_job = {
                 **job,
                 "status": "stale_superseded",
                 "stale_reason": "superseded",
@@ -8172,6 +8433,27 @@ def _supersede_processing_canvas_idea_scope_jobs(
                 "workspace": copy.deepcopy(workspace),
                 "updated_at": _now_ts(),
             }
+            meeting_jobs[job_id] = updated_job
+            task_type = _safe_text(updated_job.get("task_type")) or _canvas_task_type_for_idea_job(_canvas_job_type(updated_job))
+            _upsert_canvas_task_record_locked(
+                RT,
+                normalized_meeting_id,
+                _safe_text(updated_job.get("task_id") or job_id),
+                **_canvas_task_job_fields(task_type),
+                source="canvas_idea_job",
+                job_id=_safe_text(job_id),
+                job_type=_canvas_job_type(updated_job),
+                scope_key=_safe_text(updated_job.get("scope_key")),
+                status="stale_superseded",
+                stale_reason="superseded",
+                retryable=False,
+                detail=_safe_text(updated_job.get("detail")),
+                pending_item_id=_safe_text(updated_job.get("pending_item_id")),
+                target_count=int(updated_job.get("target_count") or 0),
+                target_signature=_canvas_task_signature_preview(updated_job.get("target_signature")),
+                created_at=_safe_text(updated_job.get("created_at")),
+                created_epoch=float(updated_job.get("created_epoch") or time.time()),
+            )
             superseded += 1
     return superseded
 
@@ -8221,6 +8503,7 @@ def _finish_stale_canvas_topic_summary_job(
 def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | None = None) -> dict[str, Any]:
     response = {
         "ok": True,
+        "task_id": _safe_text(job.get("task_id") or job.get("job_id")),
         "job_id": _safe_text(job.get("job_id")),
         "meeting_id": _safe_text(job.get("meeting_id")),
         "status": _safe_text(job.get("status"), "idle"),
@@ -8275,17 +8558,37 @@ def _mark_canvas_problem_job(
             **current,
             **_canvas_task_job_fields(task_type),
             **fields,
+            "task_id": _safe_text(fields.get("task_id") or current.get("task_id") or job_id),
             "job_id": job_id,
             "meeting_id": normalized_meeting_id,
             "updated_at": _now_ts(),
         }
         meeting_jobs[job_id] = current
+        _upsert_canvas_task_record_locked(
+            RT,
+            normalized_meeting_id,
+            _safe_text(current.get("task_id") or job_id),
+            **_canvas_task_job_fields(task_type),
+            source="canvas_problem_job",
+            job_id=job_id,
+            job_type=_safe_text(current.get("job_type"), "problem_discussion"),
+            scope_key=_safe_text(current.get("scope_key") or current.get("pending_item_id")),
+            status=_safe_text(current.get("status"), "idle"),
+            detail=_safe_text(current.get("detail")),
+            warning=_safe_text(current.get("warning")),
+            pending_item_id=_safe_text(current.get("pending_item_id")),
+            target_count=int(current.get("target_count") or 0),
+            target_signature=_canvas_task_signature_preview(current.get("target_signature")),
+            created_at=_safe_text(current.get("created_at")),
+            created_epoch=float(current.get("created_epoch") or time.time()),
+        )
         return copy.deepcopy(current)
 
 
 def _canvas_problem_job_response(job: dict[str, Any], workspace: dict[str, Any] | None = None) -> dict[str, Any]:
     response = {
         "ok": True,
+        "task_id": _safe_text(job.get("task_id") or job.get("job_id")),
         "job_id": _safe_text(job.get("job_id")),
         "meeting_id": _safe_text(job.get("meeting_id")),
         "status": _safe_text(job.get("status"), "idle"),

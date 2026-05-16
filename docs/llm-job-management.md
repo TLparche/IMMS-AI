@@ -265,6 +265,7 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 - cacheable 작업은 task_type이 포함된 cache key를 사용해 서로 다른 작업 결과가 섞이지 않도록 분리
 - LLM cached request lock은 task queue별로 분리해 문제정의/해결책/추천 같은 독립 작업이 하나의 전역 lock에 막히지 않도록 변경
 - async workspace 작업도 task별 worker lock을 거쳐 실행하므로 같은 queue는 순서를 지키고, 다른 queue는 병렬 실행 가능
+- 모든 task 실행은 공통 `task_id` record로 남기며 cache hit, dedupe, duration, queue/status를 `/api/ai/tasks`에서 조회 가능
 - 새 endpoint는 도메인 행위 기준으로 분리하고, 기존 endpoint는 호환을 위해 유지
 - `topic_summary`와 `idea_assimilation` 작업을 `job_type`으로 구분
 - 아이디어 정리 요청이 진행 중인 topic summary 작업을 잘못 반환받지 않도록 분리
@@ -312,6 +313,7 @@ POST /api/canvas/solution/stage/generate
 
 GET /api/ai/tasks/policies
 GET /api/ai/tasks?meeting_id=...
+GET /api/ai/tasks/{task_id}?meeting_id=...
 ```
 
 기존 `/api/canvas/*-workspace/start`와 `/api/canvas/problem-definition` 계열 endpoint는 호환 목적으로 유지한다.

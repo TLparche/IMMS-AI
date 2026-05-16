@@ -2,6 +2,8 @@ import type {
   AgendaMarkdownExportResponse,
   AgendaSnapshotExportResponse,
   AgendaSnapshotImportResponse,
+  AiTaskPoliciesResponse,
+  AiTasksResponse,
   AudioImportJobStartResponse,
   AudioImportJobStatusResponse,
   CanvasLocalState,
@@ -61,6 +63,17 @@ export async function getLlmStatus(): Promise<LlmStatus> {
 
 export async function getLastLlmJson(): Promise<LastLlmJsonResponse> {
   return requestJson<LastLlmJsonResponse>("/api/analysis/last-llm-json", { cache: "no-store" });
+}
+
+export async function getAiTaskPolicies(): Promise<AiTaskPoliciesResponse> {
+  return requestJson<AiTaskPoliciesResponse>("/api/ai/tasks/policies", { cache: "no-store" });
+}
+
+export async function getAiTasks(meetingId?: string): Promise<AiTasksResponse> {
+  const params = new URLSearchParams();
+  if (meetingId) params.set("meeting_id", meetingId);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson<AiTasksResponse>(`/api/ai/tasks${suffix}`, { cache: "no-store" });
 }
 
 export async function saveConfig(payload: {
