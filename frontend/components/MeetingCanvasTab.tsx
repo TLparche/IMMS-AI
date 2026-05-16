@@ -2256,6 +2256,8 @@ const CANVAS_IDEATION_HEADER_HEIGHT = 92;
 const CANVAS_IDEATION_GROUP_GAP_Y = 18;
 const CANVAS_IDEATION_DETAIL_GAP_X = 28;
 const CANVAS_IDEATION_DETAIL_GAP_Y = 24;
+const IDEATION_LEFT_VISIBLE_LEVELS = 3;
+const IDEATION_LEFT_VISIBLE_MAX_DEPTH = IDEATION_LEFT_VISIBLE_LEVELS - 1;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
@@ -8449,7 +8451,11 @@ export default function MeetingCanvasTab({
         selectedFocusCandidate?.agenda_id === selectedAgendaForIdeation
           ? selectedFocusCandidate
           : null;
-      const hierarchyItems = getCanvasItemVisibleHierarchyItems(canvasItems, selectedAgendaForIdeation, 2);
+      const hierarchyItems = getCanvasItemVisibleHierarchyItems(
+        canvasItems,
+        selectedAgendaForIdeation,
+        IDEATION_LEFT_VISIBLE_MAX_DEPTH,
+      );
       const descendantIdsByItem = new Map(
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
@@ -8466,7 +8472,7 @@ export default function MeetingCanvasTab({
       leftHeights.forEach((height, index) => {
         const depth = hierarchyItems[index]?.depth || 0;
         leftPositions.push({
-          x: CANVAS_IDEATION_LEFT_X + 24 + Math.min(depth, 2) * 24,
+          x: CANVAS_IDEATION_LEFT_X + 24 + Math.min(depth, IDEATION_LEFT_VISIBLE_MAX_DEPTH) * 24,
           y: nextLeftY,
         });
         nextLeftY += height + (depth === 0 ? CANVAS_IDEATION_GROUP_GAP_Y : 12);
@@ -8521,7 +8527,7 @@ export default function MeetingCanvasTab({
             label: makeIdeationFrameLabel(
               "Group Canvas",
               selectedAgendaModel
-                ? `${selectedAgendaModel.title}의 1~3차 구조`
+                ? `${selectedAgendaModel.title}의 1~${IDEATION_LEFT_VISIBLE_LEVELS}차 구조`
                 : "그룹분류를 선택해 주세요.",
               `${hierarchyItems.length}개`,
             ),
@@ -8588,7 +8594,7 @@ export default function MeetingCanvasTab({
           targetPosition: Position.Left,
           className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
-            width: CANVAS_IDEATION_LEFT_WIDTH - 48 - Math.min(depth, 2) * 24,
+            width: CANVAS_IDEATION_LEFT_WIDTH - 48 - Math.min(depth, IDEATION_LEFT_VISIBLE_MAX_DEPTH) * 24,
             height: leftHeights[index],
             background: "transparent",
             border: "none",
@@ -13032,7 +13038,11 @@ export default function MeetingCanvasTab({
     }
 
     const leftVisibleIds = new Set(
-      getCanvasItemVisibleHierarchyItems(canvasItems, selectedAgendaForIdeationCanvas, 2)
+      getCanvasItemVisibleHierarchyItems(
+        canvasItems,
+        selectedAgendaForIdeationCanvas,
+        IDEATION_LEFT_VISIBLE_MAX_DEPTH,
+      )
         .map(({ item }) => item.id),
     );
     const directChildIds = new Set(

@@ -9,9 +9,13 @@ from fastapi.testclient import TestClient
 
 from backend.api import (
     _append_canvas_operation_log_from_change,
+    _apply_canvas_topic_clustering_result,
+    _canvas_item_depth,
     _canvas_activity_events_from_new_operations,
     _canvas_activity_line_from_activity_events,
     _canvas_task_lock,
+    _canvas_topic_child_ids,
+    _canvas_topic_cluster_scopes,
     _finish_canvas_llm_inflight_entry_locked,
     _has_newer_canvas_task_scope_record,
     _mark_canvas_task_record,
@@ -432,6 +436,233 @@ class CanvasTaskRouteSmokeTest(unittest.TestCase):
             _canvas_activity_line_from_activity_events(events, "fallback"),
             '"A 아이디어"와 "B 아이디어"를 "C 토픽"에 병합',
         )
+
+    def test_topic_clustering_groups_topic_nodes_without_flattening_children(self) -> None:
+        workspace = {
+            "canvas_items": [
+                {
+                    "id": "topic-a",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "인증 흐름",
+                    "body": "",
+                    "child_item_ids": ["idea-a"],
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-a",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "로그인 오류",
+                    "body": "로그인 과정에서 오류가 잦다.",
+                    "parent_topic_id": "topic-a",
+                    "ai_generated": True,
+                },
+                {
+                    "id": "topic-b",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "가입 흐름",
+                    "body": "",
+                    "child_item_ids": ["idea-b"],
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-b",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "가입 승인",
+                    "body": "가입 승인 과정이 느리다.",
+                    "parent_topic_id": "topic-b",
+                    "ai_generated": True,
+                },
+            ]
+        }
+
+        changed = _apply_canvas_topic_clustering_result(
+            workspace,
+            "agenda-1",
+            {
+                "pair": ["topic-a", "topic-b"],
+                "title": "사용자 진입 흐름",
+                "body": "로그인과 가입 진입",
+                "keywords": ["로그인", "가입"],
+            },
+        )
+
+        self.assertGreater(changed, 0)
+        parent_topic = next(item for item in workspace["canvas_items"] if item["title"] == "사용자 진입 흐름")
+        self.assertEqual(parent_topic["kind"], "topic")
+        self.assertEqual(parent_topic.get("parent_topic_id"), "")
+        self.assertEqual(set(_canvas_topic_child_ids(workspace, parent_topic["id"])), {"topic-a", "topic-b"})
+        topic_a = next(item for item in workspace["canvas_items"] if item["id"] == "topic-a")
+        topic_b = next(item for item in workspace["canvas_items"] if item["id"] == "topic-b")
+        self.assertEqual(topic_a.get("parent_topic_id"), parent_topic["id"])
+        self.assertEqual(topic_b.get("parent_topic_id"), parent_topic["id"])
+        self.assertEqual(_canvas_item_depth(workspace, topic_a["id"]), 1)
+        self.assertIn("idea-a", _canvas_topic_child_ids(workspace, "topic-a"))
+        self.assertIn("idea-b", _canvas_topic_child_ids(workspace, "topic-b"))
+
+    def test_topic_clustering_inside_topic_creates_nested_topic_scope(self) -> None:
+        workspace = {
+            "canvas_items": [
+                {
+                    "id": "topic-root",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "회의 경험",
+                    "body": "",
+                    "child_item_ids": ["idea-a", "idea-b", "idea-c"],
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-a",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "발언 흐름 정리",
+                    "body": "흩어진 발언을 흐름별로 묶는다.",
+                    "parent_topic_id": "topic-root",
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-b",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "유사 발언 연결",
+                    "body": "비슷한 발언을 가까운 위치에 둔다.",
+                    "parent_topic_id": "topic-root",
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-c",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "타이머 표시",
+                    "body": "회의 시간을 보여준다.",
+                    "parent_topic_id": "topic-root",
+                    "ai_generated": True,
+                },
+            ]
+        }
+
+        changed = _apply_canvas_topic_clustering_result(
+            workspace,
+            "agenda-1",
+            {
+                "pair": ["idea-a", "idea-b"],
+                "title": "발언 구조화",
+                "body": "발언 흐름과 유사성",
+                "keywords": ["발언", "구조화"],
+            },
+            parent_topic_id="topic-root",
+        )
+
+        self.assertGreater(changed, 0)
+        nested_topic = next(item for item in workspace["canvas_items"] if item["title"] == "발언 구조화")
+        self.assertEqual(nested_topic.get("parent_topic_id"), "topic-root")
+        self.assertEqual(_canvas_item_depth(workspace, nested_topic["id"]), 1)
+        self.assertEqual(set(_canvas_topic_child_ids(workspace, nested_topic["id"])), {"idea-a", "idea-b"})
+        self.assertIn(nested_topic["id"], _canvas_topic_child_ids(workspace, "topic-root"))
+        self.assertIn("idea-c", _canvas_topic_child_ids(workspace, "topic-root"))
+        self.assertNotIn("idea-a", _canvas_topic_child_ids(workspace, "topic-root"))
+        self.assertNotIn("idea-b", _canvas_topic_child_ids(workspace, "topic-root"))
+
+    def test_topic_clustering_skips_parent_scope_below_visible_depth_budget(self) -> None:
+        workspace = {
+            "canvas_items": [
+                {
+                    "id": "topic-root",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "1차",
+                    "child_item_ids": ["topic-mid"],
+                    "ai_generated": True,
+                },
+                {
+                    "id": "topic-mid",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "2차",
+                    "parent_topic_id": "topic-root",
+                    "child_item_ids": ["topic-deep"],
+                    "ai_generated": True,
+                },
+                {
+                    "id": "topic-deep",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "3차",
+                    "parent_topic_id": "topic-mid",
+                    "child_item_ids": ["idea-a", "idea-b"],
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-a",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "세부 A",
+                    "body": "더 깊은 세부 내용",
+                    "parent_topic_id": "topic-deep",
+                    "ai_generated": True,
+                },
+                {
+                    "id": "idea-b",
+                    "agenda_id": "agenda-1",
+                    "kind": "note",
+                    "title": "세부 B",
+                    "body": "더 깊은 세부 내용",
+                    "parent_topic_id": "topic-deep",
+                    "ai_generated": True,
+                },
+            ]
+        }
+
+        changed = _apply_canvas_topic_clustering_result(
+            workspace,
+            "agenda-1",
+            {
+                "pair": ["idea-a", "idea-b"],
+                "title": "더 깊은 묶음",
+                "body": "보이지 않는 깊이 방지",
+                "keywords": ["깊이"],
+            },
+            parent_topic_id="topic-deep",
+        )
+
+        self.assertEqual(changed, 0)
+        self.assertFalse(any(item.get("title") == "더 깊은 묶음" for item in workspace["canvas_items"]))
+
+    def test_topic_cluster_scopes_include_overflowing_nested_topic(self) -> None:
+        workspace = {
+            "canvas_items": [
+                {
+                    "id": "topic-root",
+                    "agenda_id": "agenda-1",
+                    "kind": "topic",
+                    "title": "회의 경험",
+                    "child_item_ids": ["idea-a", "idea-b", "idea-c", "idea-d"],
+                    "ai_generated": True,
+                },
+                *[
+                    {
+                        "id": f"idea-{suffix}",
+                        "agenda_id": "agenda-1",
+                        "kind": "note",
+                        "title": f"아이디어 {suffix}",
+                        "body": "유사한 회의 경험 개선",
+                        "parent_topic_id": "topic-root",
+                        "ai_generated": True,
+                    }
+                    for suffix in ("a", "b", "c", "d")
+                ],
+            ]
+        }
+
+        scopes = _canvas_topic_cluster_scopes(workspace, "agenda-1", target=3)
+
+        self.assertEqual(len(scopes), 1)
+        self.assertEqual(scopes[0]["parent_topic_id"], "topic-root")
+        self.assertEqual(len(scopes[0]["direct_child_items"]), 4)
 
 
 if __name__ == "__main__":
