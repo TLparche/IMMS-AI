@@ -176,6 +176,19 @@ type IdeationDropPreviewState = {
   hint: string;
 };
 
+type IdeationFocusUpdateReason = "focus-removed" | "children-cleared" | "children-removed";
+
+type IdeationFocusUpdateNotice = {
+  id: string;
+  focusItemId: string;
+  focusTitle: string;
+  reason: IdeationFocusUpdateReason;
+  previousChildCount: number;
+  removedChildCount: number;
+  snapshotCanvasItems: CanvasItemViewModel[];
+  createdAt: number;
+};
+
 type StableIdeationDragState = {
   nodeId: string;
   anchor: { x: number; y: number };
@@ -2269,6 +2282,51 @@ function getCanvasItemVisibleHierarchyItems(
   return visibleItems;
 }
 
+function getIdeationFocusUpdateReason(
+  currentItems: CanvasItemViewModel[],
+  incomingItems: CanvasItemViewModel[],
+  focusItemId: string,
+) {
+  if (!focusItemId) return null;
+
+  const currentFocusItem = currentItems.find((item) => item.id === focusItemId) || null;
+  if (!currentFocusItem) return null;
+
+  const previousChildIds = getCanvasItemDirectChildItems(currentItems, focusItemId).map((item) => item.id);
+  const incomingFocusItem = incomingItems.find((item) => item.id === focusItemId) || null;
+  if (!incomingFocusItem) {
+    return {
+      reason: "focus-removed" as const,
+      previousChildCount: previousChildIds.length,
+      removedChildCount: Math.max(1, previousChildIds.length),
+    };
+  }
+
+  if (previousChildIds.length === 0) return null;
+
+  const incomingChildIds = new Set(getCanvasItemDirectChildItems(incomingItems, focusItemId).map((item) => item.id));
+  const removedChildCount = previousChildIds.filter((childId) => !incomingChildIds.has(childId)).length;
+  if (removedChildCount === 0) return null;
+
+  return {
+    reason: incomingChildIds.size === 0 ? "children-cleared" as const : "children-removed" as const,
+    previousChildCount: previousChildIds.length,
+    removedChildCount,
+  };
+}
+
+function getIdeationFocusUpdateText(reason: IdeationFocusUpdateReason) {
+  if (reason === "focus-removed") {
+    return "보고 있던 포커스가 병합되었거나 삭제되었습니다.";
+  }
+
+  if (reason === "children-cleared") {
+    return "이 포커스 캔버스의 하위 내용이 모두 이동되었거나 병합되었습니다.";
+  }
+
+  return "이 포커스 캔버스의 하위 내용 일부가 이동되었거나 병합되었습니다.";
+}
+
 function getTopicFlattenedIdeaChildIds(
   items: CanvasItemViewModel[],
   topicId: string,
@@ -3892,6 +3950,7 @@ export default function MeetingCanvasTab({
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedCanvasItemId, setSelectedCanvasItemId] = useState("");
   const [ideationFocusItemId, setIdeationFocusItemId] = useState("");
+  const [pendingIdeationFocusUpdate, setPendingIdeationFocusUpdate] = useState<IdeationFocusUpdateNotice | null>(null);
   const [selectedProblemGroupId, setSelectedProblemGroupId] = useState("");
   const [selectedProblemSourceNodeId, setSelectedProblemSourceNodeId] = useState("");
   const [pendingProblemGroupLinkId, setPendingProblemGroupLinkId] = useState("");
@@ -4228,6 +4287,7 @@ export default function MeetingCanvasTab({
     setImportOverrideActive(false);
     setAgendaOverrides({});
     setCanvasItems([]);
+    setPendingIdeationFocusUpdate(null);
     setTopicCollapsedOverrides({});
     setLatestHighlightedTopicId("");
     setIdeaCreateStack(0);
@@ -4396,6 +4456,7 @@ export default function MeetingCanvasTab({
     setPersonalNotes([]);
     setAgendaOverrides({});
     setCanvasItems([]);
+    setPendingIdeationFocusUpdate(null);
     setCustomGroups([]);
     setCustomGroupDraftTitle("");
     setIdeaCreateStack(0);
@@ -4581,6 +4642,7 @@ export default function MeetingCanvasTab({
         setPersonalNotes([]);
         setAgendaOverrides({});
         setCanvasItems([]);
+        setPendingIdeationFocusUpdate(null);
         setCustomGroups([]);
         setIdeaCreateStack(0);
         setSharedSyncEnabled(true);
@@ -6654,6 +6716,27 @@ export default function MeetingCanvasTab({
           )
         : incomingSolutionTopics;
 
+    const activeIdeationFocusItemId = ideationFocusItemId || selectedCanvasItemId;
+    const focusUpdateReason =
+      !pendingIdeationFocusUpdate && stage === "ideation" && incomingStage === "ideation"
+        ? getIdeationFocusUpdateReason(canvasItems, nextIncomingCanvasItems, activeIdeationFocusItemId)
+        : null;
+    if (focusUpdateReason) {
+      const currentFocusItem = canvasItems.find((item) => item.id === activeIdeationFocusItemId) || null;
+      setPendingIdeationFocusUpdate({
+        id: `${incomingSharedCanvasSync.sync_id}:${activeIdeationFocusItemId}`,
+        focusItemId: activeIdeationFocusItemId,
+        focusTitle: currentFocusItem?.title || "선택한 노드",
+        reason: focusUpdateReason.reason,
+        previousChildCount: focusUpdateReason.previousChildCount,
+        removedChildCount: focusUpdateReason.removedChildCount,
+        snapshotCanvasItems: canvasItems,
+        createdAt: Date.now(),
+      });
+    } else if (incomingStage !== "ideation") {
+      setPendingIdeationFocusUpdate(null);
+    }
+
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       meeting_goal: incomingMeetingGoal,
       meeting_goal_context: incomingMeetingGoalContext,
@@ -6752,12 +6835,14 @@ export default function MeetingCanvasTab({
     nodePositions,
     onMeetingGoalChange,
     onMeetingGoalContextChange,
+    pendingIdeationFocusUpdate,
     problemGroups,
     selectedCanvasItemId,
     sharedSyncEnabled,
     solutionNoteFinalCommentDraft,
     solutionNoteTextDraft,
     solutionTopics,
+    stage,
     userId,
   ]);
 
@@ -8034,10 +8119,12 @@ export default function MeetingCanvasTab({
 
     if (stage === "ideation") {
       const selectedAgendaForIdeation = selectedAgendaId || agendaModels[0]?.id || "";
-      const canvasItemById = new Map(canvasItems.map((item) => [item.id, item]));
-      const canvasItemHeights = new Map(canvasItems.map((item) => [item.id, estimateCanvasItemNodeHeight(item)]));
-      const selectedFocusCandidate = (ideationFocusItemId || selectedCanvasItemId)
-        ? canvasItemById.get(ideationFocusItemId || selectedCanvasItemId) || null
+      const rightCanvasItems = pendingIdeationFocusUpdate?.snapshotCanvasItems || canvasItems;
+      const rightCanvasItemById = new Map(rightCanvasItems.map((item) => [item.id, item]));
+      const rightCanvasItemHeights = new Map(rightCanvasItems.map((item) => [item.id, estimateCanvasItemNodeHeight(item)]));
+      const rightFocusItemId = pendingIdeationFocusUpdate?.focusItemId || ideationFocusItemId || selectedCanvasItemId;
+      const selectedFocusCandidate = rightFocusItemId
+        ? rightCanvasItemById.get(rightFocusItemId) || null
         : null;
       const activeFocusItem =
         selectedFocusCandidate?.agenda_id === selectedAgendaForIdeation
@@ -8048,7 +8135,7 @@ export default function MeetingCanvasTab({
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
       const activeDirectChildItems = activeFocusItem
-        ? getCanvasItemDirectChildItems(canvasItems, activeFocusItem.id)
+        ? getCanvasItemDirectChildItems(rightCanvasItems, activeFocusItem.id)
         : [];
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
       const leftHeights = hierarchyItems.map(({ item, depth }) => {
@@ -8076,7 +8163,7 @@ export default function MeetingCanvasTab({
       );
       const rightItemHeights = rightUsesGroupSelector
         ? agendaHeights
-        : activeDirectChildItems.map((item) => canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
+        : activeDirectChildItems.map((item) => rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
       const rightPositions = buildGridPositions(
         rightItemHeights,
         CANVAS_ITEM_NODE_WIDTH + CANVAS_IDEATION_DETAIL_GAP_X,
@@ -8258,8 +8345,8 @@ export default function MeetingCanvasTab({
               const nodeId = `canvas-item-${item.id}`;
               const linkedAgendaTitle =
                 agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
-              const itemHeight = canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
-              const depth = getCanvasItemDepth(canvasItems, item.id);
+              const itemHeight = rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
+              const depth = getCanvasItemDepth(rightCanvasItems, item.id);
 
               return {
                 id: nodeId,
@@ -8279,7 +8366,7 @@ export default function MeetingCanvasTab({
                   boxShadow: "none",
                   padding: 0,
                 },
-                draggable: true,
+                draggable: !pendingIdeationFocusUpdate,
                 dragHandle: ".imms-canvas-node-drag-handle",
                 zIndex: 2,
                 data: {
@@ -8297,6 +8384,7 @@ export default function MeetingCanvasTab({
                     item.parent_topic_id || "",
                     depth,
                     selectedCanvasItemId === item.id,
+                    Boolean(pendingIdeationFocusUpdate),
                     ...(item.child_item_ids || []),
                   ]),
                   label: makeCanvasItemNodeLabel(
@@ -8345,8 +8433,17 @@ export default function MeetingCanvasTab({
           stage,
           selectedAgendaForIdeation,
           activeFocusItem?.id || "",
+          pendingIdeationFocusUpdate?.id || "",
           ...agendaModels.map((agenda) => agenda.id),
           ...canvasItems.flatMap((item) => [
+            item.id,
+            item.kind,
+            item.status || "",
+            item.parent_topic_id || "",
+            item.agenda_id || "",
+            ...(item.child_item_ids || []),
+          ]),
+          ...rightCanvasItems.flatMap((item) => [
             item.id,
             item.kind,
             item.status || "",
@@ -8767,6 +8864,7 @@ export default function MeetingCanvasTab({
     loadingProblemGroupIds,
     nodePositions,
     pendingProblemGroupLinkId,
+    pendingIdeationFocusUpdate,
     persistedSharedImportedState,
     problemGroups,
     problemIdeaDrag,
@@ -12254,6 +12352,12 @@ export default function MeetingCanvasTab({
     setIdeationDropPreview(null);
 
     if (stage === "ideation" && node.id.startsWith("canvas-item-")) {
+      const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
+      if (pendingIdeationFocusUpdate && paneRole === "ideation-right") {
+        setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
+        return;
+      }
+
       event.stopPropagation();
       setIdeationNodeDragActive(true);
       setIdeationDragGhost({
@@ -12339,6 +12443,51 @@ export default function MeetingCanvasTab({
     const selectedItem = canvasItems.find((item) => item.id === focusItemId) || null;
     return selectedItem?.agenda_id === selectedAgendaForIdeationCanvas ? selectedItem : null;
   }, [canvasItems, ideationFocusItemId, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
+  const visibleIdeationRightCanvasItems = pendingIdeationFocusUpdate?.snapshotCanvasItems || canvasItems;
+  const visibleRootItemForIdeationCanvas = useMemo(() => {
+    const focusItemId = pendingIdeationFocusUpdate?.focusItemId || ideationFocusItemId || selectedCanvasItemId;
+    if (stage !== "ideation" || !focusItemId) return null;
+    const selectedItem = visibleIdeationRightCanvasItems.find((item) => item.id === focusItemId) || null;
+    return selectedItem?.agenda_id === selectedAgendaForIdeationCanvas ? selectedItem : null;
+  }, [
+    ideationFocusItemId,
+    pendingIdeationFocusUpdate,
+    selectedAgendaForIdeationCanvas,
+    selectedCanvasItemId,
+    stage,
+    visibleIdeationRightCanvasItems,
+  ]);
+  const pendingIdeationFocusUpdateText = pendingIdeationFocusUpdate
+    ? getIdeationFocusUpdateText(pendingIdeationFocusUpdate.reason)
+    : "";
+  const handleApplyIdeationFocusUpdate = useCallback(() => {
+    if (!pendingIdeationFocusUpdate) return;
+
+    const liveFocusItem =
+      canvasItems.find((item) => item.id === pendingIdeationFocusUpdate.focusItemId) || null;
+    setPendingIdeationFocusUpdate(null);
+
+    if (liveFocusItem && liveFocusItem.agenda_id === selectedAgendaForIdeationCanvas) {
+      setIdeationFocusItemId(liveFocusItem.id);
+      setSelectedCanvasItemId((current) =>
+        current && canvasItems.some((item) => item.id === current) ? current : liveFocusItem.id,
+      );
+      setSelectedNodeId(`canvas-item-${liveFocusItem.id}`);
+    } else {
+      setIdeationFocusItemId((current) =>
+        current && canvasItems.some((item) => item.id === current) ? current : "",
+      );
+      setSelectedCanvasItemId((current) =>
+        current && canvasItems.some((item) => item.id === current) ? current : "",
+      );
+      setSelectedNodeId((current) => {
+        const canvasItemId = extractCanvasItemIdFromNodeId(current);
+        return canvasItemId && !canvasItems.some((item) => item.id === canvasItemId) ? "" : current;
+      });
+    }
+
+    setActivityMessage("포커스 캔버스 업데이트를 반영했습니다.");
+  }, [canvasItems, pendingIdeationFocusUpdate, selectedAgendaForIdeationCanvas]);
   const latestDiscussionRootItem = useMemo(() => {
     if (!latestHighlightedTopicId) return null;
     const latestItem = canvasItems.find((item) => item.id === latestHighlightedTopicId) || null;
@@ -12356,8 +12505,8 @@ export default function MeetingCanvasTab({
         .map(({ item }) => item.id),
     );
     const directChildIds = new Set(
-      selectedRootItemForIdeationCanvas
-        ? getCanvasItemDirectChildItems(canvasItems, selectedRootItemForIdeationCanvas.id).map((item) => item.id)
+      visibleRootItemForIdeationCanvas
+        ? getCanvasItemDirectChildItems(visibleIdeationRightCanvasItems, visibleRootItemForIdeationCanvas.id).map((item) => item.id)
         : [],
     );
 
@@ -12367,10 +12516,15 @@ export default function MeetingCanvasTab({
       }
 
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
-      return canvasItemId ? leftVisibleIds.has(canvasItemId) : false;
+      const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
+      return canvasItemId ? leftVisibleIds.has(canvasItemId) && paneRole === "ideation-left" : false;
     });
     const rightNodes = nodes.filter((node) => {
       if (node.id === "ideation-drop-placeholder") {
+        if (pendingIdeationFocusUpdate) {
+          return false;
+        }
+
         const targetItem = ideationDropPreview
           ? canvasItems.find((item) => item.id === ideationDropPreview.targetId) || null
           : null;
@@ -12378,7 +12532,7 @@ export default function MeetingCanvasTab({
           return false;
         }
 
-        if (selectedRootItemForIdeationCanvas?.id === targetItem.id) {
+        if (visibleRootItemForIdeationCanvas?.id === targetItem.id) {
           return true;
         }
 
@@ -12386,14 +12540,26 @@ export default function MeetingCanvasTab({
       }
 
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
-      if (selectedRootItemForIdeationCanvas) {
-        return canvasItemId ? directChildIds.has(canvasItemId) : node.id === "ideation-empty-detail";
+      const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
+      if (visibleRootItemForIdeationCanvas) {
+        return canvasItemId
+          ? directChildIds.has(canvasItemId) && paneRole === "ideation-right"
+          : node.id === "ideation-empty-detail";
       }
-      return node.id.startsWith("agenda-");
+      return node.id.startsWith("agenda-") && paneRole === "ideation-right-selector";
     });
 
     return { left: leftNodes, right: rightNodes };
-  }, [canvasItems, ideationDropPreview, nodes, selectedAgendaForIdeationCanvas, selectedRootItemForIdeationCanvas, stage]);
+  }, [
+    canvasItems,
+    ideationDropPreview,
+    nodes,
+    pendingIdeationFocusUpdate,
+    selectedAgendaForIdeationCanvas,
+    stage,
+    visibleIdeationRightCanvasItems,
+    visibleRootItemForIdeationCanvas,
+  ]);
   const problemSplitNodes = useMemo(() => {
     if (stage !== "problem-definition") {
       return { left: [] as Node[], right: [] as Node[] };
@@ -12491,14 +12657,14 @@ export default function MeetingCanvasTab({
   }, [liveFlowHint, sttProgressText, transcriptStripItems]);
   const canvasHeaderLeftTitle =
     stage === "ideation"
-      ? selectedRootItemForIdeationCanvas?.title || selectedAgenda?.title || "그룹분류"
+      ? visibleRootItemForIdeationCanvas?.title || selectedAgenda?.title || "그룹분류"
       : stage === "problem-definition"
         ? selectedProblemGroup?.topic || "문제 정의"
         : selectedSolutionTopic?.topic || "해결책 인사이트";
   const canvasHeaderLeftSummary =
     stage === "ideation"
-      ? selectedRootItemForIdeationCanvas
-        ? cleanCanvasNodeBodyText(selectedRootItemForIdeationCanvas.body) || "선택한 그룹의 하위 아이디어를 오른쪽 캔버스에서 확인합니다."
+      ? visibleRootItemForIdeationCanvas
+        ? cleanCanvasNodeBodyText(visibleRootItemForIdeationCanvas.body) || "선택한 그룹의 하위 아이디어를 오른쪽 캔버스에서 확인합니다."
         : stripLeadingTimestamp(selectedAgenda?.summaryBullets?.[0] || "그룹분류를 선택하면 관련 토픽과 아이디어를 확인할 수 있습니다.")
       : stage === "problem-definition"
         ? selectedProblemGroup?.insight_lens ||
@@ -12901,8 +13067,13 @@ export default function MeetingCanvasTab({
         return;
       }
       const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
+      if (stage === "ideation" && pendingIdeationFocusUpdate && paneRole === "ideation-right") {
+        setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
+        return;
+      }
       setSelectedCanvasItemId(canvasItemId);
       if (stage === "ideation" && paneRole !== "ideation-right") {
+        setPendingIdeationFocusUpdate(null);
         setIdeationFocusItemId(canvasItemId);
       }
       setSelectedProblemGroupId("");
@@ -12925,6 +13096,7 @@ export default function MeetingCanvasTab({
     } else {
       setSelectedCanvasItemId("");
       if (stage === "ideation") {
+        setPendingIdeationFocusUpdate(null);
         setIdeationFocusItemId("");
       }
     }
@@ -13016,6 +13188,11 @@ export default function MeetingCanvasTab({
     event: React.MouseEvent,
     pane: "default" | "ideation-left" | "ideation-right" | "problem-left" | "problem-right" = "default",
   ) => {
+    if (stage === "ideation" && pane === "ideation-right" && pendingIdeationFocusUpdate) {
+      setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
+      return;
+    }
+
     if (stage === "ideation" && pane === "ideation-right" && !armedCanvasTool) {
       return;
     }
@@ -13025,6 +13202,7 @@ export default function MeetingCanvasTab({
       closeRightDrawer();
       if (stage === "ideation" && pane === "ideation-left") {
         setSelectedCanvasItemId("");
+        setPendingIdeationFocusUpdate(null);
         setIdeationFocusItemId("");
         setSelectedNodeId("");
         setLeftPanelTab("detail");
@@ -14341,7 +14519,29 @@ export default function MeetingCanvasTab({
                     }}
                   >
                     <div className="flex min-h-0 flex-1 flex-col bg-[#f5f6f8]">
-                      {selectedRootItemForIdeationCanvas ? (
+                      {pendingIdeationFocusUpdate ? (
+                        <section className="shrink-0 border-b border-[#f4c36a] bg-[#fff8e6] px-5 py-3">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold text-[#6d4b00]">
+                                포커스 캔버스가 업데이트되었습니다
+                              </p>
+                              <p className="mt-1 text-sm leading-6 text-[#6d4b00]/80">
+                                {pendingIdeationFocusUpdate.focusTitle} · {pendingIdeationFocusUpdateText}
+                                {" "}현재 화면은 잠시 유지 중입니다.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleApplyIdeationFocusUpdate}
+                              className="shrink-0 border border-[#d69b22] bg-white px-4 py-2 text-sm font-semibold text-[#6d4b00] transition hover:bg-[#fff2c7]"
+                            >
+                              업데이트 반영
+                            </button>
+                          </div>
+                        </section>
+                      ) : null}
+                      {selectedRootItemForIdeationCanvas && !pendingIdeationFocusUpdate ? (
                         <section className={`shrink-0 border-b border-black/10 bg-white px-5 ${ideationSuggestionCollapsed ? "py-2.5" : "py-4"}`}>
                           <div className={`flex justify-between gap-4 ${ideationSuggestionCollapsed ? "items-center" : "items-start"}`}>
                             <div className="min-w-0">
@@ -14442,7 +14642,7 @@ export default function MeetingCanvasTab({
                         panOnDrag={!ideationNodeDragActive}
                         autoPanOnNodeDrag={false}
                         noPanClassName="nopan"
-                        nodesDraggable={true}
+                        nodesDraggable={!pendingIdeationFocusUpdate}
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
