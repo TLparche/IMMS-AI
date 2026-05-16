@@ -924,6 +924,7 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
         "agenda_overrides": _normalize_canvas_agenda_overrides(payload.get("agenda_overrides")),
         "canvas_items": copy.deepcopy(payload.get("canvas_items") or []),
         "custom_groups": _normalize_canvas_custom_groups(payload.get("custom_groups") or []),
+        "ideation_focus_item_id": _safe_text(payload.get("ideation_focus_item_id")),
     }
 
     if not shared_sync_enabled:
@@ -6075,6 +6076,8 @@ def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> Non
     canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
     canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
     canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_idea_jobs_by_meeting = copy.deepcopy(rt.canvas_idea_jobs_by_meeting)
+    canvas_problem_jobs_by_meeting = copy.deepcopy(rt.canvas_problem_jobs_by_meeting)
     canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
     canvas_local_state_by_meeting_user = copy.deepcopy(rt.canvas_local_state_by_meeting_user)
 
@@ -6089,6 +6092,29 @@ def _apply_import_runtime_to_live(rt: RuntimeStore, source: RuntimeStore) -> Non
     rt.canvas_last_placement = canvas_last_placement
     rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
     rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_idea_jobs_by_meeting = canvas_idea_jobs_by_meeting
+    rt.canvas_problem_jobs_by_meeting = canvas_problem_jobs_by_meeting
+    rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
+    rt.canvas_local_state_by_meeting_user = canvas_local_state_by_meeting_user
+
+
+def _reset_runtime_preserving_canvas(rt: RuntimeStore) -> None:
+    llm_enabled = bool(rt.llm_enabled)
+    canvas_last_placement = copy.deepcopy(rt.canvas_last_placement)
+    canvas_workspace_by_meeting = copy.deepcopy(rt.canvas_workspace_by_meeting)
+    canvas_llm_inflight_by_meeting = copy.deepcopy(rt.canvas_llm_inflight_by_meeting)
+    canvas_idea_jobs_by_meeting = copy.deepcopy(rt.canvas_idea_jobs_by_meeting)
+    canvas_problem_jobs_by_meeting = copy.deepcopy(rt.canvas_problem_jobs_by_meeting)
+    canvas_personal_notes_by_meeting_user = copy.deepcopy(rt.canvas_personal_notes_by_meeting_user)
+    canvas_local_state_by_meeting_user = copy.deepcopy(rt.canvas_local_state_by_meeting_user)
+
+    rt.reset()
+    rt.llm_enabled = llm_enabled
+    rt.canvas_last_placement = canvas_last_placement
+    rt.canvas_workspace_by_meeting = canvas_workspace_by_meeting
+    rt.canvas_llm_inflight_by_meeting = canvas_llm_inflight_by_meeting
+    rt.canvas_idea_jobs_by_meeting = canvas_idea_jobs_by_meeting
+    rt.canvas_problem_jobs_by_meeting = canvas_problem_jobs_by_meeting
     rt.canvas_personal_notes_by_meeting_user = canvas_personal_notes_by_meeting_user
     rt.canvas_local_state_by_meeting_user = canvas_local_state_by_meeting_user
 
@@ -6527,7 +6553,7 @@ def post_transcript_manual(payload: UtteranceInput):
 def post_transcript_sync(payload: TranscriptSyncInput):
     with RT.lock:
         if payload.reset_state:
-            RT.reset()
+            _reset_runtime_preserving_canvas(RT)
 
         RT.meeting_goal = _safe_text(payload.meeting_goal)
         RT.window_size = int(payload.window_size)

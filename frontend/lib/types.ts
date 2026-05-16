@@ -468,6 +468,7 @@ export interface CanvasLocalState {
   >;
   canvas_items?: CanvasWorkspaceItem[];
   custom_groups?: CanvasCustomGroup[];
+  ideation_focus_item_id?: string;
   stage?: "ideation" | "problem-definition" | "solution";
   problem_groups?: CanvasWorkspaceProblemGroup[];
   solution_topics?: CanvasSolutionTopicResponse[];

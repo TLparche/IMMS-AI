@@ -2226,6 +2226,49 @@ function getTopicDirectChildIds(
   ].filter((childId) => childId !== topicId);
 }
 
+function getCanvasItemDirectChildItems(
+  items: CanvasItemViewModel[],
+  itemId: string,
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const originalOrder = new Map(items.map((item, index) => [item.id, index]));
+  return getTopicDirectChildIds(items, itemId)
+    .map((childId) => itemById.get(childId))
+    .filter((item): item is CanvasItemViewModel => Boolean(item))
+    .sort((left, right) => (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0));
+}
+
+function getCanvasItemVisibleHierarchyItems(
+  items: CanvasItemViewModel[],
+  agendaId: string,
+  maxDepth = 2,
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const originalOrder = new Map(items.map((item, index) => [item.id, index]));
+  const visibleItems: Array<{ item: CanvasItemViewModel; depth: number }> = [];
+  const visited = new Set<string>();
+  const sortByOriginalOrder = (list: CanvasItemViewModel[]) =>
+    [...list].sort((left, right) => (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0));
+
+  const visit = (item: CanvasItemViewModel, depth: number) => {
+    if (visited.has(item.id) || depth > maxDepth) return;
+    visited.add(item.id);
+    visibleItems.push({ item, depth });
+
+    if (depth >= maxDepth || !isTopicCanvasItem(item)) return;
+    getTopicDirectChildIds(items, item.id)
+      .map((childId) => itemById.get(childId))
+      .filter((child): child is CanvasItemViewModel => Boolean(child))
+      .sort((left, right) => (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0))
+      .forEach((child) => visit(child, depth + 1));
+  };
+
+  sortByOriginalOrder(items.filter((item) => item.agenda_id === agendaId && !item.parent_topic_id))
+    .forEach((item) => visit(item, 0));
+
+  return visibleItems;
+}
+
 function getTopicFlattenedIdeaChildIds(
   items: CanvasItemViewModel[],
   topicId: string,
@@ -2538,6 +2581,7 @@ function makeIdeationGroupNodeLabel(
   dropTarget = false,
   dropTargetLabel = "여기로 이동",
   dropTargetHint = "",
+  depth = 0,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "topic");
   const title = item.ai_pending ? "AI 정리 중" : item.title || "그룹";
@@ -2556,7 +2600,7 @@ function makeIdeationGroupNodeLabel(
       <div className={`nopan imms-canvas-node-drag-handle cursor-grab rounded-[20px] border px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition active:cursor-grabbing ${backgroundClass} ${borderClass}`}>
         <div className="flex items-center justify-between gap-2">
           <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${canvasItemStatusTone(status)}`}>
-            {dropTarget ? dropTargetLabel : canvasItemStatusLabel(status)}
+            {dropTarget ? dropTargetLabel : `${depth + 1}차 · ${canvasItemStatusLabel(status)}`}
           </span>
           <span className="rounded-full bg-black/5 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d]">
             하위 {descendantCount}
@@ -3847,6 +3891,7 @@ export default function MeetingCanvasTab({
   const [importedState, setImportedState] = useState<MeetingState | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedCanvasItemId, setSelectedCanvasItemId] = useState("");
+  const [ideationFocusItemId, setIdeationFocusItemId] = useState("");
   const [selectedProblemGroupId, setSelectedProblemGroupId] = useState("");
   const [selectedProblemSourceNodeId, setSelectedProblemSourceNodeId] = useState("");
   const [pendingProblemGroupLinkId, setPendingProblemGroupLinkId] = useState("");
@@ -4361,6 +4406,8 @@ export default function MeetingCanvasTab({
     setSolutionStagePending(false);
     setSelectedProblemGroupId("");
     setSelectedSolutionTopicId("");
+    setSelectedCanvasItemId("");
+    setIdeationFocusItemId("");
     setSelectedNodeId("");
     setEditingProblemGroupId("");
     setEditingSolutionTopicId("");
@@ -4446,6 +4493,11 @@ export default function MeetingCanvasTab({
         const nextImportOverrideActive = shouldUseLocalCanvas
           ? Boolean(savedLocalCanvasState?.import_override_active && nextImportedState)
           : Boolean(saved.imported_state);
+        const nextIdeationFocusItemId =
+          typeof savedLocalCanvasState?.ideation_focus_item_id === "string" &&
+          nextCanvasItems.some((item) => item.id === savedLocalCanvasState.ideation_focus_item_id)
+            ? savedLocalCanvasState.ideation_focus_item_id
+            : "";
 
         setProblemGroups(nextGroups);
         setSolutionTopics(nextSolutionTopics);
@@ -4496,6 +4548,7 @@ export default function MeetingCanvasTab({
         setSelectedProblemGroupId(nextGroups[0]?.group_id || "");
         setSelectedSolutionTopicId(nextSolutionTopics[0]?.group_id || "");
         setSelectedCanvasItemId("");
+        setIdeationFocusItemId(nextIdeationFocusItemId);
         setSelectedNodeId(
           nextStage === "problem-definition"
             ? (nextGroups[0] ? `problem-${nextGroups[0].group_id}` : "")
@@ -4562,6 +4615,7 @@ export default function MeetingCanvasTab({
         setSelectedProblemGroupId("");
         setSelectedSolutionTopicId("");
         setSelectedCanvasItemId("");
+        setIdeationFocusItemId("");
         setSelectedNodeId("");
         setEditingProblemGroupId("");
         setEditingSolutionTopicId("");
@@ -4594,6 +4648,7 @@ export default function MeetingCanvasTab({
     setSelectedProblemGroupId("");
     setSelectedSolutionTopicId("");
     setSelectedCanvasItemId("");
+    setIdeationFocusItemId("");
     setSelectedNodeId("");
     setEditingProblemGroupId("");
     setEditingSolutionTopicId("");
@@ -4635,6 +4690,7 @@ export default function MeetingCanvasTab({
   useEffect(() => {
     if (canvasItems.length === 0) {
       setSelectedCanvasItemId("");
+      setIdeationFocusItemId("");
       setEditingCanvasItemId("");
       return;
     }
@@ -4643,7 +4699,10 @@ export default function MeetingCanvasTab({
       setSelectedCanvasItemId("");
       setEditingCanvasItemId("");
     }
-  }, [canvasItems, selectedCanvasItemId]);
+    if (ideationFocusItemId && !canvasItems.some((item) => item.id === ideationFocusItemId)) {
+      setIdeationFocusItemId("");
+    }
+  }, [canvasItems, ideationFocusItemId, selectedCanvasItemId]);
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -5336,7 +5395,7 @@ export default function MeetingCanvasTab({
           );
           return nextGroups;
         });
-        if (!sharedSyncEnabled && nextGroups.length > 0) {
+        if (sharedSyncEnabled && nextGroups.length > 0) {
           forceBroadcastSharedCanvas({
             stage: "problem-definition",
             problemGroups: nextGroups,
@@ -6086,6 +6145,7 @@ export default function MeetingCanvasTab({
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
             custom_groups: serializeCustomGroups(customGroups),
+            ideation_focus_item_id: ideationFocusItemId,
           }
         : {
             shared_sync_enabled: false,
@@ -6094,6 +6154,7 @@ export default function MeetingCanvasTab({
             agenda_overrides: serializeAgendaOverrides(agendaOverrides),
             canvas_items: serializeSharedCanvasItems(canvasItems),
             custom_groups: serializeCustomGroups(customGroups),
+            ideation_focus_item_id: ideationFocusItemId,
             stage,
             problem_groups: serializeSharedProblemGroups(problemGroups),
             solution_topics: serializeSharedSolutionTopics(solutionTopics),
@@ -6107,6 +6168,7 @@ export default function MeetingCanvasTab({
       canvasItems,
       customGroups,
       importOverrideActive,
+      ideationFocusItemId,
       meetingGoalContextDraft,
       meetingGoalDraft,
       nodePositions,
@@ -6666,7 +6728,10 @@ export default function MeetingCanvasTab({
         selectedCanvasItemId && nextIncomingCanvasItems.some((item) => item.id === selectedCanvasItemId);
       const nextSelectedCanvasItemId =
         editingCanvasItem?.id || (canKeepSelectedCanvasItem ? selectedCanvasItemId : "");
+      const canKeepIdeationFocusItem =
+        ideationFocusItemId && nextIncomingCanvasItems.some((item) => item.id === ideationFocusItemId);
       setSelectedCanvasItemId(nextSelectedCanvasItemId);
+      setIdeationFocusItemId(canKeepIdeationFocusItem ? ideationFocusItemId : nextSelectedCanvasItemId);
       setSelectedNodeId(nextSelectedCanvasItemId ? `canvas-item-${nextSelectedCanvasItemId}` : "");
     }
     setActivityMessage("다른 참가자의 canvas 변경사항이 반영되었습니다.");
@@ -6682,6 +6747,7 @@ export default function MeetingCanvasTab({
     editingCanvasItemId,
     editingSolutionNoteKey,
     incomingSharedCanvasSync,
+    ideationFocusItemId,
     meetingId,
     nodePositions,
     onMeetingGoalChange,
@@ -7970,46 +8036,37 @@ export default function MeetingCanvasTab({
       const selectedAgendaForIdeation = selectedAgendaId || agendaModels[0]?.id || "";
       const canvasItemById = new Map(canvasItems.map((item) => [item.id, item]));
       const canvasItemHeights = new Map(canvasItems.map((item) => [item.id, estimateCanvasItemNodeHeight(item)]));
-      const originalOrder = new Map(canvasItems.map((item, index) => [item.id, index]));
-      const sortByCanvasOrder = (items: CanvasItemViewModel[]) =>
-        [...items].sort((left, right) => (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0));
-      const selectedRootId = selectedCanvasItemId
-        ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
-        : "";
-      const selectedRootCandidate = selectedRootId ? canvasItemById.get(selectedRootId) || null : null;
-      const activeRootItem =
-        selectedRootCandidate?.agenda_id === selectedAgendaForIdeation
-          ? selectedRootCandidate
+      const selectedFocusCandidate = (ideationFocusItemId || selectedCanvasItemId)
+        ? canvasItemById.get(ideationFocusItemId || selectedCanvasItemId) || null
+        : null;
+      const activeFocusItem =
+        selectedFocusCandidate?.agenda_id === selectedAgendaForIdeation
+          ? selectedFocusCandidate
           : null;
-      const topLevelItems = sortByCanvasOrder(
-        canvasItems.filter(
-          (item) => item.agenda_id === selectedAgendaForIdeation && !item.parent_topic_id,
-        ),
-      );
+      const hierarchyItems = getCanvasItemVisibleHierarchyItems(canvasItems, selectedAgendaForIdeation, 2);
       const descendantIdsByItem = new Map(
-        topLevelItems.map((item) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
+        hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
-      const activeDescendantItems = activeRootItem
-        ? (descendantIdsByItem.get(activeRootItem.id) || getCanvasItemDescendantIds(canvasItems, activeRootItem.id))
-            .map((itemId) => canvasItemById.get(itemId))
-            .filter((item): item is CanvasItemViewModel => Boolean(item))
+      const activeDirectChildItems = activeFocusItem
+        ? getCanvasItemDirectChildItems(canvasItems, activeFocusItem.id)
         : [];
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
-      const leftHeights = topLevelItems.map((item) => {
+      const leftHeights = hierarchyItems.map(({ item, depth }) => {
         const descendantCount = descendantIdsByItem.get(item.id)?.length || 0;
-        return Math.max(190, 156 + Math.min(descendantCount, 3) * 24 + (descendantCount > 3 ? 18 : 0));
+        return Math.max(depth === 0 ? 190 : 168, 146 + Math.min(descendantCount, 3) * 22 + (descendantCount > 3 ? 18 : 0));
       });
       const leftPositions: Array<{ x: number; y: number }> = [];
       let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
-      leftHeights.forEach((height) => {
+      leftHeights.forEach((height, index) => {
+        const depth = hierarchyItems[index]?.depth || 0;
         leftPositions.push({
-          x: CANVAS_IDEATION_LEFT_X + 24,
+          x: CANVAS_IDEATION_LEFT_X + 24 + Math.min(depth, 2) * 24,
           y: nextLeftY,
         });
-        nextLeftY += height + CANVAS_IDEATION_GROUP_GAP_Y;
+        nextLeftY += height + (depth === 0 ? CANVAS_IDEATION_GROUP_GAP_Y : 12);
       });
 
-      const rightUsesGroupSelector = !activeRootItem;
+      const rightUsesGroupSelector = !activeFocusItem;
       const agendaHeights = agendaModels.map((agenda) =>
         estimateAgendaNodeHeight(
           agenda.title,
@@ -8019,7 +8076,7 @@ export default function MeetingCanvasTab({
       );
       const rightItemHeights = rightUsesGroupSelector
         ? agendaHeights
-        : activeDescendantItems.map((item) => canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
+        : activeDirectChildItems.map((item) => canvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
       const rightPositions = buildGridPositions(
         rightItemHeights,
         CANVAS_ITEM_NODE_WIDTH + CANVAS_IDEATION_DETAIL_GAP_X,
@@ -8052,15 +8109,15 @@ export default function MeetingCanvasTab({
             contentSignature: buildNodeContentSignature([
               "ideation-left-frame",
               selectedAgendaForIdeation,
-              topLevelItems.length,
+              hierarchyItems.length,
               frameHeight,
             ]),
             label: makeIdeationFrameLabel(
               "Group Canvas",
               selectedAgendaModel
-                ? `${selectedAgendaModel.title}의 1차 그룹`
+                ? `${selectedAgendaModel.title}의 1~3차 구조`
                 : "그룹분류를 선택해 주세요.",
-              `${topLevelItems.length}개`,
+              `${hierarchyItems.length}개`,
             ),
           },
         },
@@ -8078,27 +8135,25 @@ export default function MeetingCanvasTab({
           data: {
             contentSignature: buildNodeContentSignature([
               "ideation-right-frame",
-              activeRootItem?.id || "agenda-selector",
+              activeFocusItem?.id || "agenda-selector",
               rightUsesGroupSelector,
-              activeDescendantItems.length,
+              activeDirectChildItems.length,
               frameHeight,
             ]),
             label: makeIdeationFrameLabel(
               rightUsesGroupSelector ? "Group Selector" : "Detail Canvas",
               rightUsesGroupSelector
                 ? "빈공간에서는 그룹분류를 선택합니다."
-                : `${activeRootItem?.title || "선택 그룹"} 하위 내용을 전체 펼침으로 표시합니다.`,
-              rightUsesGroupSelector ? `${agendaModels.length}개 분류` : `${activeDescendantItems.length}개`,
+                : `${activeFocusItem?.title || "선택 노드"}의 직계 하위 내용만 표시합니다.`,
+              rightUsesGroupSelector ? `${agendaModels.length}개 분류` : `${activeDirectChildItems.length}개`,
             ),
           },
         },
       ];
-      const leftGroupDescriptors: CanvasNodeDescriptor[] = topLevelItems.map((item, index) => {
+      const leftGroupDescriptors: CanvasNodeDescriptor[] = hierarchyItems.map(({ item, depth }, index) => {
         const descendantIds = descendantIdsByItem.get(item.id) || [];
-        const childItems = descendantIds
-          .slice(0, 3)
-          .map((itemId) => canvasItemById.get(itemId))
-          .filter((child): child is CanvasItemViewModel => Boolean(child));
+        const childItems = getCanvasItemDirectChildItems(canvasItems, item.id)
+          .slice(0, 3);
         const highlighted =
           focusedCanvasItemId === item.id ||
           (isTopicCanvasItem(item) && latestHighlightedTopicId === item.id);
@@ -8127,7 +8182,7 @@ export default function MeetingCanvasTab({
           targetPosition: Position.Left,
           className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
-            width: CANVAS_IDEATION_LEFT_WIDTH - 48,
+            width: CANVAS_IDEATION_LEFT_WIDTH - 48 - Math.min(depth, 2) * 24,
             height: leftHeights[index],
             background: "transparent",
             border: "none",
@@ -8138,6 +8193,7 @@ export default function MeetingCanvasTab({
           dragHandle: ".imms-canvas-node-drag-handle",
           zIndex: 2,
           data: {
+            paneRole: "ideation-left",
             contentSignature: buildNodeContentSignature([
               "ideation-left-group",
               item.id,
@@ -8146,21 +8202,23 @@ export default function MeetingCanvasTab({
               item.title,
               item.body,
               item.ai_pending,
-              activeRootItem?.id === item.id,
+              activeFocusItem?.id === item.id,
               highlighted,
               dropTarget,
+              depth,
               ...descendantIds,
               ...childItems.map((child) => child.title),
             ]),
             label: makeIdeationGroupNodeLabel(
               item,
-              activeRootItem?.id === item.id,
+              activeFocusItem?.id === item.id,
               childItems,
               descendantIds.length,
               highlighted,
               dropTarget,
               dropTargetLabel,
               dropTargetHint,
+              depth,
             ),
           },
         };
@@ -8177,6 +8235,7 @@ export default function MeetingCanvasTab({
             draggable: false,
             zIndex: 2,
             data: {
+              paneRole: "ideation-right-selector",
               contentSignature: buildNodeContentSignature([
                 "ideation-agenda-selector",
                 agenda.id,
@@ -8194,8 +8253,8 @@ export default function MeetingCanvasTab({
               ),
             },
           }))
-        : activeDescendantItems.length > 0
-          ? activeDescendantItems.map((item, index) => {
+        : activeDirectChildItems.length > 0
+          ? activeDirectChildItems.map((item, index) => {
               const nodeId = `canvas-item-${item.id}`;
               const linkedAgendaTitle =
                 agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
@@ -8205,7 +8264,7 @@ export default function MeetingCanvasTab({
               return {
                 id: nodeId,
                 position: {
-                  x: rightPositions[index].x + Math.min(depth, 3) * 18,
+                  x: rightPositions[index].x,
                   y: rightPositions[index].y,
                 },
                 positionSource: "computed" as const,
@@ -8224,6 +8283,7 @@ export default function MeetingCanvasTab({
                 dragHandle: ".imms-canvas-node-drag-handle",
                 zIndex: 2,
                 data: {
+                  paneRole: "ideation-right",
                   contentSignature: buildNodeContentSignature([
                     "ideation-detail-item",
                     item.id,
@@ -8267,12 +8327,14 @@ export default function MeetingCanvasTab({
                 data: {
                   contentSignature: buildNodeContentSignature([
                     "ideation-empty-detail",
-                    activeRootItem?.id || "",
-                    activeRootItem?.title || "",
+                    activeFocusItem?.id || "",
+                    activeFocusItem?.title || "",
                   ]),
                   label: makeIdeationEmptyDetailLabel(
                     "아직 하위 내용이 없습니다.",
-                    "오른쪽 캔버스에 메모/댓글을 추가하거나 STT로 생성된 아이디어가 병합되면 이 영역에 표시됩니다.",
+                    activeFocusItem
+                      ? "이 노드에 하위 아이디어가 생기면 이 영역에 표시됩니다."
+                      : "왼쪽 캔버스에서 1~3차 노드를 선택하면 하위 아이디어가 표시됩니다.",
                   ),
                 },
               },
@@ -8282,7 +8344,7 @@ export default function MeetingCanvasTab({
         layoutSignature: buildNodeContentSignature([
           stage,
           selectedAgendaForIdeation,
-          activeRootItem?.id || "",
+          activeFocusItem?.id || "",
           ...agendaModels.map((agenda) => agenda.id),
           ...canvasItems.flatMap((item) => [
             item.id,
@@ -8700,6 +8762,7 @@ export default function MeetingCanvasTab({
     handleProblemIdeaDragStart,
     handleProblemIdeaDrop,
     ideationDropPreview,
+    ideationFocusItemId,
     latestHighlightedTopicId,
     loadingProblemGroupIds,
     nodePositions,
@@ -9334,7 +9397,7 @@ export default function MeetingCanvasTab({
       setEditingProblemGroupId("");
       setEditingSolutionTopicId("");
       setStage("problem-definition");
-      if (!sharedSyncEnabled) {
+      if (sharedSyncEnabled) {
         forceBroadcastSharedCanvas({
           stage: "problem-definition",
           problemGroups: nextGroups,
@@ -9395,7 +9458,7 @@ export default function MeetingCanvasTab({
       setSolutionTopics(nextSolutionTopics);
       setSelectedSolutionTopicId(nextSolutionTopics[0]?.group_id || "");
       setSelectedNodeId(nextSolutionTopics[0] ? `solution-${nextSolutionTopics[0].group_id}` : "");
-      if (!sharedSyncEnabled) {
+      if (sharedSyncEnabled) {
         forceBroadcastSharedCanvas({
           stage: "solution",
           solutionTopics: nextSolutionTopics,
@@ -10337,7 +10400,6 @@ export default function MeetingCanvasTab({
           }
 
           if (
-            targetItem.parent_topic_id ||
             targetItem.agenda_id !== selectedAgendaForDrop ||
             targetItem.id === draggedItem.id ||
             draggedDescendantIds.has(targetItem.id)
@@ -10421,21 +10483,19 @@ export default function MeetingCanvasTab({
       }
 
       if (!draggedItem.parent_topic_id && pointerInsideRightPane) {
-        const selectedRootIdForDrop = selectedCanvasItemId
-          ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
-          : "";
-        const selectedRootItemForDrop = selectedRootIdForDrop
-          ? canvasItems.find((item) => item.id === selectedRootIdForDrop) || null
+        const selectedFocusItemForDrop = selectedCanvasItemId
+          ? canvasItems.find((item) => item.id === selectedCanvasItemId) || null
           : null;
 
         if (
-          selectedRootItemForDrop &&
-          selectedRootItemForDrop.id !== draggedItem.id &&
-          selectedRootItemForDrop.agenda_id === selectedAgendaForDrop
+          selectedFocusItemForDrop &&
+          selectedFocusItemForDrop.id !== draggedItem.id &&
+          selectedFocusItemForDrop.agenda_id === selectedAgendaForDrop &&
+          !draggedDescendantIds.includes(selectedFocusItemForDrop.id)
         ) {
           return makeIdeationMergeDropPreview(
             draggedItem,
-            selectedRootItemForDrop,
+            selectedFocusItemForDrop,
             getIdeationDropPlaceholderPosition("right", clientX, clientY, node.position),
           );
         }
@@ -10718,17 +10778,19 @@ export default function MeetingCanvasTab({
       let nextSelectedIdeationItemId = canvasItemId;
 
       if (draggedItem && !draggedItem.parent_topic_id && droppedOnRightPane) {
-        const selectedRootIdForDrop = selectedCanvasItemId
-          ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
-          : "";
-        const selectedRootItemForDrop = selectedRootIdForDrop
-          ? canvasItems.find((item) => item.id === selectedRootIdForDrop) || null
+        const selectedFocusItemForDrop = selectedCanvasItemId
+          ? canvasItems.find((item) => item.id === selectedCanvasItemId) || null
           : null;
+        const draggedDescendantIds = getCanvasItemDescendantIds(canvasItems, draggedItem.id);
 
-        if (selectedRootItemForDrop && selectedRootItemForDrop.id !== draggedItem.id) {
+        if (
+          selectedFocusItemForDrop &&
+          selectedFocusItemForDrop.id !== draggedItem.id &&
+          !draggedDescendantIds.includes(selectedFocusItemForDrop.id)
+        ) {
           dropPreview = makeIdeationMergeDropPreview(
             draggedItem,
-            selectedRootItemForDrop,
+            selectedFocusItemForDrop,
             dragNode.position,
           );
         } else {
@@ -11161,6 +11223,7 @@ export default function MeetingCanvasTab({
       }
       if (ideationMoveMessage) {
         setSelectedCanvasItemId(nextSelectedIdeationItemId);
+        setIdeationFocusItemId(nextSelectedIdeationItemId);
         setSelectedNodeId(`canvas-item-${nextSelectedIdeationItemId}`);
         setActivityMessage(ideationMoveMessage);
       }
@@ -12271,11 +12334,11 @@ export default function MeetingCanvasTab({
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
   const selectedAgendaForIdeationCanvas = selectedAgendaId || agendaModels[0]?.id || "";
   const selectedRootItemForIdeationCanvas = useMemo(() => {
-    if (stage !== "ideation" || !selectedCanvasItemId) return null;
-    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId);
-    const rootItem = canvasItems.find((item) => item.id === rootId) || null;
-    return rootItem?.agenda_id === selectedAgendaForIdeationCanvas ? rootItem : null;
-  }, [canvasItems, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
+    const focusItemId = ideationFocusItemId || selectedCanvasItemId;
+    if (stage !== "ideation" || !focusItemId) return null;
+    const selectedItem = canvasItems.find((item) => item.id === focusItemId) || null;
+    return selectedItem?.agenda_id === selectedAgendaForIdeationCanvas ? selectedItem : null;
+  }, [canvasItems, ideationFocusItemId, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
   const latestDiscussionRootItem = useMemo(() => {
     if (!latestHighlightedTopicId) return null;
     const latestItem = canvasItems.find((item) => item.id === latestHighlightedTopicId) || null;
@@ -12288,14 +12351,13 @@ export default function MeetingCanvasTab({
       return { left: [] as Node[], right: [] as Node[] };
     }
 
-    const topLevelIds = new Set(
-      canvasItems
-        .filter((item) => item.agenda_id === selectedAgendaForIdeationCanvas && !item.parent_topic_id)
-        .map((item) => item.id),
+    const leftVisibleIds = new Set(
+      getCanvasItemVisibleHierarchyItems(canvasItems, selectedAgendaForIdeationCanvas, 2)
+        .map(({ item }) => item.id),
     );
-    const descendantIds = new Set(
+    const directChildIds = new Set(
       selectedRootItemForIdeationCanvas
-        ? getCanvasItemDescendantIds(canvasItems, selectedRootItemForIdeationCanvas.id)
+        ? getCanvasItemDirectChildItems(canvasItems, selectedRootItemForIdeationCanvas.id).map((item) => item.id)
         : [],
     );
 
@@ -12305,7 +12367,7 @@ export default function MeetingCanvasTab({
       }
 
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
-      return canvasItemId ? topLevelIds.has(canvasItemId) : false;
+      return canvasItemId ? leftVisibleIds.has(canvasItemId) : false;
     });
     const rightNodes = nodes.filter((node) => {
       if (node.id === "ideation-drop-placeholder") {
@@ -12320,12 +12382,12 @@ export default function MeetingCanvasTab({
           return true;
         }
 
-        return Boolean(targetItem.parent_topic_id && descendantIds.has(targetItem.id));
+        return Boolean(targetItem.parent_topic_id && directChildIds.has(targetItem.id));
       }
 
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
       if (selectedRootItemForIdeationCanvas) {
-        return canvasItemId ? descendantIds.has(canvasItemId) : node.id === "ideation-empty-detail";
+        return canvasItemId ? directChildIds.has(canvasItemId) : node.id === "ideation-empty-detail";
       }
       return node.id.startsWith("agenda-");
     });
@@ -12535,8 +12597,7 @@ export default function MeetingCanvasTab({
       return;
     }
 
-    const childItems = getCanvasItemDescendantIds(canvasItems, rootItem.id)
-      .map((itemId) => canvasItems.find((item) => item.id === itemId) || null)
+    const childItems = getCanvasItemDirectChildItems(canvasItems, rootItem.id)
       .filter((item): item is CanvasItemViewModel => Boolean(item && !isTopicCanvasItem(item)))
       .slice(0, 12);
 
@@ -12664,9 +12725,11 @@ export default function MeetingCanvasTab({
     }
 
     const rootId = getCanvasItemTopLevelAncestorId(canvasItems, item.id);
+    const focusItemId = item.parent_topic_id || item.id;
     setStage("ideation");
     setSelectedAgendaId(item.agenda_id || selectedAgendaId || agendaModels[0]?.id || "");
     setSelectedCanvasItemId(item.id);
+    setIdeationFocusItemId(focusItemId);
     setSelectedNodeId(`canvas-item-${item.id}`);
     setSelectedProblemGroupId("");
     setSelectedProblemSourceNodeId("");
@@ -12695,6 +12758,7 @@ export default function MeetingCanvasTab({
       setPendingPersonalNoteLinkId("");
       setFocusedCanvasItemId(item.id);
       setSelectedCanvasItemId(item.id);
+      setIdeationFocusItemId(item.parent_topic_id || item.id);
       setSelectedNodeId(`canvas-item-${item.id}`);
       setActivityMessage("작성 중인 개인 메모에 연결할 아이디어를 선택했습니다.");
       return true;
@@ -12715,6 +12779,7 @@ export default function MeetingCanvasTab({
     setPendingPersonalNoteLinkId("");
     setFocusedCanvasItemId(item.id);
     setSelectedCanvasItemId(item.id);
+    setIdeationFocusItemId(item.parent_topic_id || item.id);
     setSelectedNodeId(`canvas-item-${item.id}`);
     setActivityMessage("개인 메모를 선택한 아이디어 노드에 연결했습니다.");
     return true;
@@ -12729,6 +12794,7 @@ export default function MeetingCanvasTab({
     setStage("ideation");
     setSelectedAgendaId(latestDiscussionRootItem.agenda_id || selectedAgendaId || agendaModels[0]?.id || "");
     setSelectedCanvasItemId(latestDiscussionRootItem.id);
+    setIdeationFocusItemId(latestDiscussionRootItem.id);
     setSelectedNodeId(`canvas-item-${latestDiscussionRootItem.id}`);
     setSelectedProblemGroupId("");
     setSelectedProblemSourceNodeId("");
@@ -12834,7 +12900,11 @@ export default function MeetingCanvasTab({
       if (canvasItem && linkPendingPersonalNoteToCanvasItem(canvasItem)) {
         return;
       }
+      const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
       setSelectedCanvasItemId(canvasItemId);
+      if (stage === "ideation" && paneRole !== "ideation-right") {
+        setIdeationFocusItemId(canvasItemId);
+      }
       setSelectedProblemGroupId("");
       setSelectedSolutionTopicId("");
       setEditingProblemGroupId("");
@@ -12854,6 +12924,9 @@ export default function MeetingCanvasTab({
       }
     } else {
       setSelectedCanvasItemId("");
+      if (stage === "ideation") {
+        setIdeationFocusItemId("");
+      }
     }
     const problemSourceInfo = extractProblemSourceCanvasNodeInfo(node.id);
     const clickedProblemGroupId =
@@ -12952,6 +13025,7 @@ export default function MeetingCanvasTab({
       closeRightDrawer();
       if (stage === "ideation" && pane === "ideation-left") {
         setSelectedCanvasItemId("");
+        setIdeationFocusItemId("");
         setSelectedNodeId("");
         setLeftPanelTab("detail");
       }

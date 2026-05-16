@@ -276,6 +276,25 @@ export default function DashboardPage() {
         throw error;
       }
 
+      const { error: participantError } = await supabase
+        .from("participants")
+        .upsert(
+          {
+            meeting_id: data.id,
+            user_id: user.id,
+            role: "host",
+            joined_at: new Date().toISOString(),
+          },
+          {
+            onConflict: "meeting_id,user_id",
+          },
+        );
+
+      if (participantError) {
+        console.error("❌ Dashboard - Failed to register host participant:", participantError);
+        throw participantError;
+      }
+
       console.log("✅ Dashboard - Meeting created:", data.id);
       setShowCreateModal(false);
       setNewMeetingTitle("");
