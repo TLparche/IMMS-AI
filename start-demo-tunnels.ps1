@@ -49,6 +49,81 @@ function Start-LoggedProcess {
   }
 }
 
+function Get-ChildProcessIds {
+  param([int]$ParentProcessId)
+
+  $ids = @()
+  try {
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ParentProcessId" -ErrorAction SilentlyContinue)
+  } catch {
+    return $ids
+  }
+
+  foreach ($child in $children) {
+    $childId = [int]$child.ProcessId
+    $ids += Get-ChildProcessIds -ParentProcessId $childId
+    $ids += $childId
+  }
+  return $ids
+}
+
+function Stop-ProcessTree {
+  param(
+    [int]$ProcessId,
+    [string]$Label = ""
+  )
+
+  if ($ProcessId -le 0 -or $ProcessId -eq $PID) {
+    return
+  }
+
+  $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+  if (-not $process) {
+    return
+  }
+
+  $displayName = if ($Label) { $Label } else { "$($process.ProcessName) (PID $ProcessId)" }
+  $ids = @(Get-ChildProcessIds -ParentProcessId $ProcessId)
+  $ids += $ProcessId
+  $ids = @($ids | Where-Object { $_ -and $_ -ne $PID } | Select-Object -Unique)
+
+  foreach ($id in $ids) {
+    try {
+      $target = Get-Process -Id $id -ErrorAction Stop
+      Stop-Process -Id $id -Force -ErrorAction Stop
+      Write-Host "Stopped $($target.ProcessName) (PID $id) for $displayName"
+    } catch {
+      Write-Warning "Failed to stop PID $id for $displayName with Stop-Process: $($_.Exception.Message)"
+    }
+  }
+
+  Start-Sleep -Milliseconds 300
+  $remaining = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+  if ($remaining.Count -eq 0) {
+    return
+  }
+
+  $taskkill = Get-Command taskkill.exe -ErrorAction SilentlyContinue
+  if ($taskkill) {
+    foreach ($id in $remaining) {
+      try {
+        & $taskkill.Source /PID $id /T /F | Out-Null
+        Write-Host "Stopped PID $id with taskkill for $displayName"
+      } catch {
+        Write-Warning "taskkill failed for PID $id in $displayName: $($_.Exception.Message)"
+      }
+    }
+
+    Start-Sleep -Milliseconds 300
+    $remaining = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remaining.Count -eq 0) {
+      return
+    }
+  }
+
+  Write-Warning "Some processes for $displayName are still running. PowerShell may need administrator permission."
+}
+
 function Stop-PortListeners {
   param([int[]]$Ports)
 
@@ -62,7 +137,7 @@ function Stop-PortListeners {
     try {
       $process = Get-Process -Id $ownerProcessId -ErrorAction Stop
       Write-Host "Stopping existing listener on port $($listener.LocalPort): $($process.ProcessName) (PID $ownerProcessId)"
-      Stop-Process -Id $ownerProcessId -Force -ErrorAction Stop
+      Stop-ProcessTree -ProcessId $ownerProcessId -Label "port $($listener.LocalPort)"
     } catch {
       Write-Warning "Failed to stop process on port $($listener.LocalPort) (PID $ownerProcessId): $($_.Exception.Message)"
     }
@@ -229,13 +304,36 @@ function Test-CorsPreflight {
 function Stop-StartedProcesses {
   param([object[]]$Started)
 
-  foreach ($item in ($Started | Where-Object { $_ -and $_.Process -and -not $_.Process.HasExited })) {
+  $items = @($Started | Where-Object { $_ -and $_.Process })
+  [array]::Reverse($items)
+
+  foreach ($item in $items) {
     try {
-      Stop-Process -Id $item.Process.Id -Force -ErrorAction Stop
-      Write-Host "Stopped $($item.Name) (PID $($item.Process.Id))"
+      Stop-ProcessTree -ProcessId $item.Process.Id -Label "$($item.Name) (PID $($item.Process.Id))"
     } catch {
       Write-Warning "Failed to stop $($item.Name): $($_.Exception.Message)"
     }
+  }
+}
+
+function Invoke-DemoCleanup {
+  param(
+    [object[]]$Started,
+    [int[]]$Ports,
+    [switch]$ForcePorts
+  )
+
+  if ($script:CleanupStarted) {
+    return
+  }
+  $script:CleanupStarted = $true
+
+  Write-Host ""
+  Write-Host "Cleaning up demo processes..."
+  Stop-StartedProcesses -Started $Started
+
+  if ($ForcePorts) {
+    Stop-PortListeners -Ports $Ports
   }
 }
 
@@ -258,6 +356,13 @@ if (-not $KeepExistingPortProcesses) {
 }
 
 $started = @()
+$script:CleanupStarted = $false
+
+trap {
+  Write-Warning "중단 요청을 받아 demo 프로세스를 정리합니다."
+  Invoke-DemoCleanup -Started $started -Ports @($BackendPort, $GatewayPort) -ForcePorts:(-not $KeepExistingPortProcesses)
+  break
+}
 
 try {
   Write-Host "Starting backend on http://localhost:$BackendPort ..."
@@ -329,7 +434,7 @@ try {
   Write-Host ""
   Write-Host "Logs: $logDir"
   Write-Host ""
-  Read-Host "종료하려면 Enter를 누르세요. 이 스크립트가 띄운 backend/gateway/tunnel 프로세스를 정리합니다"
+  Read-Host "종료하려면 Enter를 누르세요. Ctrl+C를 눌러도 backend/gateway/tunnel 프로세스를 정리합니다"
 } finally {
-  Stop-StartedProcesses -Started $started
+  Invoke-DemoCleanup -Started $started -Ports @($BackendPort, $GatewayPort) -ForcePorts:(-not $KeepExistingPortProcesses)
 }
