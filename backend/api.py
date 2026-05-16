@@ -13,6 +13,7 @@ import time
 import wave
 import importlib.util
 import copy
+import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1190,6 +1191,10 @@ def _canvas_llm_signature(payload: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _canvas_hash_signature(payload: Any) -> str:
+    return hashlib.sha256(_canvas_llm_signature(payload).encode("utf-8")).hexdigest()
 
 
 def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
@@ -7133,12 +7138,129 @@ def _mark_canvas_idea_job(
         return copy.deepcopy(current)
 
 
+def _canvas_job_type(job: dict[str, Any]) -> str:
+    return _safe_text(job.get("job_type"), "idea_assimilation")
+
+
+def _canvas_job_created_epoch(job: dict[str, Any]) -> float:
+    try:
+        return float(job.get("created_epoch") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _has_newer_canvas_idea_scope_job(
+    meeting_id: str,
+    job_id: str,
+    job_type: str,
+    scope_key: str,
+) -> bool:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_job_id = _safe_text(job_id)
+    normalized_job_type = _safe_text(job_type)
+    normalized_scope_key = _safe_text(scope_key)
+    if not normalized_meeting_id or not normalized_job_id or not normalized_job_type or not normalized_scope_key:
+        return False
+
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.get(normalized_meeting_id) or {}
+        current_job = meeting_jobs.get(normalized_job_id) if isinstance(meeting_jobs.get(normalized_job_id), dict) else {}
+        current_epoch = _canvas_job_created_epoch(current_job)
+        for candidate_id, candidate in meeting_jobs.items():
+            if candidate_id == normalized_job_id or not isinstance(candidate, dict):
+                continue
+            if _canvas_job_type(candidate) != normalized_job_type:
+                continue
+            if _safe_text(candidate.get("scope_key")) != normalized_scope_key:
+                continue
+            if _safe_text(candidate.get("status")) not in {"processing", "completed"}:
+                continue
+            if _canvas_job_created_epoch(candidate) > current_epoch:
+                return True
+    return False
+
+
+def _supersede_processing_canvas_idea_scope_jobs(
+    meeting_id: str,
+    job_type: str,
+    scope_key: str,
+    next_target_signature: str,
+    workspace: dict[str, Any],
+) -> int:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_job_type = _safe_text(job_type)
+    normalized_scope_key = _safe_text(scope_key)
+    normalized_signature = _safe_text(next_target_signature)
+    if not normalized_meeting_id or not normalized_job_type or not normalized_scope_key:
+        return 0
+
+    superseded = 0
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        for job_id, job in list(meeting_jobs.items()):
+            if not isinstance(job, dict):
+                continue
+            if _safe_text(job.get("status")) != "processing":
+                continue
+            if _canvas_job_type(job) != normalized_job_type:
+                continue
+            if _safe_text(job.get("scope_key")) != normalized_scope_key:
+                continue
+            if normalized_signature and _safe_text(job.get("target_signature")) == normalized_signature:
+                continue
+            meeting_jobs[job_id] = {
+                **job,
+                "status": "stale",
+                "detail": "더 최신 AI 정리 요청으로 대체되었습니다.",
+                "warning": "",
+                "workspace": copy.deepcopy(workspace),
+                "updated_at": _now_ts(),
+            }
+            superseded += 1
+    return superseded
+
+
+def _finish_stale_canvas_topic_summary_job(
+    meeting_id: str,
+    job_id: str,
+    topic_item_id: str,
+    detail: str,
+) -> None:
+    latest_workspace = _clone_runtime_workspace_state(
+        meeting_id,
+        _warm_canvas_workspace_cache(RT, meeting_id),
+        _now_ts(),
+    )
+    topic_id = _safe_text(topic_item_id)
+    if not _has_newer_canvas_idea_scope_job(meeting_id, job_id, "topic_summary", topic_id):
+        latest_workspace["canvas_items"] = [
+            {**item, "ai_pending": False}
+            if isinstance(item, dict) and _safe_text(item.get("id")) == topic_id and _is_canvas_topic_item(item)
+            else item
+            for item in (latest_workspace.get("canvas_items") or [])
+        ]
+        _save_canvas_workspace_runtime(meeting_id, latest_workspace)
+
+    _mark_canvas_idea_job(
+        meeting_id,
+        job_id,
+        status="stale",
+        detail=detail,
+        workspace=copy.deepcopy(latest_workspace),
+        used_llm=False,
+        warning="",
+        pending_item_id=topic_id,
+    )
+
+
 def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | None = None) -> dict[str, Any]:
     response = {
         "ok": True,
         "job_id": _safe_text(job.get("job_id")),
         "meeting_id": _safe_text(job.get("meeting_id")),
         "status": _safe_text(job.get("status"), "idle"),
+        "job_type": _canvas_job_type(job),
+        "scope_key": _safe_text(job.get("scope_key")),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -7476,6 +7598,58 @@ def _canvas_topic_leaf_child_ids(workspace: dict[str, Any], topic_id: str) -> li
             leaves.append(child_id)
 
     return _dedup_preserve(leaves, limit=400)
+
+
+def _canvas_topic_summary_signature(workspace: dict[str, Any], topic_id: str) -> str:
+    normalized_topic_id = _safe_text(topic_id)
+    canvas_items = [
+        item
+        for item in (workspace.get("canvas_items") or [])
+        if isinstance(item, dict)
+    ]
+    item_by_id = {
+        _safe_text(item.get("id")): item
+        for item in canvas_items
+        if _safe_text(item.get("id"))
+    }
+    topic = item_by_id.get(normalized_topic_id) or {}
+    child_ids = _canvas_topic_leaf_child_ids(workspace, normalized_topic_id)
+    child_payload = []
+    for child_id in child_ids:
+        child = item_by_id.get(child_id)
+        if not child:
+            continue
+        child_payload.append(
+            {
+                "id": child_id,
+                "kind": _safe_text(child.get("kind"), "note"),
+                "title": _safe_text(child.get("title")),
+                "body": _safe_text(child.get("body")),
+                "keywords": [_safe_text(value) for value in (child.get("keywords") or []) if _safe_text(value)][:8],
+                "evidence_utterance_ids": [
+                    _safe_text(value)
+                    for value in (child.get("evidence_utterance_ids") or [])
+                    if _safe_text(value)
+                ][:80],
+                "parent_topic_id": _safe_text(child.get("parent_topic_id")),
+                "compacted_from_ids": [_safe_text(value) for value in (child.get("compacted_from_ids") or []) if _safe_text(value)][:80],
+                "compaction_level": _safe_nonnegative_int(child.get("compaction_level")),
+            }
+        )
+
+    return _canvas_hash_signature(
+        {
+            "topic": {
+                "id": normalized_topic_id,
+                "title": _safe_text(topic.get("title")),
+                "body": _safe_text(topic.get("body")),
+                "keywords": [_safe_text(value) for value in (topic.get("keywords") or []) if _safe_text(value)][:8],
+                "child_item_ids": _canvas_topic_child_ids(workspace, normalized_topic_id),
+            },
+            "leaf_child_ids": child_ids,
+            "children": child_payload,
+        }
+    )
 
 
 def _canvas_idea_create_stack_value(workspace: dict[str, Any]) -> int:
@@ -7966,6 +8140,62 @@ def _finalize_canvas_topic_summary_workspace_job(
     meeting_topic: str,
 ) -> None:
     try:
+        topic_id = _safe_text(topic_item_id)
+        with RT.lock:
+            current_job = copy.deepcopy(
+                (RT.canvas_idea_jobs_by_meeting.get(_safe_text(meeting_id)) or {}).get(_safe_text(job_id)) or {}
+            )
+        if current_job and _safe_text(current_job.get("status")) != "processing":
+            return
+
+        job_target_signature = _safe_text(current_job.get("target_signature"))
+        source_workspace = _clone_runtime_workspace_state(
+            meeting_id,
+            _warm_canvas_workspace_cache(RT, meeting_id),
+            _now_ts(),
+        )
+        source_canvas_items = [
+            copy.deepcopy(item)
+            for item in (source_workspace.get("canvas_items") or [])
+            if isinstance(item, dict)
+        ]
+        topic = next((item for item in source_canvas_items if _safe_text(item.get("id")) == topic_id), None)
+        if not topic or not _is_canvas_topic_item(topic):
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+            )
+            return
+
+        if _has_newer_canvas_idea_scope_job(meeting_id, job_id, "topic_summary", topic_id):
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "더 최신 AI topic 정리 요청으로 대체되었습니다.",
+            )
+            return
+
+        if job_target_signature and _canvas_topic_summary_signature(source_workspace, topic_id) != job_target_signature:
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "topic 하위 내용이 바뀌어 이전 AI 정리 결과를 적용하지 않았습니다.",
+            )
+            return
+
+        child_ids = _canvas_topic_leaf_child_ids({"canvas_items": source_canvas_items}, topic_id)
+        child_id_set = set(child_ids)
+        child_items = [
+            item
+            for item in source_canvas_items
+            if _safe_text(item.get("id")) in child_id_set and not _is_canvas_topic_item(item)
+        ]
+        update = _compute_canvas_topic_summary_update(meeting_topic, topic, child_items)
+
         latest_workspace = _clone_runtime_workspace_state(
             meeting_id,
             _warm_canvas_workspace_cache(RT, meeting_id),
@@ -7976,19 +8206,34 @@ def _finalize_canvas_topic_summary_workspace_job(
             for item in (latest_workspace.get("canvas_items") or [])
             if isinstance(item, dict)
         ]
-        topic_id = _safe_text(topic_item_id)
-        topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_id), None)
-        if not topic or not _is_canvas_topic_item(topic):
-            raise RuntimeError("정리할 topic node를 찾을 수 없습니다.")
+        latest_topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_id), None)
+        if not latest_topic or not _is_canvas_topic_item(latest_topic):
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+            )
+            return
 
-        child_ids = _canvas_topic_leaf_child_ids({"canvas_items": canvas_items}, topic_id)
-        child_id_set = set(child_ids)
-        child_items = [
-            item
-            for item in canvas_items
-            if _safe_text(item.get("id")) in child_id_set and not _is_canvas_topic_item(item)
-        ]
-        update = _compute_canvas_topic_summary_update(meeting_topic, topic, child_items)
+        if _has_newer_canvas_idea_scope_job(meeting_id, job_id, "topic_summary", topic_id):
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "더 최신 AI topic 정리 요청으로 대체되었습니다.",
+            )
+            return
+
+        if job_target_signature and _canvas_topic_summary_signature(latest_workspace, topic_id) != job_target_signature:
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                topic_id,
+                "topic 하위 내용이 바뀌어 이전 AI 정리 결과를 적용하지 않았습니다.",
+            )
+            return
+
         if not update:
             warning = "LLM 응답을 받지 못해 topic 내용을 생성하지 못했습니다."
             latest_workspace["canvas_items"] = [
@@ -8042,6 +8287,14 @@ def _finalize_canvas_topic_summary_workspace_job(
             pending_item_id=topic_id,
         )
     except Exception as exc:
+        if _has_newer_canvas_idea_scope_job(meeting_id, job_id, "topic_summary", _safe_text(topic_item_id)):
+            _finish_stale_canvas_topic_summary_job(
+                meeting_id,
+                job_id,
+                _safe_text(topic_item_id),
+                "더 최신 AI topic 정리 요청으로 대체되었습니다.",
+            )
+            return
         latest_workspace = _clone_runtime_workspace_state(
             meeting_id,
             _warm_canvas_workspace_cache(RT, meeting_id),
@@ -8570,7 +8823,9 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
             (
                 copy.deepcopy(job)
                 for job in meeting_jobs.values()
-                if isinstance(job, dict) and _safe_text(job.get("status")) == "processing"
+                if isinstance(job, dict)
+                and _safe_text(job.get("status")) == "processing"
+                and _canvas_job_type(job) == "idea_assimilation"
             ),
             None,
         )
@@ -8723,12 +8978,15 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
     job = _mark_canvas_idea_job(
         normalized_meeting_id,
         job_id,
+        job_type="idea_assimilation",
+        scope_key="idea_assimilation",
         status="processing",
         detail="AI가 키워드와 content를 생성 중",
         pending_item_id=pending_item_id,
         target_count=len(target_rows),
         target_signature=target_signature,
         created_at=_now_ts(),
+        created_epoch=time.time(),
         workspace=copy.deepcopy(workspace),
     )
     threading.Thread(
@@ -8747,23 +9005,6 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
     if not normalized_meeting_id or not topic_item_id:
         raise HTTPException(status_code=400, detail="meeting_id and topic_item_id are required")
 
-    with RT.lock:
-        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
-        running_job = next(
-            (
-                copy.deepcopy(job)
-                for job in meeting_jobs.values()
-                if isinstance(job, dict)
-                and _safe_text(job.get("status")) == "processing"
-                and _safe_text(job.get("job_type")) == "topic_summary"
-                and _safe_text(job.get("pending_item_id")) == topic_item_id
-            ),
-            None,
-        )
-    if running_job:
-        workspace = running_job.get("workspace") if isinstance(running_job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
-        return _canvas_idea_job_response(running_job, workspace)
-
     workspace = _clone_runtime_workspace_state(
         normalized_meeting_id,
         _warm_canvas_workspace_cache(RT, normalized_meeting_id),
@@ -8776,7 +9017,36 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
     ]
     topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_item_id), None)
     if not topic or not _is_canvas_topic_item(topic):
-        raise HTTPException(status_code=404, detail="topic item not found")
+        job = {
+            "job_id": "",
+            "meeting_id": normalized_meeting_id,
+            "job_type": "topic_summary",
+            "scope_key": topic_item_id,
+            "status": "stale",
+            "detail": "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+            "pending_item_id": topic_item_id,
+            "updated_at": _now_ts(),
+        }
+        return _canvas_idea_job_response(job, workspace)
+
+    target_signature = _canvas_topic_summary_signature(workspace, topic_item_id)
+    with RT.lock:
+        meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
+        running_job = next(
+            (
+                copy.deepcopy(job)
+                for job in meeting_jobs.values()
+                if isinstance(job, dict)
+                and _safe_text(job.get("status")) == "processing"
+                and _safe_text(job.get("job_type")) == "topic_summary"
+                and _safe_text(job.get("pending_item_id")) == topic_item_id
+                and _safe_text(job.get("target_signature")) == target_signature
+            ),
+            None,
+        )
+    if running_job:
+        workspace = running_job.get("workspace") if isinstance(running_job.get("workspace"), dict) else _warm_canvas_workspace_cache(RT, normalized_meeting_id)
+        return _canvas_idea_job_response(running_job, workspace)
 
     workspace["canvas_items"] = [
         {
@@ -8791,18 +9061,27 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
     ]
     workspace["node_positions"] = _normalize_canvas_node_positions(workspace.get("node_positions") or {})
     _save_canvas_workspace_runtime(normalized_meeting_id, workspace)
+    _supersede_processing_canvas_idea_scope_jobs(
+        normalized_meeting_id,
+        "topic_summary",
+        topic_item_id,
+        target_signature,
+        workspace,
+    )
 
     job_id = uuid4().hex
     job = _mark_canvas_idea_job(
         normalized_meeting_id,
         job_id,
         job_type="topic_summary",
+        scope_key=topic_item_id,
         status="processing",
         detail="AI가 topic 제목과 content를 생성 중",
         pending_item_id=topic_item_id,
         target_count=len(_canvas_topic_leaf_child_ids(workspace, topic_item_id)),
-        target_signature=topic_item_id,
+        target_signature=target_signature,
         created_at=_now_ts(),
+        created_epoch=time.time(),
         workspace=copy.deepcopy(workspace),
     )
     threading.Thread(
