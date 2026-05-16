@@ -2218,6 +2218,41 @@ function makeAgendaNodeLabel(title: string, summary: string, status: string, key
   );
 }
 
+function makeIdeationAgendaGroupNodeLabel(
+  agenda: AgendaViewModel,
+  selected: boolean,
+  rootCount: number,
+) {
+  return (
+    <div className="h-full min-w-0">
+      <div
+        className={`grid h-full cursor-pointer grid-cols-[1fr_auto] items-center gap-3 rounded-[12px] border px-3 py-3 font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition ${
+          selected
+            ? "border-[#1b59f8] bg-[#eef4ff] shadow-[0_8px_22px_rgba(27,89,248,0.14)]"
+            : "border-black/10 bg-white hover:border-[#1b59f8]/40"
+        }`}
+      >
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${selected ? "bg-[#1b59f8] text-white" : "bg-amber-100 text-amber-800"}`}>
+              그룹
+            </span>
+            <span className="truncate text-[11px] font-semibold text-[#777]">
+              {selected ? "펼쳐짐" : agenda.status}
+            </span>
+          </div>
+          <strong className="mt-2 block truncate text-[15px] font-semibold leading-5 text-black">
+            {agenda.title}
+          </strong>
+        </div>
+        <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${selected ? "bg-white text-[#1b59f8]" : "bg-black/[0.04] text-[#555]"}`}>
+          1차 {rootCount}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function canvasItemTone(kind: ComposerTool) {
   if (kind === "comment") {
     return {
@@ -2256,10 +2291,12 @@ const CANVAS_IDEATION_DETAIL_GAP_X = 28;
 const CANVAS_IDEATION_DETAIL_GAP_Y = 24;
 const IDEATION_LEFT_VISIBLE_LEVELS = 3;
 const IDEATION_LEFT_VISIBLE_MAX_DEPTH = IDEATION_LEFT_VISIBLE_LEVELS - 1;
+const IDEATION_LEFT_GROUP_NODE_HEIGHT = 82;
+const IDEATION_LEFT_GROUP_GAP_Y = 8;
+const IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y = 26;
 const IDEATION_LEFT_NODE_HEIGHT = 96;
 const IDEATION_LEFT_ROOT_NODE_HEIGHT = 108;
 const IDEATION_LEFT_NODE_GAP_Y = 10;
-const IDEATION_LEFT_ROOT_NODE_GAP_Y = 8;
 const IDEATION_LEFT_CHILD_SECTION_GAP_Y = 26;
 const IDEATION_LEFT_DEPTH_INDENT = 22;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
@@ -8543,7 +8580,23 @@ export default function MeetingCanvasTab({
       );
       const rootHierarchyItems = hierarchyItems.filter(({ depth }) => depth === 0);
       const expandedHierarchyItems = hierarchyItems.filter(({ depth }) => depth > 0);
-      const leftLayoutItems = [...rootHierarchyItems, ...expandedHierarchyItems];
+      const leftAgendaEntries = agendaModels.map((agenda) => ({
+        kind: "agenda" as const,
+        agenda,
+      }));
+      const leftItemEntries = [...rootHierarchyItems, ...expandedHierarchyItems].map(({ item, depth }) => ({
+        kind: "item" as const,
+        item,
+        depth,
+      }));
+      const leftLayoutEntries = [...leftAgendaEntries, ...leftItemEntries];
+      const selectedAgendaRootCount = rootHierarchyItems.length;
+      const rootCountByAgendaId = new Map(
+        agendaModels.map((agenda) => [
+          agenda.id,
+          canvasItems.filter((item) => item.agenda_id === agenda.id && !item.parent_topic_id).length,
+        ] as const),
+      );
       const descendantIdsByItem = new Map(
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
@@ -8551,34 +8604,39 @@ export default function MeetingCanvasTab({
         ? getCanvasItemDirectChildItems(rightCanvasItems, activeFocusItem.id)
         : [];
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
-      const leftHeights = leftLayoutItems.map(({ depth }) =>
-        depth === 0 ? IDEATION_LEFT_ROOT_NODE_HEIGHT : IDEATION_LEFT_NODE_HEIGHT,
+      const leftHeights = leftLayoutEntries.map((entry) =>
+        entry.kind === "agenda"
+          ? IDEATION_LEFT_GROUP_NODE_HEIGHT
+          : entry.depth === 0
+          ? IDEATION_LEFT_ROOT_NODE_HEIGHT
+          : IDEATION_LEFT_NODE_HEIGHT,
       );
       const leftPositions: Array<{ x: number; y: number }> = [];
       let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
       leftHeights.forEach((height, index) => {
-        const currentLayoutItem = leftLayoutItems[index];
-        const previousLayoutItem = leftLayoutItems[index - 1];
-        if (currentLayoutItem?.depth > 0 && previousLayoutItem?.depth === 0) {
-          nextLeftY += IDEATION_LEFT_CHILD_SECTION_GAP_Y;
+        const currentEntry = leftLayoutEntries[index];
+        const previousEntry = leftLayoutEntries[index - 1];
+        if (index > 0) {
+          if (currentEntry?.kind === "agenda" && previousEntry?.kind === "agenda") {
+            nextLeftY += IDEATION_LEFT_GROUP_GAP_Y;
+          } else if (currentEntry?.kind === "item" && previousEntry?.kind === "agenda") {
+            nextLeftY += IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y;
+          } else if (currentEntry?.kind === "item" && currentEntry.depth > 0 && previousEntry?.kind === "item" && previousEntry.depth === 0) {
+            nextLeftY += IDEATION_LEFT_CHILD_SECTION_GAP_Y;
+          } else {
+            nextLeftY += IDEATION_LEFT_NODE_GAP_Y;
+          }
         }
         leftPositions.push({
           x: CANVAS_IDEATION_LEFT_X + 20,
           y: nextLeftY,
         });
-        nextLeftY += height + (currentLayoutItem?.depth === 0 ? IDEATION_LEFT_ROOT_NODE_GAP_Y : IDEATION_LEFT_NODE_GAP_Y);
+        nextLeftY += height;
       });
 
-      const rightUsesGroupSelector = !activeFocusItem;
-      const agendaHeights = agendaModels.map((agenda) =>
-        estimateAgendaNodeHeight(
-          agenda.title,
-          stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
-          agenda.keywords.length,
-        ),
-      );
-      const rightItemHeights = rightUsesGroupSelector
-        ? agendaHeights
+      const rightUsesEmptyDetail = !activeFocusItem;
+      const rightItemHeights = rightUsesEmptyDetail
+        ? [180]
         : activeDirectChildItems.map((item) => rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
       const rightPositions = buildGridPositions(
         rightItemHeights,
@@ -8612,6 +8670,7 @@ export default function MeetingCanvasTab({
             contentSignature: buildNodeContentSignature([
               "ideation-left-frame",
               selectedAgendaForIdeation,
+              agendaModels.length,
               rootHierarchyItems.length,
               expandedHierarchyItems.length,
               frameHeight,
@@ -8619,11 +8678,11 @@ export default function MeetingCanvasTab({
             label: makeIdeationFrameLabel(
               "Group Canvas",
               selectedAgendaModel
-                ? `${selectedAgendaModel.title}의 1~${IDEATION_LEFT_VISIBLE_LEVELS}차 구조`
-                : "그룹분류를 선택해 주세요.",
+                ? `${selectedAgendaModel.title} 그룹의 1~${IDEATION_LEFT_VISIBLE_LEVELS}차 구조`
+                : "왼쪽에서 그룹분류를 선택해 주세요.",
               expandedHierarchyItems.length > 0
-                ? `1차 ${rootHierarchyItems.length}개 · 펼침 ${expandedHierarchyItems.length}개`
-                : `1차 ${rootHierarchyItems.length}개`,
+                ? `그룹 ${agendaModels.length}개 · 1차 ${selectedAgendaRootCount}개 · 펼침 ${expandedHierarchyItems.length}개`
+                : `그룹 ${agendaModels.length}개 · 1차 ${selectedAgendaRootCount}개`,
             ),
           },
         },
@@ -8641,22 +8700,63 @@ export default function MeetingCanvasTab({
           data: {
             contentSignature: buildNodeContentSignature([
               "ideation-right-frame",
-              activeFocusItem?.id || "agenda-selector",
-              rightUsesGroupSelector,
+              activeFocusItem?.id || "empty-detail",
+              rightUsesEmptyDetail,
               activeDirectChildItems.length,
               frameHeight,
             ]),
             label: makeIdeationFrameLabel(
-              rightUsesGroupSelector ? "Group Selector" : "Detail Canvas",
-              rightUsesGroupSelector
-                ? "빈공간에서는 그룹분류를 선택합니다."
+              "Detail Canvas",
+              rightUsesEmptyDetail
+                ? "왼쪽 그룹분류에서 1차 노드를 선택하면 상세 내용이 표시됩니다."
                 : `${activeFocusItem?.title || "선택 노드"}의 직계 하위 내용만 표시합니다.`,
-              rightUsesGroupSelector ? `${agendaModels.length}개 분류` : `${activeDirectChildItems.length}개`,
+              rightUsesEmptyDetail ? `${selectedAgendaRootCount}개 1차 노드` : `${activeDirectChildItems.length}개`,
             ),
           },
         },
       ];
-      const leftGroupDescriptors: CanvasNodeDescriptor[] = leftLayoutItems.map(({ item, depth }, index) => {
+      const leftAgendaDescriptors: CanvasNodeDescriptor[] = leftAgendaEntries.map(({ agenda }, index) => {
+        const selected = agenda.id === selectedAgendaForIdeation;
+
+        return {
+          id: `agenda-${agenda.id}`,
+          position: leftPositions[index],
+          positionSource: "computed",
+          sourcePosition: Position.Right,
+          targetPosition: Position.Left,
+          className: "nopan !border-0 !bg-transparent !p-0 !shadow-none",
+          style: {
+            width: CANVAS_IDEATION_LEFT_WIDTH - 40,
+            height: leftHeights[index],
+            background: "transparent",
+            border: "none",
+            boxShadow: "none",
+            padding: 0,
+          },
+          draggable: false,
+          zIndex: selected ? 3 : 2,
+          data: {
+            paneRole: "ideation-left-agenda",
+            contentSignature: buildNodeContentSignature([
+              "ideation-left-agenda",
+              agenda.id,
+              agenda.title,
+              agenda.status,
+              selected,
+              rootCountByAgendaId.get(agenda.id) || 0,
+              ...(agenda.keywords || []),
+              ...(agenda.summaryBullets || []),
+            ]),
+            label: makeIdeationAgendaGroupNodeLabel(
+              agenda,
+              selected,
+              rootCountByAgendaId.get(agenda.id) || 0,
+            ),
+          },
+        };
+      });
+      const leftGroupDescriptors: CanvasNodeDescriptor[] = leftItemEntries.map(({ item, depth }, index) => {
+        const layoutIndex = leftAgendaEntries.length + index;
         const descendantIds = descendantIdsByItem.get(item.id) || [];
         const directChildItems = getCanvasItemDirectChildItems(canvasItems, item.id);
         const childItems = directChildItems.slice(0, 3);
@@ -8684,14 +8784,14 @@ export default function MeetingCanvasTab({
 
         return {
           id: `canvas-item-${item.id}`,
-          position: leftPositions[index],
+          position: leftPositions[layoutIndex],
           positionSource: "computed",
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
           className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
             width: CANVAS_IDEATION_LEFT_WIDTH - 40,
-            height: leftHeights[index],
+            height: leftHeights[layoutIndex],
             background: "transparent",
             border: "none",
             boxShadow: "none",
@@ -8736,37 +8836,7 @@ export default function MeetingCanvasTab({
           },
         };
       });
-      const rightDetailDescriptors: CanvasNodeDescriptor[] = rightUsesGroupSelector
-        ? agendaModels.map((agenda, index) => ({
-            id: `agenda-${agenda.id}`,
-            position: rightPositions[index],
-            positionSource: "computed" as const,
-            sourcePosition: Position.Bottom,
-            targetPosition: Position.Top,
-            className: "rounded-[28px] border border-amber-200 bg-white shadow-[0_18px_40px_rgba(148,163,184,0.16)]",
-            style: { width: 300, minHeight: agendaHeights[index], borderRadius: 28, padding: 0 },
-            draggable: false,
-            zIndex: 2,
-            data: {
-              paneRole: "ideation-right-selector",
-              contentSignature: buildNodeContentSignature([
-                "ideation-agenda-selector",
-                agenda.id,
-                agenda.title,
-                agenda.status,
-                selectedAgendaForIdeation === agenda.id,
-                ...(agenda.keywords || []),
-                ...(agenda.summaryBullets || []),
-              ]),
-              label: makeAgendaNodeLabel(
-                agenda.title,
-                stripLeadingTimestamp(agenda.summaryBullets[0] || "요약이 아직 없습니다."),
-                selectedAgendaForIdeation === agenda.id ? "SELECTED" : agenda.status,
-                agenda.keywords || [],
-              ),
-            },
-          }))
-        : activeDirectChildItems.length > 0
+      const rightDetailDescriptors: CanvasNodeDescriptor[] = activeDirectChildItems.length > 0
           ? activeDirectChildItems.map((item, index) => {
               const nodeId = `canvas-item-${item.id}`;
               const linkedAgendaTitle =
@@ -8845,10 +8915,12 @@ export default function MeetingCanvasTab({
                     activeFocusItem?.title || "",
                   ]),
                   label: makeIdeationEmptyDetailLabel(
-                    "아직 하위 내용이 없습니다.",
+                    activeFocusItem ? "아직 하위 내용이 없습니다." : "왼쪽에서 그룹과 노드를 선택해 주세요.",
                     activeFocusItem
                       ? "이 노드에 하위 아이디어가 생기면 이 영역에 표시됩니다."
-                      : "왼쪽 캔버스에서 1~3차 노드를 선택하면 하위 아이디어가 표시됩니다.",
+                      : selectedAgendaModel
+                      ? `"${selectedAgendaModel.title}" 그룹의 1차 노드를 선택하면 하위 아이디어가 표시됩니다.`
+                      : "그룹분류를 선택하면 해당 그룹의 1차 노드가 왼쪽에 펼쳐집니다.",
                   ),
                 },
               },
@@ -8880,6 +8952,7 @@ export default function MeetingCanvasTab({
         ]),
         nodeDescriptors: [
           ...frameDescriptors,
+          ...leftAgendaDescriptors,
           ...leftGroupDescriptors,
           ...rightDetailDescriptors,
           ...(ideationDropPreview
@@ -13162,6 +13235,9 @@ export default function MeetingCanvasTab({
 
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
       const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
+      if (node.id.startsWith("agenda-")) {
+        return paneRole === "ideation-left-agenda";
+      }
       return canvasItemId ? leftVisibleIds.has(canvasItemId) && paneRole === "ideation-left" : false;
     });
     const rightNodes = nodes.filter((node) => {
@@ -13191,7 +13267,7 @@ export default function MeetingCanvasTab({
           ? directChildIds.has(canvasItemId) && paneRole === "ideation-right"
           : node.id === "ideation-empty-detail";
       }
-      return node.id.startsWith("agenda-") && paneRole === "ideation-right-selector";
+      return node.id === "ideation-empty-detail";
     });
 
     return { left: leftNodes, right: rightNodes };
@@ -13711,7 +13787,10 @@ export default function MeetingCanvasTab({
     setSelectedEdgeId("");
     setSelectedNodeId(node.id);
     setLeftPanelTab("detail");
-    openRightDrawer();
+    const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
+    if (!(stage === "ideation" && paneRole === "ideation-left-agenda")) {
+      openRightDrawer();
+    }
     const agendaId = extractAgendaIdFromNodeId(node.id);
     if (node.id.startsWith("canvas-item-")) {
       const canvasItemId = node.id.slice("canvas-item-".length);
@@ -13719,7 +13798,6 @@ export default function MeetingCanvasTab({
       if (canvasItem && linkPendingPersonalNoteToCanvasItem(canvasItem)) {
         return;
       }
-      const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
       if (stage === "ideation" && pendingIdeationFocusUpdate && paneRole === "ideation-right") {
         setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
         return;
