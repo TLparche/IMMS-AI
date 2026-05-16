@@ -83,6 +83,7 @@ type ProblemGroupStatus = "draft" | "review" | "final";
 type CanvasItemStatus = "discussion" | "confirmed" | "closed";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
+type AiTaskPanelMode = "all" | "active" | "issues";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
 const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
 const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
@@ -566,6 +567,47 @@ function writeTopicCollapseOverrides(meetingId: string, userId: string, override
   if (typeof window === "undefined" || !meetingId) return;
   try {
     window.localStorage.setItem(getTopicCollapseStorageKey(meetingId, userId), JSON.stringify(overrides));
+  } catch {
+    // ignore localStorage errors
+  }
+}
+
+function getAiTaskPanelStorageKey(meetingId: string, userId: string) {
+  return `imms:ai-task-panel:v1:${meetingId}:${userId || "anonymous"}`;
+}
+
+function normalizeAiTaskPanelMode(value: unknown): AiTaskPanelMode {
+  return value === "active" || value === "issues" ? value : "all";
+}
+
+function readAiTaskPanelPrefs(meetingId: string, userId: string): { open: boolean; mode: AiTaskPanelMode } {
+  if (typeof window === "undefined" || !meetingId) {
+    return { open: false, mode: "all" };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(getAiTaskPanelStorageKey(meetingId, userId));
+    if (!raw) return { open: false, mode: "all" };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { open: false, mode: "all" };
+
+    return {
+      open: Boolean(parsed.open),
+      mode: normalizeAiTaskPanelMode(parsed.mode),
+    };
+  } catch {
+    return { open: false, mode: "all" };
+  }
+}
+
+function writeAiTaskPanelPrefs(
+  meetingId: string,
+  userId: string,
+  prefs: { open: boolean; mode: AiTaskPanelMode },
+) {
+  if (typeof window === "undefined" || !meetingId) return;
+  try {
+    window.localStorage.setItem(getAiTaskPanelStorageKey(meetingId, userId), JSON.stringify(prefs));
   } catch {
     // ignore localStorage errors
   }
@@ -4084,6 +4126,7 @@ export default function MeetingCanvasTab({
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
   const [aiTaskPanelOpen, setAiTaskPanelOpen] = useState(false);
+  const [aiTaskPanelMode, setAiTaskPanelMode] = useState<AiTaskPanelMode>("all");
   const [aiTasks, setAiTasks] = useState<AiTaskRecord[]>([]);
   const [aiTaskQueues, setAiTaskQueues] = useState<Record<string, Record<string, number>>>({});
   const [aiTaskLoading, setAiTaskLoading] = useState(false);
@@ -4218,6 +4261,34 @@ export default function MeetingCanvasTab({
   );
 
   useEffect(() => {
+    const nextPrefs = readAiTaskPanelPrefs(meetingId, userId);
+    setAiTaskPanelOpen(nextPrefs.open);
+    setAiTaskPanelMode(nextPrefs.mode);
+  }, [meetingId, userId]);
+
+  const updateAiTaskPanelOpen = useCallback(
+    (nextOpen: boolean) => {
+      setAiTaskPanelOpen(nextOpen);
+      writeAiTaskPanelPrefs(meetingId, userId, {
+        open: nextOpen,
+        mode: aiTaskPanelMode,
+      });
+    },
+    [aiTaskPanelMode, meetingId, userId],
+  );
+
+  const updateAiTaskPanelMode = useCallback(
+    (nextMode: AiTaskPanelMode) => {
+      setAiTaskPanelMode(nextMode);
+      writeAiTaskPanelPrefs(meetingId, userId, {
+        open: aiTaskPanelOpen,
+        mode: nextMode,
+      });
+    },
+    [aiTaskPanelOpen, meetingId, userId],
+  );
+
+  useEffect(() => {
     void refreshAiTasks({ silent: true });
   }, [refreshAiTasks]);
 
@@ -4225,6 +4296,28 @@ export default function MeetingCanvasTab({
     () => aiTasks.filter((task) => ACTIVE_AI_TASK_STATUSES.has(task.status || "")).length,
     [aiTasks],
   );
+
+  const aiTaskIssueCount = useMemo(
+    () =>
+      aiTasks.filter((task) => (
+        FAILED_AI_TASK_STATUSES.has(task.status || "") ||
+        STALE_AI_TASK_STATUSES.has(task.status || "")
+      )).length,
+    [aiTasks],
+  );
+
+  const filteredAiTasks = useMemo(() => {
+    if (aiTaskPanelMode === "active") {
+      return aiTasks.filter((task) => ACTIVE_AI_TASK_STATUSES.has(task.status || ""));
+    }
+    if (aiTaskPanelMode === "issues") {
+      return aiTasks.filter((task) => (
+        FAILED_AI_TASK_STATUSES.has(task.status || "") ||
+        STALE_AI_TASK_STATUSES.has(task.status || "")
+      ));
+    }
+    return aiTasks;
+  }, [aiTaskPanelMode, aiTasks]);
 
   const aiTaskQueueRows = useMemo(
     () =>
@@ -12630,8 +12723,14 @@ export default function MeetingCanvasTab({
   };
 
   const renderAiTaskPanel = () => {
-    const latestTasks = aiTasks.slice(0, 8);
+    const latestTasks = filteredAiTasks.slice(0, 8);
     const totalCount = aiTasks.length;
+    const filteredCount = filteredAiTasks.length;
+    const taskFilters: Array<{ mode: AiTaskPanelMode; label: string; count: number }> = [
+      { mode: "all", label: "전체", count: totalCount },
+      { mode: "active", label: "진행", count: aiTaskActiveCount },
+      { mode: "issues", label: "확인", count: aiTaskIssueCount },
+    ];
 
     return (
       <div className="pointer-events-auto absolute left-4 top-4 z-20 w-[min(22rem,calc(100%-2rem))]">
@@ -12639,7 +12738,7 @@ export default function MeetingCanvasTab({
           type="button"
           onClick={() => {
             const nextOpen = !aiTaskPanelOpen;
-            setAiTaskPanelOpen(nextOpen);
+            updateAiTaskPanelOpen(nextOpen);
             if (nextOpen) {
               void refreshAiTasks();
             }
@@ -12668,7 +12767,9 @@ export default function MeetingCanvasTab({
             <div className="flex items-center justify-between gap-3 border-b border-black/10 px-4 py-3">
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-slate-900">AI 작업 기록</p>
-                <p className="mt-0.5 text-xs text-slate-500">최근 {totalCount}개 작업</p>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  최근 {totalCount}개 중 {filteredCount}개 표시
+                </p>
               </div>
               <button
                 type="button"
@@ -12687,6 +12788,25 @@ export default function MeetingCanvasTab({
                 </div>
               ) : null}
 
+              <div className="mb-3 grid grid-cols-3 gap-1 rounded-[10px] bg-slate-100 p-1">
+                {taskFilters.map((filter) => {
+                  const active = aiTaskPanelMode === filter.mode;
+                  return (
+                    <button
+                      key={filter.mode}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => updateAiTaskPanelMode(filter.mode)}
+                      className={`min-h-8 rounded-[8px] px-2 text-xs font-semibold transition ${
+                        active ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:bg-white/70 hover:text-slate-800"
+                      }`}
+                    >
+                      {filter.label} {filter.count}
+                    </button>
+                  );
+                })}
+              </div>
+
               {aiTaskQueueRows.length > 0 ? (
                 <div className="mb-3 grid grid-cols-2 gap-2">
                   {aiTaskQueueRows.map((queue) => (
@@ -12694,6 +12814,7 @@ export default function MeetingCanvasTab({
                       <p className="truncate text-xs font-semibold text-slate-700">{queue.queueName}</p>
                       <p className="mt-1 text-xs text-slate-500">
                         진행 {queue.active} · 전체 {queue.total}
+                        {queue.failed > 0 ? ` · 실패 ${queue.failed}` : ""}
                       </p>
                     </div>
                   ))}
@@ -12714,6 +12835,9 @@ export default function MeetingCanvasTab({
                         </span>
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                        {task.scope_key ? <span className="inline-block max-w-[10rem] truncate rounded-full bg-slate-100 px-2 py-0.5">{task.scope_key}</span> : null}
+                        {task.queue_name ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.queue_name}</span> : null}
+                        {task.model_policy ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.model_policy}</span> : null}
                         {task.cache_hit ? <span>cache hit</span> : null}
                         {task.deduped ? <span>dedupe</span> : null}
                         {task.duration_ms ? <span>{Math.max(1, Math.round(task.duration_ms / 100) / 10)}초</span> : null}
@@ -12724,7 +12848,7 @@ export default function MeetingCanvasTab({
                 </div>
               ) : (
                 <div className="rounded-[10px] bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">
-                  아직 기록된 AI 작업이 없습니다.
+                  {totalCount > 0 ? "해당 조건의 작업이 없습니다." : "아직 기록된 AI 작업이 없습니다."}
                 </div>
               )}
             </div>
