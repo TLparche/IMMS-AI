@@ -2648,6 +2648,33 @@ function getCanvasItemDepth(
   return depth;
 }
 
+function normalizeIdeationExpansionText(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function makeIdeationTopicExpansionKeys(item: CanvasItemViewModel) {
+  const title = normalizeIdeationExpansionText(item.title || "");
+  const childSignature = (item.child_item_ids || [])
+    .map((childId) => childId.trim())
+    .filter(Boolean)
+    .slice(0, 12)
+    .sort()
+    .join(",");
+  return [
+    item.id ? `id:${item.id}` : "",
+    title ? `agenda-title:${item.agenda_id || ""}:${title}` : "",
+    title ? `parent-title:${item.agenda_id || ""}:${item.parent_topic_id || ""}:${title}` : "",
+    childSignature ? `children:${item.agenda_id || ""}:${childSignature}` : "",
+  ].filter(Boolean);
+}
+
+function sameBooleanRecord(left: Record<string, boolean>, right: Record<string, boolean>) {
+  const leftKeys = Object.keys(left).filter((key) => left[key]);
+  const rightKeys = Object.keys(right).filter((key) => right[key]);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Boolean(right[key]));
+}
+
 function buildUserMergedTopicTitle(
   left: CanvasItemViewModel,
   right: CanvasItemViewModel,
@@ -4342,6 +4369,7 @@ export default function MeetingCanvasTab({
   const lastSharedSyncSignatureRef = useRef("");
   const localNodeOverridesRef = useRef(createLocalNodeOverrideMap());
   const previousCanvasItemSignaturesRef = useRef<Record<string, string>>({});
+  const ideationLeftExpandedTopicKeysRef = useRef<Set<string>>(new Set());
   const pendingNodePlacementsRef = useRef<Record<string, { x: number; y: number }>>({});
   const hoveredProblemDropTargetElementRef = useRef<HTMLElement | null>(null);
   const agendaDragPreviewRef = useRef<AgendaDragPreviewState | null>(null);
@@ -4687,6 +4715,8 @@ export default function MeetingCanvasTab({
     setImportOverrideActive(false);
     setAgendaOverrides({});
     setCanvasItems([]);
+    setIdeationLeftExpandedTopicIds({});
+    ideationLeftExpandedTopicKeysRef.current = new Set();
     setPendingIdeationFocusUpdate(null);
     setTopicCollapsedOverrides({});
     setLatestHighlightedTopicId("");
@@ -4870,6 +4900,7 @@ export default function MeetingCanvasTab({
     setSelectedCanvasItemId("");
     setIdeationFocusItemId("");
     setIdeationLeftExpandedTopicIds({});
+    ideationLeftExpandedTopicKeysRef.current = new Set();
     setSelectedNodeId("");
     setEditingProblemGroupId("");
     setEditingSolutionTopicId("");
@@ -5101,6 +5132,8 @@ export default function MeetingCanvasTab({
 
     setAgendaOverrides({});
     setCanvasItems([]);
+    setIdeationLeftExpandedTopicIds({});
+    ideationLeftExpandedTopicKeysRef.current = new Set();
     setIdeaCreateStack(0);
     setImportedState(null);
     setImportOverrideActive(false);
@@ -5166,32 +5199,58 @@ export default function MeetingCanvasTab({
       setIdeationFocusItemId("");
     }
     setIdeationLeftExpandedTopicIds((prev) => {
-      const validTopicIds = new Set(
-        canvasItems
-          .filter((item) => isTopicCanvasItem(item))
-          .map((item) => item.id),
-      );
-      const nextEntries = Object.entries(prev).filter(([itemId, expanded]) => expanded && validTopicIds.has(itemId));
-      if (nextEntries.length === Object.keys(prev).length) {
+      const expandedKeys = new Set(ideationLeftExpandedTopicKeysRef.current);
+      canvasItems
+        .filter((item) => isTopicCanvasItem(item) && prev[item.id])
+        .forEach((item) => {
+          makeIdeationTopicExpansionKeys(item).forEach((key) => expandedKeys.add(key));
+        });
+
+      const nextExpanded: Record<string, boolean> = {};
+      canvasItems
+        .filter((item) => isTopicCanvasItem(item))
+        .forEach((item) => {
+          const shouldExpand = prev[item.id] || makeIdeationTopicExpansionKeys(item).some((key) => expandedKeys.has(key));
+          if (shouldExpand) {
+            nextExpanded[item.id] = true;
+          }
+        });
+
+      const nextExpandedKeys = new Set<string>();
+      canvasItems
+        .filter((item) => isTopicCanvasItem(item) && nextExpanded[item.id])
+        .forEach((item) => {
+          makeIdeationTopicExpansionKeys(item).forEach((key) => nextExpandedKeys.add(key));
+        });
+      ideationLeftExpandedTopicKeysRef.current = nextExpandedKeys;
+
+      if (sameBooleanRecord(prev, nextExpanded)) {
         return prev;
       }
-      return Object.fromEntries(nextEntries);
+      return nextExpanded;
     });
   }, [canvasItems, ideationFocusItemId, selectedCanvasItemId]);
 
   const toggleIdeationLeftTopicExpanded = useCallback((itemId: string) => {
+    const targetItem = canvasItems.find((item) => item.id === itemId && isTopicCanvasItem(item)) || null;
+    const targetKeys = targetItem ? makeIdeationTopicExpansionKeys(targetItem) : [`id:${itemId}`];
     setIdeationLeftExpandedTopicIds((prev) => {
+      const nextKeys = new Set(ideationLeftExpandedTopicKeysRef.current);
       if (prev[itemId]) {
         const next = { ...prev };
         delete next[itemId];
+        targetKeys.forEach((key) => nextKeys.delete(key));
+        ideationLeftExpandedTopicKeysRef.current = nextKeys;
         return next;
       }
+      targetKeys.forEach((key) => nextKeys.add(key));
+      ideationLeftExpandedTopicKeysRef.current = nextKeys;
       return {
         ...prev,
         [itemId]: true,
       };
     });
-  }, []);
+  }, [canvasItems]);
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -15062,6 +15121,8 @@ export default function MeetingCanvasTab({
                         analysisSignatureAtImportRef.current = analysisStateSignature;
                         setImportOverrideActive(true);
                         setCanvasItems([]);
+                        setIdeationLeftExpandedTopicIds({});
+                        ideationLeftExpandedTopicKeysRef.current = new Set();
                         setIdeaCreateStack(0);
                         setCustomGroups([]);
                         setProblemGroups([]);
