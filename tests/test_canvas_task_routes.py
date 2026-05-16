@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from backend.api import app
+from backend.api import _append_canvas_operation_log_from_change, app
 
 
 LOCAL_HEADERS = {"x-real-ip": "127.0.0.1"}
@@ -182,6 +182,34 @@ class CanvasTaskRouteSmokeTest(unittest.TestCase):
         self.assertLessEqual(len(filtered["tasks"]), 1)
         self.assertTrue(all(task["task_type"] == "problem.definition" for task in filtered["tasks"]))
         self.assertEqual(filtered["filters"]["task_type"], ["problem.definition"])
+
+    def test_operation_log_summarizes_node_names_for_merge(self) -> None:
+        previous_workspace = {
+            "canvas_items": [
+                {"id": "idea-a", "kind": "note", "title": "A 아이디어"},
+                {"id": "idea-b", "kind": "note", "title": "B 아이디어"},
+            ],
+            "operation_log": [],
+        }
+        next_workspace = {
+            "canvas_items": [
+                {
+                    "id": "topic-c",
+                    "kind": "topic",
+                    "title": "C 토픽",
+                    "child_item_ids": ["idea-a", "idea-b"],
+                    "created_by": "ai",
+                    "ai_generated": True,
+                },
+                {"id": "idea-a", "kind": "note", "title": "A 아이디어", "parent_topic_id": "topic-c"},
+                {"id": "idea-b", "kind": "note", "title": "B 아이디어", "parent_topic_id": "topic-c"},
+            ],
+        }
+
+        result = _append_canvas_operation_log_from_change(previous_workspace, next_workspace, source="test")
+
+        summaries = [entry["summary"] for entry in result["operation_log"]]
+        self.assertIn('"A 아이디어"와 "B 아이디어"를 "C 토픽"에 병합', summaries)
 
 
 if __name__ == "__main__":

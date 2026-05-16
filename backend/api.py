@@ -668,6 +668,78 @@ def _canvas_operation_node_label(item: dict[str, Any] | None, fallback: str = "�
     return label[:80]
 
 
+def _canvas_operation_label_for_id(
+    node_id: str,
+    *item_maps: dict[str, dict[str, Any]],
+) -> str:
+    normalized_node_id = _safe_text(node_id)
+    for item_map in item_maps:
+        item = item_map.get(normalized_node_id) if isinstance(item_map, dict) else None
+        if isinstance(item, dict):
+            return _canvas_operation_node_label(item, normalized_node_id)
+    return normalized_node_id[:80] or "노드"
+
+
+def _quote_canvas_operation_label(label: str) -> str:
+    return f'"{_safe_text(label, "노드")[:80]}"'
+
+
+def _format_canvas_operation_label_list(labels: list[str], limit: int = 3) -> str:
+    normalized = [_safe_text(label) for label in labels if _safe_text(label)]
+    if not normalized:
+        return "원본"
+    if len(normalized) == 1:
+        return _quote_canvas_operation_label(normalized[0])
+    if len(normalized) == 2:
+        return f"{_quote_canvas_operation_label(normalized[0])}와 {_quote_canvas_operation_label(normalized[1])}"
+
+    visible = normalized[: max(1, limit - 1)]
+    hidden_count = max(0, len(normalized) - len(visible))
+    visible_text = ", ".join(_quote_canvas_operation_label(label) for label in visible)
+    return f"{visible_text} 외 {hidden_count}개"
+
+
+def _canvas_operation_labels_for_ids(
+    node_ids: list[str],
+    *item_maps: dict[str, dict[str, Any]],
+    limit: int = 6,
+) -> list[str]:
+    labels = [
+        _canvas_operation_label_for_id(node_id, *item_maps)
+        for node_id in _dedup_canvas_operation_ids(node_ids, limit=limit)
+    ]
+    return [_safe_text(label) for label in labels if _safe_text(label)]
+
+
+def _canvas_operation_merge_summary(
+    target_label: str,
+    source_labels: list[str],
+    action_label: str = "병합",
+) -> str:
+    source_text = _format_canvas_operation_label_list(source_labels)
+    return f"{source_text}를 {_quote_canvas_operation_label(target_label)}에 {action_label}"
+
+
+def _canvas_activity_line_from_new_operations(
+    workspace: dict[str, Any],
+    previous_operation_ids: set[str],
+    fallback: str,
+    limit: int = 2,
+) -> str:
+    lines = [
+        _safe_text(entry.get("summary"))
+        for entry in _normalize_canvas_operation_log(workspace.get("operation_log"))
+        if _safe_text(entry.get("operation_id")) not in previous_operation_ids
+        and _safe_text(entry.get("summary"))
+    ]
+    if not lines:
+        return fallback
+    selected = lines[:limit]
+    if len(lines) > len(selected):
+        selected.append(f"추가 변경 {len(lines) - len(selected)}건")
+    return " · ".join(selected)
+
+
 def _make_canvas_operation_entry(
     operation_type: str,
     source: str,
@@ -937,11 +1009,16 @@ def _append_canvas_operation_log_from_change(
         )
 
         if is_topic and len(effective_source_ids) >= 2:
+            source_labels = _canvas_operation_labels_for_ids(
+                operation_source_ids,
+                previous_items_by_id,
+                next_items_by_id,
+            )
             entries.append(
                 _make_canvas_operation_entry(
                     "node_merged",
                     source,
-                    f'"{label}" 노드가 {len(effective_source_ids)}개 원본을 묶었습니다.',
+                    _canvas_operation_merge_summary(label, source_labels),
                     target_node_id=item_id,
                     source_node_ids=operation_source_ids,
                 )
@@ -983,11 +1060,16 @@ def _append_canvas_operation_log_from_change(
         if not added_sources:
             continue
         label = _canvas_operation_node_label(next_item)
+        source_labels = _canvas_operation_labels_for_ids(
+            added_sources,
+            previous_items_by_id,
+            next_items_by_id,
+        )
         entries.append(
             _make_canvas_operation_entry(
                 "node_compacted",
                 source,
-                f'"{label}" 노드가 {len(added_sources)}개 원본을 흡수했습니다.',
+                _canvas_operation_merge_summary(label, source_labels),
                 target_node_id=item_id,
                 source_node_ids=added_sources,
             )
@@ -1006,11 +1088,16 @@ def _append_canvas_operation_log_from_change(
         if merge_targets_by_source.get(item_id) == next_parent_id:
             continue
         label = _canvas_operation_node_label(next_item)
+        next_parent_label = (
+            _canvas_operation_label_for_id(next_parent_id, next_items_by_id, previous_items_by_id)
+            if next_parent_id
+            else "상위 캔버스"
+        )
         entries.append(
             _make_canvas_operation_entry(
                 "node_moved",
                 source,
-                f'"{label}" 노드 위치가 변경되었습니다.',
+                f'{_quote_canvas_operation_label(label)}를 {_quote_canvas_operation_label(next_parent_label)} 아래로 이동',
                 target_node_id=item_id,
                 source_node_ids=[item_id],
                 previous_parent_id=previous_parent_id,
@@ -1025,7 +1112,7 @@ def _append_canvas_operation_log_from_change(
             _make_canvas_operation_entry(
                 "node_deleted",
                 source,
-                f'"{label}" 노드가 제거되었습니다.',
+                f'{_quote_canvas_operation_label(label)} 제거',
                 source_node_ids=[item_id],
             )
         )
@@ -10580,6 +10667,11 @@ def _finalize_canvas_idea_workspace_job(
             clustering_result = _maybe_cluster_canvas_topic_nodes(latest_workspace)
             topic_child_merge_result = _maybe_merge_similar_topic_child_ideas(latest_workspace)
 
+        previous_operation_ids = {
+            _safe_text(entry.get("operation_id"))
+            for entry in _normalize_canvas_operation_log(latest_workspace.get("operation_log"))
+            if _safe_text(entry.get("operation_id"))
+        }
         _save_canvas_workspace_runtime(meeting_id, latest_workspace)
         clustered_count = _safe_nonnegative_int(clustering_result.get("changed"))
         merged_child_count = _safe_nonnegative_int(topic_child_merge_result.get("merged"))
@@ -10602,6 +10694,11 @@ def _finalize_canvas_idea_workspace_job(
         if merged_child_count > 0:
             activity_parts.append(f"유사 아이디어 {merged_child_count}건 병합")
         activity_line = " · ".join(activity_parts) if activity_parts else "새 발화 확인"
+        activity_line = _canvas_activity_line_from_new_operations(
+            latest_workspace,
+            previous_operation_ids,
+            activity_line,
+        )
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
