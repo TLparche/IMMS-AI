@@ -2,7 +2,6 @@
 
 import "@xyflow/react/dist/style.css";
 import {
-  Controls,
   MiniMap,
   MarkerType,
   Position,
@@ -15159,9 +15158,7 @@ export default function MeetingCanvasTab({
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
-                      >
-                        <Controls />
-                      </ReactFlow>
+                      />
                     </div>
                   </div>
 
@@ -15310,7 +15307,6 @@ export default function MeetingCanvasTab({
                           maskColor="rgba(15, 23, 42, 0.08)"
                           nodeColor="#0f766e"
                         />
-                        <Controls />
                       </ReactFlow>
                       </div>
                     </div>
@@ -15340,9 +15336,7 @@ export default function MeetingCanvasTab({
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
-                      >
-                        <Controls />
-                      </ReactFlow>
+                      />
                     </div>
                   </div>
 
@@ -15375,7 +15369,6 @@ export default function MeetingCanvasTab({
                           maskColor="rgba(15, 23, 42, 0.08)"
                           nodeColor="#7c3aed"
                         />
-                        <Controls />
                       </ReactFlow>
                     </div>
                   </div>
@@ -15399,9 +15392,7 @@ export default function MeetingCanvasTab({
                         minZoom={0.45}
                         maxZoom={1.6}
                         proOptions={{ hideAttribution: true }}
-                      >
-                        <Controls />
-                      </ReactFlow>
+                      />
                     </div>
                   </div>
 
@@ -15429,7 +15420,6 @@ export default function MeetingCanvasTab({
                           maskColor="rgba(15, 23, 42, 0.08)"
                           nodeColor="#047857"
                         />
-                        <Controls />
                       </ReactFlow>
                     </div>
 
@@ -15471,7 +15461,6 @@ export default function MeetingCanvasTab({
                     maskColor="rgba(15, 23, 42, 0.08)"
                     nodeColor="#0f766e"
                   />
-                  <Controls />
                 </ReactFlow>
               )}
             </div>
