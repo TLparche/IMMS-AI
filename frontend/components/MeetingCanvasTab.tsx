@@ -14683,16 +14683,7 @@ export default function MeetingCanvasTab({
             <div className="mt-4 space-y-3">
               {leftPanelDetail.refinedItems.map((item, index) => (
                 <div key={`${leftPanelDetail.title}-refined-${index}`} className="rounded-xl bg-[#fafafa] px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm font-semibold text-slate-500">{item.label}</p>
-                    <button
-                      type="button"
-                      onClick={() => focusCanvasItemInIdeation(item.sourceItemId, "정리된 발화의 원문 노드로 이동했습니다.")}
-                      className="shrink-0 rounded-full border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] hover:bg-[#eff0f6]"
-                    >
-                      원문 이동
-                    </button>
-                  </div>
+                  <p className="text-sm font-semibold text-slate-500">{item.label}</p>
                   <p className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-700">{stripLeadingTimestamp(item.value)}</p>
                 </div>
               ))}
