@@ -2242,7 +2242,14 @@ function makeIdeationAgendaGroupNodeLabel(
   agenda: AgendaViewModel,
   selected: boolean,
   rootCount: number,
+  editingTitle?: string,
+  onTitleDraftChange?: (value: string) => void,
+  onStartTitleEdit?: (agendaId: string) => void,
+  onCommitTitleEdit?: (agendaId: string, title: string) => void,
+  onCancelTitleEdit?: () => void,
 ) {
+  const isEditingTitle = typeof editingTitle === "string";
+
   return (
     <div className="h-full min-w-0">
       <div
@@ -2261,9 +2268,59 @@ function makeIdeationAgendaGroupNodeLabel(
               {selected ? "펼쳐짐" : agenda.status}
             </span>
           </div>
-          <strong className="mt-2 block truncate text-[15px] font-semibold leading-5 text-black">
-            {agenda.title}
-          </strong>
+          {isEditingTitle ? (
+            <div className="nodrag nopan mt-2 space-y-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+              <input
+                autoFocus
+                value={editingTitle}
+                onChange={(event) => onTitleDraftChange?.(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    onCommitTitleEdit?.(agenda.id, editingTitle);
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onCancelTitleEdit?.();
+                  }
+                }}
+                className="h-8 w-full rounded-[8px] border border-[#1b59f8]/30 bg-white px-2 text-[15px] font-semibold leading-5 text-black outline-none ring-2 ring-[#1b59f8]/10"
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  className="rounded-[6px] border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-[#666] transition hover:bg-black/[0.04]"
+                  onClick={() => onCancelTitleEdit?.()}
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[6px] bg-[#1b59f8] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#164be0]"
+                  onClick={() => onCommitTitleEdit?.(agenda.id, editingTitle)}
+                >
+                  저장
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 flex min-w-0 items-center gap-2">
+              <strong className="block min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 text-black">
+                {agenda.title}
+              </strong>
+              <button
+                type="button"
+                className="nodrag nopan shrink-0 rounded-[6px] border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-[#666] transition hover:border-[#1b59f8]/35 hover:text-[#1b59f8]"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onStartTitleEdit?.(agenda.id);
+                }}
+              >
+                수정
+              </button>
+            </div>
+          )}
         </div>
         <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${selected ? "bg-white text-[#1b59f8]" : "bg-black/[0.04] text-[#555]"}`}>
           1차 {rootCount}
@@ -2940,6 +2997,12 @@ function makeIdeationDetailClusterNodeLabel(
   highlighted = false,
   onSelectItem?: (itemId: string) => void,
   onOpenItem?: (itemId: string) => void,
+  editingTitle?: string,
+  editingBody?: string,
+  onTitleDraftChange?: (value: string) => void,
+  onBodyDraftChange?: (value: string) => void,
+  onCommitInlineEdit?: (itemId: string, title: string, body: string) => void,
+  onCancelInlineEdit?: () => void,
 ) {
   const tone = canvasItemTone((item.kind as ComposerTool) || "note");
   const keywords = (item.keywords || []).filter(Boolean).slice(0, 4);
@@ -2953,6 +3016,7 @@ function makeIdeationDetailClusterNodeLabel(
   const borderClass = selected
     ? "border-black shadow-[0_16px_34px_rgba(15,23,42,0.16)]"
     : "border-black/10 shadow-[0_10px_28px_rgba(15,23,42,0.08)]";
+  const isEditingInline = typeof editingTitle === "string" && !pending;
 
   return (
     <div className="h-full min-w-0">
@@ -2974,11 +3038,13 @@ function makeIdeationDetailClusterNodeLabel(
                 </span>
               ) : null}
             </div>
-            <strong className="mt-3 block max-w-full break-words text-[18px] font-semibold leading-6 text-black line-clamp-3">
-              {title}
-            </strong>
+            {isEditingInline ? null : (
+              <strong className="mt-3 block max-w-full break-words text-[18px] font-semibold leading-6 text-black line-clamp-3">
+                {title}
+              </strong>
+            )}
           </div>
-          {childItems.length > 0 ? (
+          {childItems.length > 0 && !isEditingInline ? (
             <button
               type="button"
               className="nodrag nopan shrink-0 rounded-[8px] border border-black/10 bg-white/85 px-2.5 py-1.5 text-[11px] font-semibold text-[#1b59f8] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition hover:border-[#1b59f8]/40 hover:bg-[#eef4ff]"
@@ -2995,13 +3061,65 @@ function makeIdeationDetailClusterNodeLabel(
           ) : null}
         </div>
 
-        {body ? (
+        {isEditingInline ? (
+          <div className="nodrag nopan mt-3 space-y-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+            <input
+              autoFocus
+              value={editingTitle}
+              onChange={(event) => onTitleDraftChange?.(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onCommitInlineEdit?.(item.id, editingTitle, editingBody || "");
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onCancelInlineEdit?.();
+                }
+              }}
+              placeholder="노드 이름"
+              className="h-9 w-full rounded-[9px] border border-[#1b59f8]/30 bg-white px-3 text-[15px] font-semibold text-black outline-none ring-2 ring-[#1b59f8]/10"
+            />
+            <textarea
+              value={editingBody || ""}
+              onChange={(event) => onBodyDraftChange?.(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  onCommitInlineEdit?.(item.id, editingTitle, editingBody || "");
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onCancelInlineEdit?.();
+                }
+              }}
+              placeholder="내용"
+              className="min-h-[82px] w-full resize-none rounded-[10px] border border-black/10 bg-white px-3 py-2 text-[13px] leading-5 text-[#4d4d4d] outline-none transition focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-[8px] border border-black/10 bg-white px-3 py-1.5 text-[12px] font-semibold text-[#666] transition hover:bg-black/[0.04]"
+                onClick={() => onCancelInlineEdit?.()}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="rounded-[8px] bg-[#1b59f8] px-3 py-1.5 text-[12px] font-semibold text-white transition hover:bg-[#164be0]"
+                onClick={() => onCommitInlineEdit?.(item.id, editingTitle, editingBody || "")}
+              >
+                저장
+              </button>
+            </div>
+          </div>
+        ) : body ? (
           <p className="mt-3 max-w-full whitespace-pre-wrap break-words text-[14px] leading-5 text-[#4d4d4d] line-clamp-4">
             {body}
           </p>
         ) : null}
 
-        {keywords.length > 0 ? (
+        {keywords.length > 0 && !isEditingInline ? (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {keywords.map((keyword, index) => (
               <span key={`${item.id}-cluster-keyword-${keyword}-${index}`} className="max-w-[9rem] truncate rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-[#555]">
@@ -3011,7 +3129,7 @@ function makeIdeationDetailClusterNodeLabel(
           </div>
         ) : null}
 
-        <div className="mt-auto pt-4">
+        <div className={`mt-auto pt-4 ${isEditingInline ? "hidden" : ""}`}>
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-semibold uppercase text-[#777]">
               하위 {childItems.length}
@@ -3091,6 +3209,13 @@ function makeIdeationGroupNodeLabel(
   expanded = false,
   hasChildren = false,
   onToggleExpanded?: (itemId: string) => void,
+  editingTitle?: string,
+  editingBody?: string,
+  onTitleDraftChange?: (value: string) => void,
+  onBodyDraftChange?: (value: string) => void,
+  onStartTitleEdit?: (itemId: string) => void,
+  onCommitInlineEdit?: (itemId: string, title: string, body: string) => void,
+  onCancelTitleEdit?: () => void,
 ) {
   const title = item.ai_pending ? "AI 정리 중" : item.title || "그룹";
   const body = item.ai_pending ? "하위 내용을 정리하는 중" : cleanCanvasNodeBodyText(item.body);
@@ -3119,6 +3244,7 @@ function makeIdeationGroupNodeLabel(
       ? childPreview.map((child) => child.title || toolLabel((child.kind as ComposerTool) || "note")).join(" · ")
       : `${childPreview[0]?.title || "하위 내용"}${descendantCount > 1 ? ` 외 ${descendantCount - 1}개` : ""}`
     : body || "하위 내용 없음";
+  const isEditingTitle = typeof editingTitle === "string" && !item.ai_pending;
 
   return (
     <div className="h-full min-w-0">
@@ -3176,9 +3302,78 @@ function makeIdeationGroupNodeLabel(
               </span>
             ) : null}
           </div>
-          <strong className="mt-2 block truncate text-[15px] font-semibold leading-5 text-black">
-            {title}
-          </strong>
+          {isEditingTitle ? (
+            <div className="nodrag nopan mt-2 space-y-2" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+              <input
+                autoFocus
+                value={editingTitle}
+                onChange={(event) => onTitleDraftChange?.(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    onCommitInlineEdit?.(item.id, editingTitle, editingBody || "");
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onCancelTitleEdit?.();
+                  }
+                }}
+                className="h-8 w-full rounded-[8px] border border-[#1b59f8]/30 bg-white px-2 text-[15px] font-semibold leading-5 text-black outline-none ring-2 ring-[#1b59f8]/10"
+                placeholder="노드 이름"
+              />
+              <textarea
+                value={editingBody || ""}
+                onChange={(event) => onBodyDraftChange?.(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    onCommitInlineEdit?.(item.id, editingTitle, editingBody || "");
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onCancelTitleEdit?.();
+                  }
+                }}
+                className="min-h-[58px] w-full resize-none rounded-[8px] border border-black/10 bg-white px-2 py-1.5 text-xs leading-5 text-[#4d4d4d] outline-none transition focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+                placeholder="내용"
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  className="rounded-[6px] border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-[#666] transition hover:bg-black/[0.04]"
+                  onClick={() => onCancelTitleEdit?.()}
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[6px] bg-[#1b59f8] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#164be0]"
+                  onClick={() => onCommitInlineEdit?.(item.id, editingTitle, editingBody || "")}
+                >
+                  저장
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 flex min-w-0 items-center gap-2">
+              <strong className="block min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 text-black">
+                {title}
+              </strong>
+              {!item.ai_pending ? (
+                <button
+                  type="button"
+                  className="nodrag nopan shrink-0 rounded-[6px] border border-black/10 bg-white px-2 py-1 text-[11px] font-semibold text-[#666] transition hover:border-[#1b59f8]/35 hover:text-[#1b59f8]"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onStartTitleEdit?.(item.id);
+                  }}
+                >
+                  수정
+                </button>
+              ) : null}
+            </div>
+          )}
           <p className={`mt-1 truncate text-xs leading-5 ${dropTarget ? "font-semibold text-[#1b59f8]" : "text-[#666]"}`}>
             {dropTarget && dropTargetHint ? dropTargetHint : hierarchyLabel}
           </p>
@@ -7723,6 +7918,191 @@ export default function MeetingCanvasTab({
     [canvasItems, pendingIdeationFocusUpdate],
   );
 
+  const handleStartIdeationAgendaTitleEdit = useCallback(
+    (agendaId: string) => {
+      const agenda = agendaModels.find((candidate) => candidate.id === agendaId);
+      if (!agenda) return;
+
+      setSelectedAgendaId(agenda.id);
+      setSelectedCanvasItemId("");
+      setIdeationFocusItemId("");
+      setSelectedNodeId(`agenda-${agenda.id}`);
+      setEditingCanvasItemId("");
+      setEditingAgendaId(agenda.id);
+      setAgendaDraftTitle(agenda.title);
+      setAgendaDraftKeywords((agenda.keywords || []).join(", "));
+      setAgendaDraftSummary((agenda.summaryBullets || []).join("\n"));
+      setLeftPanelTab("detail");
+    },
+    [agendaModels],
+  );
+
+  const handleSaveIdeationAgendaTitleEdit = useCallback(
+    (agendaId: string, titleDraft: string) => {
+      const agenda = agendaModels.find((candidate) => candidate.id === agendaId);
+      if (!agenda) return;
+
+      const nextTitle = titleDraft.trim() || agenda.title;
+      setEditingAgendaId("");
+      setAgendaDraftTitle("");
+      setAgendaDraftKeywords("");
+      setAgendaDraftSummary("");
+
+      if (agenda.isCustom) {
+        const nextCustomGroupsSnapshot = customGroups.map((group) =>
+          group.id === agenda.id
+            ? {
+                ...group,
+                title: nextTitle,
+              }
+            : group,
+        );
+        setCustomGroups(nextCustomGroupsSnapshot);
+        latestSharedWorkspaceRef.current = {
+          ...latestSharedWorkspaceRef.current,
+          customGroups: nextCustomGroupsSnapshot,
+          importedState: persistedSharedImportedState,
+        };
+        setActivityMessage("그룹 분류 이름을 수정했습니다.");
+
+        if (sharedSyncEnabled) {
+          forceBroadcastSharedCanvas({ customGroups: nextCustomGroupsSnapshot });
+          if (meetingId) {
+            void saveCanvasWorkspacePatch({
+              meeting_id: meetingId,
+              custom_groups: serializeCustomGroups(nextCustomGroupsSnapshot),
+            }).catch((error) => {
+              console.error("Failed to save inline project group title edit:", error);
+            });
+          }
+        }
+        return;
+      }
+
+      const nextAgendaOverridesSnapshot = {
+        ...agendaOverrides,
+        [agenda.id]: {
+          title: nextTitle,
+          keywords: agenda.keywords || [],
+          summaryBullets: agenda.summaryBullets || [],
+        },
+      };
+      setAgendaOverrides(nextAgendaOverridesSnapshot);
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        agendaOverrides: nextAgendaOverridesSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      setActivityMessage("그룹 이름을 수정했습니다.");
+
+      if (sharedSyncEnabled) {
+        forceBroadcastSharedCanvas({ agendaOverrides: nextAgendaOverridesSnapshot });
+        if (meetingId) {
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            agenda_overrides: serializeAgendaOverrides(nextAgendaOverridesSnapshot),
+          }).catch((error) => {
+            console.error("Failed to save inline agenda title edit:", error);
+          });
+        }
+      }
+    },
+    [
+      agendaModels,
+      agendaOverrides,
+      customGroups,
+      forceBroadcastSharedCanvas,
+      meetingId,
+      persistedSharedImportedState,
+      sharedSyncEnabled,
+    ],
+  );
+
+  const handleCancelIdeationAgendaTitleEdit = useCallback(() => {
+    setEditingAgendaId("");
+    setAgendaDraftTitle("");
+    setAgendaDraftKeywords("");
+    setAgendaDraftSummary("");
+  }, []);
+
+  const handleStartIdeationCanvasItemTitleEdit = useCallback(
+    (itemId: string) => {
+      const targetItem = canvasItems.find((item) => item.id === itemId);
+      if (!targetItem) return;
+
+      setSelectedCanvasItemId(targetItem.id);
+      setSelectedNodeId(`canvas-item-${targetItem.id}`);
+      if (targetItem.agenda_id) {
+        setSelectedAgendaId(targetItem.agenda_id);
+      }
+      setSelectedProblemGroupId("");
+      setSelectedSolutionTopicId("");
+      setEditingAgendaId("");
+      setEditingCanvasItemId(targetItem.id);
+      setCanvasItemDraftTitle(targetItem.title);
+      setCanvasItemDraftBody(targetItem.body || "");
+      setFocusedCanvasItemId(targetItem.id);
+      setLeftPanelTab("detail");
+    },
+    [canvasItems],
+  );
+
+  const handleSaveIdeationCanvasItemTitleEdit = useCallback(
+    (itemId: string, titleDraft: string, bodyDraft: string) => {
+      const targetItem = canvasItems.find((item) => item.id === itemId);
+      if (!targetItem) return;
+
+      const nextTitle = titleDraft.trim() || targetItem.title || "아이디어";
+      const nextBody = bodyDraft.trim() || targetItem.body || "";
+      const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              title: nextTitle,
+              body: nextBody,
+              user_edited: true,
+            }
+          : item,
+      );
+
+      setCanvasItems(nextCanvasItemsSnapshot);
+      setEditingCanvasItemId("");
+      setCanvasItemDraftTitle("");
+      setCanvasItemDraftBody("");
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      setActivityMessage("노드 이름을 수정했습니다.");
+
+      if (sharedSyncEnabled) {
+        forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+        if (meetingId) {
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+          }).catch((error) => {
+            console.error("Failed to save inline canvas item title edit:", error);
+          });
+        }
+      }
+    },
+    [
+      canvasItems,
+      forceBroadcastSharedCanvas,
+      meetingId,
+      persistedSharedImportedState,
+      sharedSyncEnabled,
+    ],
+  );
+
+  const handleCancelIdeationCanvasItemTitleEdit = useCallback(() => {
+    setEditingCanvasItemId("");
+    setCanvasItemDraftTitle("");
+    setCanvasItemDraftBody("");
+  }, []);
+
   const handleGenerateSolutionSuggestions = useCallback(
     async (topicId: string) => {
       const targetTopic = solutionTopics.find((topic) => topic.group_id === topicId);
@@ -8941,13 +9321,15 @@ export default function MeetingCanvasTab({
         .map(({ item }) => item);
       const activeNestedChildCount = rightHierarchyEntries.length - activeDirectChildItems.length;
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
-      const leftHeights = leftLayoutEntries.map((entry) =>
-        entry.kind === "agenda"
-          ? IDEATION_LEFT_GROUP_NODE_HEIGHT
-          : entry.depth === 0
-          ? IDEATION_LEFT_ROOT_NODE_HEIGHT
-          : IDEATION_LEFT_NODE_HEIGHT,
-      );
+      const leftHeights = leftLayoutEntries.map((entry) => {
+        if (entry.kind === "agenda") {
+          return editingAgendaId === entry.agenda.id ? 124 : IDEATION_LEFT_GROUP_NODE_HEIGHT;
+        }
+        if (editingCanvasItemId === entry.item.id) {
+          return 218;
+        }
+        return entry.depth === 0 ? IDEATION_LEFT_ROOT_NODE_HEIGHT : IDEATION_LEFT_NODE_HEIGHT;
+      });
       const leftPositions: Array<{ x: number; y: number }> = [];
       let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
       leftHeights.forEach((height, index) => {
@@ -8986,7 +9368,9 @@ export default function MeetingCanvasTab({
       const rightDetailHeightsById = new Map(
         rightDetailEntries.map(({ item }) => [
           item.id,
-          estimateIdeationDetailClusterHeight(item, rightChildItemsByParentId.get(item.id) || []),
+          editingCanvasItemId === item.id
+            ? 380
+            : estimateIdeationDetailClusterHeight(item, rightChildItemsByParentId.get(item.id) || []),
         ] as const),
       );
       const rightBaseX = CANVAS_IDEATION_RIGHT_X + 28;
@@ -9115,6 +9499,8 @@ export default function MeetingCanvasTab({
               agenda.title,
               agenda.status,
               selected,
+              editingAgendaId === agenda.id,
+              editingAgendaId === agenda.id ? agendaDraftTitle : "",
               rootCountByAgendaId.get(agenda.id) || 0,
               ...(agenda.keywords || []),
               ...(agenda.summaryBullets || []),
@@ -9123,6 +9509,11 @@ export default function MeetingCanvasTab({
               agenda,
               selected,
               rootCountByAgendaId.get(agenda.id) || 0,
+              editingAgendaId === agenda.id ? agendaDraftTitle : undefined,
+              setAgendaDraftTitle,
+              handleStartIdeationAgendaTitleEdit,
+              handleSaveIdeationAgendaTitleEdit,
+              handleCancelIdeationAgendaTitleEdit,
             ),
           },
         };
@@ -9188,6 +9579,9 @@ export default function MeetingCanvasTab({
               depth,
               expanded,
               hasChildren,
+              editingCanvasItemId === item.id,
+              editingCanvasItemId === item.id ? canvasItemDraftTitle : "",
+              editingCanvasItemId === item.id ? canvasItemDraftBody : "",
               ...descendantIds,
               ...childItems.map((child) => child.title),
             ]),
@@ -9204,6 +9598,13 @@ export default function MeetingCanvasTab({
               expanded,
               hasChildren,
               toggleIdeationLeftTopicExpanded,
+              editingCanvasItemId === item.id ? canvasItemDraftTitle : undefined,
+              editingCanvasItemId === item.id ? canvasItemDraftBody : undefined,
+              setCanvasItemDraftTitle,
+              setCanvasItemDraftBody,
+              handleStartIdeationCanvasItemTitleEdit,
+              handleSaveIdeationCanvasItemTitleEdit,
+              handleCancelIdeationCanvasItemTitleEdit,
             ),
           },
         };
@@ -9255,6 +9656,9 @@ export default function MeetingCanvasTab({
                     selectedCanvasItemId === item.id,
                     highlighted,
                     Boolean(pendingIdeationFocusUpdate),
+                    editingCanvasItemId === item.id,
+                    editingCanvasItemId === item.id ? canvasItemDraftTitle : "",
+                    editingCanvasItemId === item.id ? canvasItemDraftBody : "",
                     ...(item.child_item_ids || []),
                     ...childItems.flatMap((child) => [
                       child.id,
@@ -9272,6 +9676,12 @@ export default function MeetingCanvasTab({
                     highlighted,
                     handleSelectIdeationDetailItem,
                     handleOpenIdeationDetailItem,
+                    editingCanvasItemId === item.id ? canvasItemDraftTitle : undefined,
+                    editingCanvasItemId === item.id ? canvasItemDraftBody : undefined,
+                    setCanvasItemDraftTitle,
+                    setCanvasItemDraftBody,
+                    handleSaveIdeationCanvasItemTitleEdit,
+                    handleCancelIdeationCanvasItemTitleEdit,
                   ),
                 },
               };
@@ -9728,9 +10138,15 @@ export default function MeetingCanvasTab({
     focusedCanvasItemId,
     getTopicCollapsed,
     handleGenerateSolutionSuggestions,
+    handleCancelIdeationAgendaTitleEdit,
+    handleCancelIdeationCanvasItemTitleEdit,
     handleCancelSolutionNoteEdit,
     handlePruneSolutionSuggestions,
+    handleSaveIdeationAgendaTitleEdit,
+    handleSaveIdeationCanvasItemTitleEdit,
     handleSaveSolutionNoteEdit,
+    handleStartIdeationAgendaTitleEdit,
+    handleStartIdeationCanvasItemTitleEdit,
     handleStartSolutionNoteEdit,
     handleToggleTopicCollapsed,
     handleSelectIdeationDetailItem,
@@ -9761,7 +10177,12 @@ export default function MeetingCanvasTab({
     selectedProblemGroupId,
     selectedProblemSourceNodeId,
     selectedSolutionTopicId,
+    editingAgendaId,
+    editingCanvasItemId,
     editingSolutionNoteKey,
+    agendaDraftTitle,
+    canvasItemDraftTitle,
+    canvasItemDraftBody,
     solutionNoteDraft,
     solutionNoteFinalCommentDraft,
     solutionNoteTextDraft,
@@ -16216,7 +16637,7 @@ export default function MeetingCanvasTab({
 
             {stage === "problem-definition" ? (
               <>
-                <div className="pointer-events-none absolute bottom-[clamp(78px,10vh,96px)] left-1/2 z-10 flex -translate-x-1/2 justify-center px-3 xl:bottom-[clamp(16px,3vh,32px)] xl:left-[19%]">
+                <div className="pointer-events-none absolute bottom-[clamp(104px,13vh,126px)] left-1/2 z-10 flex -translate-x-1/2 justify-center px-3 xl:bottom-[clamp(40px,5vh,56px)] xl:left-[19%]">
                   <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(420px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
                     {problemLeftCanvasToolbarActions.map((item) => (
                       <button
@@ -16236,7 +16657,7 @@ export default function MeetingCanvasTab({
                   </div>
                 </div>
 
-                <div className="pointer-events-none absolute bottom-[clamp(16px,3vh,32px)] left-1/2 z-10 flex -translate-x-1/2 justify-center px-3 xl:left-[69%]">
+                <div className="pointer-events-none absolute bottom-[clamp(38px,5vh,54px)] left-1/2 z-10 flex -translate-x-1/2 justify-center px-3 xl:bottom-[clamp(40px,5vh,56px)] xl:left-[69%]">
                   <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(460px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
                     {problemRightCanvasToolbarActions.map((item) => (
                       <button
