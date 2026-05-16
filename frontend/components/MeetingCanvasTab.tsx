@@ -2381,7 +2381,7 @@ const CANVAS_IDEATION_DROP_ZONE_VERTICAL_PADDING = 28;
 const CANVAS_IDEATION_LEFT_X = 0;
 const CANVAS_IDEATION_RIGHT_X = 0;
 const CANVAS_IDEATION_FRAME_Y = 0;
-const CANVAS_IDEATION_LEFT_WIDTH = 360;
+const CANVAS_IDEATION_LEFT_WIDTH = 440;
 const CANVAS_IDEATION_RIGHT_WIDTH = 820;
 const CANVAS_IDEATION_HEADER_HEIGHT = 92;
 const IDEATION_LEFT_VISIBLE_LEVELS = 3;
@@ -2389,16 +2389,18 @@ const IDEATION_LEFT_VISIBLE_MAX_DEPTH = IDEATION_LEFT_VISIBLE_LEVELS - 1;
 const IDEATION_RIGHT_VISIBLE_LEVELS = 2;
 const IDEATION_RIGHT_VISIBLE_MAX_DEPTH = IDEATION_RIGHT_VISIBLE_LEVELS - 1;
 const IDEATION_LEFT_GROUP_NODE_HEIGHT = 82;
-const IDEATION_LEFT_GROUP_GAP_Y = 8;
+const IDEATION_LEFT_GROUP_NODE_WIDTH = 320;
+const IDEATION_LEFT_GROUP_GAP_X = 12;
 const IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y = 26;
-const IDEATION_LEFT_NODE_HEIGHT = 96;
-const IDEATION_LEFT_ROOT_NODE_HEIGHT = 108;
+const IDEATION_LEFT_NODE_HEIGHT = 118;
+const IDEATION_LEFT_ROOT_NODE_HEIGHT = 134;
 const IDEATION_LEFT_ROOT_GAP_Y = 30;
 const IDEATION_LEFT_PARENT_CHILD_GAP_Y = 8;
 const IDEATION_LEFT_CHILD_NODE_GAP_Y = 8;
 const IDEATION_LEFT_BRANCH_GAP_Y = 14;
 const IDEATION_LEFT_DEPTH_INDENT = 22;
 const IDEATION_LEFT_NODE_INDENT_X = 18;
+const IDEATION_LEFT_ITEM_NODE_WIDTH = CANVAS_IDEATION_LEFT_WIDTH - 40;
 const IDEATION_RIGHT_CLUSTER_CARD_WIDTH = 360;
 const IDEATION_RIGHT_CLUSTER_COLUMNS = 2;
 const IDEATION_RIGHT_CLUSTER_GAP_X = 28;
@@ -3388,8 +3390,8 @@ function makeIdeationGroupNodeLabel(
               </div>
             </div>
           ) : (
-            <div className="mt-2 flex min-w-0 items-center gap-2">
-              <strong className="block min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 text-black">
+            <div className="mt-2 flex min-w-0 items-start gap-2">
+              <strong className="block min-w-0 flex-1 break-words text-[15px] font-semibold leading-5 text-black line-clamp-2">
                 {title}
               </strong>
               {!item.ai_pending ? (
@@ -3407,7 +3409,7 @@ function makeIdeationGroupNodeLabel(
               ) : null}
             </div>
           )}
-          <p className={`mt-1 truncate text-xs leading-5 ${dropTarget ? "font-semibold text-[#1b59f8]" : "text-[#666]"}`}>
+          <p className={`mt-1 break-words text-xs leading-5 line-clamp-2 ${dropTarget ? "font-semibold text-[#1b59f8]" : "text-[#666]"}`}>
             {dropTarget && dropTargetHint ? dropTargetHint : hierarchyLabel}
           </p>
         </div>
@@ -9323,7 +9325,6 @@ export default function MeetingCanvasTab({
         item,
         depth,
       }));
-      const leftLayoutEntries = [...leftAgendaEntries, ...leftItemEntries];
       const selectedAgendaRootCount = rootHierarchyItems.length;
       const rootCountByAgendaId = new Map(
         agendaModels.map((agenda) => [
@@ -9354,48 +9355,63 @@ export default function MeetingCanvasTab({
         .map(({ item }) => item);
       const activeNestedChildCount = rightHierarchyEntries.length - activeDirectChildItems.length;
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
-      const leftHeights = leftLayoutEntries.map((entry) => {
-        if (entry.kind === "agenda") {
-          return editingAgendaId === entry.agenda.id ? 124 : IDEATION_LEFT_GROUP_NODE_HEIGHT;
-        }
+      const leftAgendaHeights = leftAgendaEntries.map(({ agenda }) =>
+        editingAgendaId === agenda.id ? 124 : IDEATION_LEFT_GROUP_NODE_HEIGHT,
+      );
+      const leftItemHeights = leftItemEntries.map((entry) => {
         if (editingCanvasItemId === entry.item.id) {
-          return 218;
+          return 238;
         }
         return entry.depth === 0 ? IDEATION_LEFT_ROOT_NODE_HEIGHT : IDEATION_LEFT_NODE_HEIGHT;
       });
-      const leftPositions: Array<{ x: number; y: number }> = [];
-      let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
-      leftHeights.forEach((height, index) => {
-        const currentEntry = leftLayoutEntries[index];
-        const previousEntry = leftLayoutEntries[index - 1];
+      const leftAgendaPositions: Array<{ x: number; y: number }> = leftAgendaEntries.map((_, index) => ({
+        x:
+          CANVAS_IDEATION_LEFT_X +
+          20 +
+          index * (IDEATION_LEFT_GROUP_NODE_WIDTH + IDEATION_LEFT_GROUP_GAP_X),
+        y: CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT,
+      }));
+      const leftAgendaRowHeight = leftAgendaHeights.length > 0
+        ? Math.max(...leftAgendaHeights)
+        : 0;
+      const leftItemPositions: Array<{ x: number; y: number }> = [];
+      let nextLeftY =
+        CANVAS_IDEATION_FRAME_Y +
+        CANVAS_IDEATION_HEADER_HEIGHT +
+        leftAgendaRowHeight +
+        IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y;
+      leftItemHeights.forEach((height, index) => {
+        const currentEntry = leftItemEntries[index];
+        const previousEntry = leftItemEntries[index - 1];
         if (index > 0) {
-          if (currentEntry?.kind === "agenda" && previousEntry?.kind === "agenda") {
-            nextLeftY += IDEATION_LEFT_GROUP_GAP_Y;
-          } else if (currentEntry?.kind === "item" && previousEntry?.kind === "agenda") {
-            nextLeftY += IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y;
-          } else if (currentEntry?.kind === "item" && previousEntry?.kind === "item") {
-            if (currentEntry.depth === 0) {
-              nextLeftY += IDEATION_LEFT_ROOT_GAP_Y;
-            } else if (currentEntry.depth > previousEntry.depth) {
-              nextLeftY += IDEATION_LEFT_PARENT_CHILD_GAP_Y;
-            } else if (currentEntry.depth === previousEntry.depth) {
-              nextLeftY += IDEATION_LEFT_CHILD_NODE_GAP_Y;
-            } else {
-              nextLeftY += IDEATION_LEFT_BRANCH_GAP_Y;
-            }
-          } else {
+          if (currentEntry.depth === 0) {
+            nextLeftY += IDEATION_LEFT_ROOT_GAP_Y;
+          } else if (currentEntry.depth > previousEntry.depth) {
+            nextLeftY += IDEATION_LEFT_PARENT_CHILD_GAP_Y;
+          } else if (currentEntry.depth === previousEntry.depth) {
             nextLeftY += IDEATION_LEFT_CHILD_NODE_GAP_Y;
+          } else {
+            nextLeftY += IDEATION_LEFT_BRANCH_GAP_Y;
           }
         }
-        leftPositions.push({
+        leftItemPositions.push({
           x:
             CANVAS_IDEATION_LEFT_X +
             20 +
-            (currentEntry?.kind === "item" ? currentEntry.depth * IDEATION_LEFT_NODE_INDENT_X : 0),
+            currentEntry.depth * IDEATION_LEFT_NODE_INDENT_X,
           y: nextLeftY,
         });
         nextLeftY += height;
       });
+      const leftAgendaRight = leftAgendaPositions.reduce(
+        (maxRight, position) => Math.max(maxRight, position.x + IDEATION_LEFT_GROUP_NODE_WIDTH + 20),
+        CANVAS_IDEATION_LEFT_X + CANVAS_IDEATION_LEFT_WIDTH,
+      );
+      const leftItemRight = leftItemPositions.reduce((maxRight, position, index) => {
+        const depth = leftItemEntries[index]?.depth || 0;
+        return Math.max(maxRight, position.x + IDEATION_LEFT_ITEM_NODE_WIDTH - depth * IDEATION_LEFT_NODE_INDENT_X + 20);
+      }, CANVAS_IDEATION_LEFT_X + CANVAS_IDEATION_LEFT_WIDTH);
+      const leftFrameWidth = Math.max(CANVAS_IDEATION_LEFT_WIDTH, leftAgendaRight - CANVAS_IDEATION_LEFT_X, leftItemRight - CANVAS_IDEATION_LEFT_X);
 
       const rightUsesEmptyDetail = rightDetailEntries.length === 0;
       const rightDetailHeightsById = new Map(
@@ -9423,10 +9439,15 @@ export default function MeetingCanvasTab({
             rightBaseX,
             rightBaseY,
           );
-      const leftBottom = leftPositions.reduce(
-        (maxBottom, position, index) => Math.max(maxBottom, position.y + (leftHeights[index] || 0)),
+      const leftAgendaBottom = leftAgendaPositions.reduce(
+        (maxBottom, position, index) => Math.max(maxBottom, position.y + (leftAgendaHeights[index] || 0)),
         CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 180,
       );
+      const leftItemBottom = leftItemPositions.reduce(
+        (maxBottom, position, index) => Math.max(maxBottom, position.y + (leftItemHeights[index] || 0)),
+        leftAgendaBottom,
+      );
+      const leftBottom = Math.max(leftAgendaBottom, leftItemBottom);
       const rightBottom = rightPositions.reduce(
         (maxBottom, position, index) => {
           const item = rightDetailEntries[index]?.item;
@@ -9444,7 +9465,7 @@ export default function MeetingCanvasTab({
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
           className: "pointer-events-none !border-0 !bg-transparent !p-0 !shadow-none",
-          style: { width: CANVAS_IDEATION_LEFT_WIDTH, height: frameHeight, padding: 0 },
+          style: { width: leftFrameWidth, height: frameHeight, padding: 0 },
           draggable: false,
           selectable: false,
           zIndex: 0,
@@ -9455,6 +9476,7 @@ export default function MeetingCanvasTab({
               agendaModels.length,
               rootHierarchyItems.length,
               expandedHierarchyItems.length,
+              leftFrameWidth,
               frameHeight,
             ]),
             label: makeIdeationFrameLabel(
@@ -9509,14 +9531,14 @@ export default function MeetingCanvasTab({
 
         return {
           id: `agenda-${agenda.id}`,
-          position: leftPositions[index],
+          position: leftAgendaPositions[index],
           positionSource: "computed",
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
           className: "nopan !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
-            width: CANVAS_IDEATION_LEFT_WIDTH - 40,
-            height: leftHeights[index],
+            width: IDEATION_LEFT_GROUP_NODE_WIDTH,
+            height: leftAgendaHeights[index],
             background: "transparent",
             border: "none",
             boxShadow: "none",
@@ -9552,7 +9574,6 @@ export default function MeetingCanvasTab({
         };
       });
       const leftGroupDescriptors: CanvasNodeDescriptor[] = leftItemEntries.map(({ item, depth }, index) => {
-        const layoutIndex = leftAgendaEntries.length + index;
         const descendantIds = descendantIdsByItem.get(item.id) || [];
         const directChildItems = getCanvasItemDirectChildItems(canvasItems, item.id);
         const childItems = directChildItems.slice(0, 3);
@@ -9580,14 +9601,14 @@ export default function MeetingCanvasTab({
 
         return {
           id: `canvas-item-${item.id}`,
-          position: leftPositions[layoutIndex],
+          position: leftItemPositions[index],
           positionSource: "computed",
           sourcePosition: Position.Right,
           targetPosition: Position.Left,
           className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
-            width: CANVAS_IDEATION_LEFT_WIDTH - 40 - depth * IDEATION_LEFT_NODE_INDENT_X,
-            height: leftHeights[layoutIndex],
+            width: IDEATION_LEFT_ITEM_NODE_WIDTH - depth * IDEATION_LEFT_NODE_INDENT_X,
+            height: leftItemHeights[index],
             background: "transparent",
             border: "none",
             boxShadow: "none",
