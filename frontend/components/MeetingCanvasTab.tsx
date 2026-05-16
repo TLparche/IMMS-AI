@@ -2253,11 +2253,14 @@ const CANVAS_IDEATION_FRAME_Y = 0;
 const CANVAS_IDEATION_LEFT_WIDTH = 360;
 const CANVAS_IDEATION_RIGHT_WIDTH = 820;
 const CANVAS_IDEATION_HEADER_HEIGHT = 92;
-const CANVAS_IDEATION_GROUP_GAP_Y = 18;
 const CANVAS_IDEATION_DETAIL_GAP_X = 28;
 const CANVAS_IDEATION_DETAIL_GAP_Y = 24;
 const IDEATION_LEFT_VISIBLE_LEVELS = 3;
 const IDEATION_LEFT_VISIBLE_MAX_DEPTH = IDEATION_LEFT_VISIBLE_LEVELS - 1;
+const IDEATION_LEFT_NODE_HEIGHT = 96;
+const IDEATION_LEFT_ROOT_NODE_HEIGHT = 108;
+const IDEATION_LEFT_NODE_GAP_Y = 10;
+const IDEATION_LEFT_DEPTH_INDENT = 22;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
@@ -2422,6 +2425,7 @@ function getCanvasItemVisibleHierarchyItems(
   items: CanvasItemViewModel[],
   agendaId: string,
   maxDepth = 2,
+  expandedTopicIds: Record<string, boolean> = {},
 ) {
   const itemById = new Map(items.map((item) => [item.id, item]));
   const originalOrder = new Map(items.map((item, index) => [item.id, index]));
@@ -2436,6 +2440,7 @@ function getCanvasItemVisibleHierarchyItems(
     visibleItems.push({ item, depth });
 
     if (depth >= maxDepth || !isTopicCanvasItem(item)) return;
+    if (!expandedTopicIds[item.id]) return;
     getTopicDirectChildIds(items, item.id)
       .map((childId) => itemById.get(childId))
       .filter((child): child is CanvasItemViewModel => Boolean(child))
@@ -2807,8 +2812,10 @@ function makeIdeationGroupNodeLabel(
   dropTargetLabel = "여기로 이동",
   dropTargetHint = "",
   depth = 0,
+  expanded = false,
+  hasChildren = false,
+  onToggleExpanded?: (itemId: string) => void,
 ) {
-  const tone = canvasItemTone((item.kind as ComposerTool) || "topic");
   const title = item.ai_pending ? "AI 정리 중" : item.title || "그룹";
   const body = item.ai_pending ? "하위 내용을 정리하는 중" : cleanCanvasNodeBodyText(item.body);
   const childPreview = childItems.slice(0, 3);
@@ -2818,49 +2825,93 @@ function makeIdeationGroupNodeLabel(
     : selected
       ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]"
       : "border-black/10";
-  const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
+  const levelTone =
+    depth === 0
+      ? "bg-[#1b59f8] text-white"
+      : depth === 1
+        ? "bg-[#f0b429] text-black"
+        : "bg-[#10b981] text-white";
+  const accentClass = highlighted
+    ? "bg-[#f97316]"
+    : depth === 0
+      ? "bg-[#1b59f8]"
+      : depth === 1
+        ? "bg-[#f0b429]"
+        : "bg-[#10b981]";
+  const hierarchyLabel = childPreview.length > 0
+    ? expanded
+      ? childPreview.map((child) => child.title || toolLabel((child.kind as ComposerTool) || "note")).join(" · ")
+      : `${childPreview[0]?.title || "하위 내용"}${descendantCount > 1 ? ` 외 ${descendantCount - 1}개` : ""}`
+    : body || "하위 내용 없음";
 
   return (
-    <div className="min-w-0">
-      <div className={`nopan imms-canvas-node-drag-handle cursor-grab rounded-[20px] border px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition active:cursor-grabbing ${backgroundClass} ${borderClass}`}>
-        <div className="flex items-center justify-between gap-2">
-          <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${canvasItemStatusTone(status)}`}>
-            {dropTarget ? dropTargetLabel : `${depth + 1}차 · ${canvasItemStatusLabel(status)}`}
-          </span>
-          <span className="rounded-full bg-black/5 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d]">
+    <div className="h-full min-w-0">
+      <div className={`nopan imms-canvas-node-drag-handle grid h-full cursor-grab grid-cols-[auto_1fr_auto] items-center gap-3 rounded-[12px] border bg-white px-3 py-3 font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition active:cursor-grabbing ${borderClass}`}>
+        <div className="relative h-full shrink-0" style={{ width: IDEATION_LEFT_VISIBLE_MAX_DEPTH * IDEATION_LEFT_DEPTH_INDENT + 34 }}>
+          {Array.from({ length: IDEATION_LEFT_VISIBLE_LEVELS }).map((_, index) => (
+            <span
+              key={`${item.id}-ideation-depth-rail-${index}`}
+              className={`absolute top-0 h-full w-px ${index <= depth ? "bg-black/10" : "bg-transparent"}`}
+              style={{ left: index * IDEATION_LEFT_DEPTH_INDENT + 8 }}
+            />
+          ))}
+          {depth > 0 ? (
+            <span
+              className="absolute top-1/2 h-px -translate-y-1/2 bg-black/15"
+              style={{
+                left: (depth - 1) * IDEATION_LEFT_DEPTH_INDENT + 8,
+                width: IDEATION_LEFT_DEPTH_INDENT,
+              }}
+            />
+          ) : null}
+          <span
+            className={`absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full ring-4 ring-white ${accentClass}`}
+            style={{ left: depth * IDEATION_LEFT_DEPTH_INDENT + 2 }}
+          />
+          {hasChildren ? (
+            <button
+              type="button"
+              className="nodrag nopan absolute top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-[6px] border border-black/10 bg-white text-xs font-semibold text-black shadow-[0_1px_0_rgba(0,0,0,0.04)] transition hover:border-[#1b59f8] hover:text-[#1b59f8]"
+              style={{ left: depth * IDEATION_LEFT_DEPTH_INDENT + 20 }}
+              aria-label={expanded ? "하위 접기" : "하위 펼치기"}
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleExpanded?.(item.id);
+              }}
+            >
+              {expanded ? "-" : "+"}
+            </button>
+          ) : null}
+        </div>
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className={`shrink-0 rounded-md px-2 py-1 text-[11px] font-semibold ${levelTone}`}>
+              {dropTarget ? dropTargetLabel : `${depth + 1}차`}
+            </span>
+            <span className={`shrink-0 rounded-md border px-2 py-1 text-[11px] font-semibold ${canvasItemStatusTone(status)}`}>
+              {canvasItemStatusLabel(status)}
+            </span>
+            {highlighted ? (
+              <span className="shrink-0 rounded-md bg-[#fff1e7] px-2 py-1 text-[11px] font-semibold text-[#c2410c]">
+                방금 정리됨
+              </span>
+            ) : null}
+          </div>
+          <strong className="mt-2 block truncate text-[15px] font-semibold leading-5 text-black">
+            {title}
+          </strong>
+          <p className={`mt-1 truncate text-xs leading-5 ${dropTarget ? "font-semibold text-[#1b59f8]" : "text-[#666]"}`}>
+            {dropTarget && dropTargetHint ? dropTargetHint : hierarchyLabel}
+          </p>
+        </div>
+        <div className="flex h-full shrink-0 items-center justify-end">
+          <span className="rounded-md bg-black/[0.04] px-2 py-1 text-[11px] font-semibold text-[#555]">
             하위 {descendantCount}
           </span>
         </div>
-        {dropTarget && dropTargetHint ? (
-          <p className="mt-3 rounded-xl border border-[#1b59f8]/20 bg-white/85 px-3 py-2 text-xs font-semibold leading-5 text-[#1b59f8]">
-            {dropTargetHint}
-          </p>
-        ) : null}
-        <strong className="mt-3 block line-clamp-2 text-[17px] font-semibold leading-6 text-black">
-          {title}
-        </strong>
-        {body ? (
-          <p className="mt-2 line-clamp-2 text-sm leading-6 text-[#4d4d4d]">
-            {body}
-          </p>
-        ) : null}
-        {childPreview.length > 0 ? (
-          <div className="mt-4 space-y-1.5 border-l border-black/15 pl-3">
-            {childPreview.map((child) => (
-              <div key={`${item.id}-child-preview-${child.id}`} className="flex items-center gap-2 text-xs text-[#4d4d4d]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#1b59f8]/60" />
-                <span className="truncate">{child.title || toolLabel((child.kind as ComposerTool) || "note")}</span>
-              </div>
-            ))}
-            {descendantCount > childPreview.length ? (
-              <p className="text-xs font-medium text-[#1b59f8]">+{descendantCount - childPreview.length}개 더 있음</p>
-            ) : null}
-          </div>
-        ) : (
-          <p className="mt-4 rounded-xl border border-dashed border-black/10 bg-white/60 px-3 py-2 text-xs leading-5 text-[#777]">
-            아직 오른쪽 캔버스에 하위 내용이 없습니다.
-          </p>
-        )}
       </div>
     </div>
   );
@@ -4118,6 +4169,7 @@ export default function MeetingCanvasTab({
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [selectedCanvasItemId, setSelectedCanvasItemId] = useState("");
   const [ideationFocusItemId, setIdeationFocusItemId] = useState("");
+  const [ideationLeftExpandedTopicIds, setIdeationLeftExpandedTopicIds] = useState<Record<string, boolean>>({});
   const [pendingIdeationFocusUpdate, setPendingIdeationFocusUpdate] = useState<IdeationFocusUpdateNotice | null>(null);
   const [selectedProblemGroupId, setSelectedProblemGroupId] = useState("");
   const [selectedProblemSourceNodeId, setSelectedProblemSourceNodeId] = useState("");
@@ -4775,6 +4827,7 @@ export default function MeetingCanvasTab({
     setSelectedSolutionTopicId("");
     setSelectedCanvasItemId("");
     setIdeationFocusItemId("");
+    setIdeationLeftExpandedTopicIds({});
     setSelectedNodeId("");
     setEditingProblemGroupId("");
     setEditingSolutionTopicId("");
@@ -5070,7 +5123,33 @@ export default function MeetingCanvasTab({
     if (ideationFocusItemId && !canvasItems.some((item) => item.id === ideationFocusItemId)) {
       setIdeationFocusItemId("");
     }
+    setIdeationLeftExpandedTopicIds((prev) => {
+      const validTopicIds = new Set(
+        canvasItems
+          .filter((item) => isTopicCanvasItem(item))
+          .map((item) => item.id),
+      );
+      const nextEntries = Object.entries(prev).filter(([itemId, expanded]) => expanded && validTopicIds.has(itemId));
+      if (nextEntries.length === Object.keys(prev).length) {
+        return prev;
+      }
+      return Object.fromEntries(nextEntries);
+    });
   }, [canvasItems, ideationFocusItemId, selectedCanvasItemId]);
+
+  const toggleIdeationLeftTopicExpanded = useCallback((itemId: string) => {
+    setIdeationLeftExpandedTopicIds((prev) => {
+      if (prev[itemId]) {
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      }
+      return {
+        ...prev,
+        [itemId]: true,
+      };
+    });
+  }, []);
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -8455,6 +8534,7 @@ export default function MeetingCanvasTab({
         canvasItems,
         selectedAgendaForIdeation,
         IDEATION_LEFT_VISIBLE_MAX_DEPTH,
+        ideationLeftExpandedTopicIds,
       );
       const descendantIdsByItem = new Map(
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
@@ -8463,19 +8543,17 @@ export default function MeetingCanvasTab({
         ? getCanvasItemDirectChildItems(rightCanvasItems, activeFocusItem.id)
         : [];
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
-      const leftHeights = hierarchyItems.map(({ item, depth }) => {
-        const descendantCount = descendantIdsByItem.get(item.id)?.length || 0;
-        return Math.max(depth === 0 ? 190 : 168, 146 + Math.min(descendantCount, 3) * 22 + (descendantCount > 3 ? 18 : 0));
-      });
+      const leftHeights = hierarchyItems.map(({ depth }) =>
+        depth === 0 ? IDEATION_LEFT_ROOT_NODE_HEIGHT : IDEATION_LEFT_NODE_HEIGHT,
+      );
       const leftPositions: Array<{ x: number; y: number }> = [];
       let nextLeftY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
-      leftHeights.forEach((height, index) => {
-        const depth = hierarchyItems[index]?.depth || 0;
+      leftHeights.forEach((height) => {
         leftPositions.push({
-          x: CANVAS_IDEATION_LEFT_X + 24 + Math.min(depth, IDEATION_LEFT_VISIBLE_MAX_DEPTH) * 24,
+          x: CANVAS_IDEATION_LEFT_X + 20,
           y: nextLeftY,
         });
-        nextLeftY += height + (depth === 0 ? CANVAS_IDEATION_GROUP_GAP_Y : 12);
+        nextLeftY += height + IDEATION_LEFT_NODE_GAP_Y;
       });
 
       const rightUsesGroupSelector = !activeFocusItem;
@@ -8564,8 +8642,10 @@ export default function MeetingCanvasTab({
       ];
       const leftGroupDescriptors: CanvasNodeDescriptor[] = hierarchyItems.map(({ item, depth }, index) => {
         const descendantIds = descendantIdsByItem.get(item.id) || [];
-        const childItems = getCanvasItemDirectChildItems(canvasItems, item.id)
-          .slice(0, 3);
+        const directChildItems = getCanvasItemDirectChildItems(canvasItems, item.id);
+        const childItems = directChildItems.slice(0, 3);
+        const hasChildren = directChildItems.length > 0;
+        const expanded = Boolean(ideationLeftExpandedTopicIds[item.id]);
         const highlighted =
           focusedCanvasItemId === item.id ||
           (isTopicCanvasItem(item) && latestHighlightedTopicId === item.id);
@@ -8594,7 +8674,7 @@ export default function MeetingCanvasTab({
           targetPosition: Position.Left,
           className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
-            width: CANVAS_IDEATION_LEFT_WIDTH - 48 - Math.min(depth, IDEATION_LEFT_VISIBLE_MAX_DEPTH) * 24,
+            width: CANVAS_IDEATION_LEFT_WIDTH - 40,
             height: leftHeights[index],
             background: "transparent",
             border: "none",
@@ -8618,6 +8698,8 @@ export default function MeetingCanvasTab({
               highlighted,
               dropTarget,
               depth,
+              expanded,
+              hasChildren,
               ...descendantIds,
               ...childItems.map((child) => child.title),
             ]),
@@ -8631,6 +8713,9 @@ export default function MeetingCanvasTab({
               dropTargetLabel,
               dropTargetHint,
               depth,
+              expanded,
+              hasChildren,
+              toggleIdeationLeftTopicExpanded,
             ),
           },
         };
@@ -9183,6 +9268,8 @@ export default function MeetingCanvasTab({
     handleProblemIdeaDragOver,
     handleProblemIdeaDragStart,
     handleProblemIdeaDrop,
+    ideationLeftExpandedTopicIds,
+    toggleIdeationLeftTopicExpanded,
     ideationDropPreview,
     ideationFocusItemId,
     latestHighlightedTopicId,
@@ -13042,6 +13129,7 @@ export default function MeetingCanvasTab({
         canvasItems,
         selectedAgendaForIdeationCanvas,
         IDEATION_LEFT_VISIBLE_MAX_DEPTH,
+        ideationLeftExpandedTopicIds,
       )
         .map(({ item }) => item.id),
     );
@@ -13094,6 +13182,7 @@ export default function MeetingCanvasTab({
   }, [
     canvasItems,
     ideationDropPreview,
+    ideationLeftExpandedTopicIds,
     nodes,
     pendingIdeationFocusUpdate,
     selectedAgendaForIdeationCanvas,
