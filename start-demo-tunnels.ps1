@@ -128,20 +128,41 @@ function Stop-ProcessTree {
 function Stop-PortListeners {
   param([int[]]$Ports)
 
-  $listeners = Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue
+  $listeners = @(Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue)
+  if ($listeners.Count -eq 0) {
+    Write-Host "Ports are already free: $($Ports -join ', ')"
+    return
+  }
+
   foreach ($listener in $listeners) {
     $ownerProcessId = [int]$listener.OwningProcess
     if ($ownerProcessId -le 0 -or $ownerProcessId -eq $PID) {
       continue
     }
 
+    $process = Get-Process -Id $ownerProcessId -ErrorAction SilentlyContinue
+    if (-not $process) {
+      Write-Host "Port $($listener.LocalPort) listener already stopped (PID $ownerProcessId no longer exists)"
+      continue
+    }
+
     try {
-      $process = Get-Process -Id $ownerProcessId -ErrorAction Stop
       Write-Host "Stopping existing listener on port $($listener.LocalPort): $($process.ProcessName) (PID $ownerProcessId)"
       Stop-ProcessTree -ProcessId $ownerProcessId -Label "port $($listener.LocalPort)"
     } catch {
       Write-Warning "Failed to stop process on port $($listener.LocalPort) (PID $ownerProcessId): $($_.Exception.Message)"
     }
+  }
+
+  Start-Sleep -Milliseconds 300
+  $remaining = @(Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue)
+  if ($remaining.Count -eq 0) {
+    Write-Host "Ports are free: $($Ports -join ', ')"
+    return
+  }
+
+  foreach ($listener in $remaining) {
+    Write-Warning "Port $($listener.LocalPort) is still in use by PID $($listener.OwningProcess)."
   }
 }
 
@@ -275,31 +296,41 @@ function Test-CorsPreflight {
   param(
     [string]$Name,
     [string]$Url,
-    [string]$Origin
+    [string]$Origin,
+    [int]$TimeoutSeconds = 60
   )
 
-  try {
-    $response = Invoke-WebRequest `
-      -Uri $Url `
-      -Method Options `
-      -Headers @{
-        "Origin" = $Origin
-        "Access-Control-Request-Method" = "GET"
-        "Access-Control-Request-Headers" = "authorization"
-      } `
-      -UseBasicParsing `
-      -TimeoutSec 10
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $lastError = ""
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $response = Invoke-WebRequest `
+        -Uri $Url `
+        -Method Options `
+        -Headers @{
+          "Origin" = $Origin
+          "Access-Control-Request-Method" = "GET"
+          "Access-Control-Request-Headers" = "authorization"
+        } `
+        -UseBasicParsing `
+        -TimeoutSec 10
 
-    $allowOrigin = $response.Headers["Access-Control-Allow-Origin"]
-    if ($allowOrigin -eq $Origin) {
-      Write-Host "$Name CORS preflight OK: $allowOrigin"
-      return
+      $allowOrigin = $response.Headers["Access-Control-Allow-Origin"]
+      if ($allowOrigin -eq $Origin) {
+        Write-Host "$Name CORS preflight OK: $allowOrigin"
+        return $true
+      }
+
+      $lastError = "expected origin $Origin but got $allowOrigin"
+    } catch {
+      $lastError = $_.Exception.Message
     }
 
-    Write-Warning "$Name CORS preflight did not return the expected origin. Expected=$Origin Actual=$allowOrigin"
-  } catch {
-    Write-Warning "$Name CORS preflight failed: $($_.Exception.Message)"
+    Start-Sleep -Seconds 2
   }
+
+  Write-Warning "$Name CORS preflight failed after ${TimeoutSeconds}s: $lastError"
+  return $false
 }
 
 function Stop-StartedProcesses {
