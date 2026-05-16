@@ -146,58 +146,69 @@ export class WebSocketClient {
       targetId?: string
       selectedNodeId?: string
     },
-  ) {
+  ): Promise<boolean> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('⚠️ WebSocket not connected, cannot send audio')
-      return
+      return Promise.resolve(false)
     }
 
-    const reader = new FileReader()
-    reader.onload = () => {
-      const base64Audio = (reader.result as string).split(',')[1]
-      
-      const message = {
-        type: 'audio_chunk',
-        meeting_id: this.meetingId,
-        user_id: this.userId,
-        speaker,
-        audio_data: base64Audio,
-        audio_mime: audioBlob.type || audioMeta?.mimeType || 'audio/wav',
-        audio_filename: audioBlob.type === 'audio/wav' || audioMeta?.mimeType === 'audio/wav' ? 'chunk.wav' : 'chunk.webm',
-        meeting_goal: meetingGoal || '',
-        canvas_stage: canvasContext?.stage || 'ideation',
-        canvas_target_id: canvasContext?.targetId || '',
-        canvas_selected_node_id: canvasContext?.selectedNodeId || '',
-        timestamp: new Date().toISOString(),
-        audio_meta: audioMeta
-          ? {
-              ...audioMeta,
-              started_at: audioMeta.startedAt,
-              ended_at: audioMeta.endedAt,
-              duration_ms: audioMeta.durationMs,
-              speech_ratio: audioMeta.speechRatio,
-              zero_crossing_rate: audioMeta.zeroCrossingRate,
-              noise_floor: audioMeta.noiseFloor,
-              source_sample_rate: audioMeta.sourceSampleRate,
-              sample_rate: audioMeta.sampleRate,
-              chunk_index: audioMeta.chunkIndex,
-              mime_type: audioMeta.mimeType,
-              original_started_at: audioMeta.originalStartedAt,
-              original_ended_at: audioMeta.originalEndedAt,
-              original_duration_ms: audioMeta.originalDurationMs,
-              removed_silence_ms: audioMeta.removedSilenceMs,
-              combined_chunk_count: audioMeta.combinedChunkCount,
-              trimmed_from_silence: audioMeta.trimmedFromSilence,
-            }
-          : undefined
+    const targetWs = this.ws
+    return new Promise((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const base64Audio = (reader.result as string).split(',')[1]
+
+        const message = {
+          type: 'audio_chunk',
+          meeting_id: this.meetingId,
+          user_id: this.userId,
+          speaker,
+          audio_data: base64Audio,
+          audio_mime: audioBlob.type || audioMeta?.mimeType || 'audio/wav',
+          audio_filename: audioBlob.type === 'audio/wav' || audioMeta?.mimeType === 'audio/wav' ? 'chunk.wav' : 'chunk.webm',
+          meeting_goal: meetingGoal || '',
+          canvas_stage: canvasContext?.stage || 'ideation',
+          canvas_target_id: canvasContext?.targetId || '',
+          canvas_selected_node_id: canvasContext?.selectedNodeId || '',
+          timestamp: new Date().toISOString(),
+          audio_meta: audioMeta
+            ? {
+                ...audioMeta,
+                started_at: audioMeta.startedAt,
+                ended_at: audioMeta.endedAt,
+                duration_ms: audioMeta.durationMs,
+                speech_ratio: audioMeta.speechRatio,
+                zero_crossing_rate: audioMeta.zeroCrossingRate,
+                noise_floor: audioMeta.noiseFloor,
+                source_sample_rate: audioMeta.sourceSampleRate,
+                sample_rate: audioMeta.sampleRate,
+                chunk_index: audioMeta.chunkIndex,
+                mime_type: audioMeta.mimeType,
+                original_started_at: audioMeta.originalStartedAt,
+                original_ended_at: audioMeta.originalEndedAt,
+                original_duration_ms: audioMeta.originalDurationMs,
+                removed_silence_ms: audioMeta.removedSilenceMs,
+                combined_chunk_count: audioMeta.combinedChunkCount,
+                trimmed_from_silence: audioMeta.trimmedFromSilence,
+              }
+            : undefined
+        }
+
+        if (targetWs.readyState !== WebSocket.OPEN) {
+          console.warn('⚠️ WebSocket closed before audio chunk could be sent')
+          resolve(false)
+          return
+        }
+
+        targetWs.send(JSON.stringify(message))
+        resolve(true)
       }
-
-      this.ws?.send(JSON.stringify(message))
-    }
-    reader.onerror = () => {
-      console.error('❌ Failed to read audio chunk for WebSocket send', reader.error)
-    }
-    reader.readAsDataURL(audioBlob)
+      reader.onerror = () => {
+        console.error('❌ Failed to read audio chunk for WebSocket send', reader.error)
+        resolve(false)
+      }
+      reader.readAsDataURL(audioBlob)
+    })
   }
 
   sendMessage(type: string, data: Record<string, unknown>) {

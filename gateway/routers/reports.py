@@ -2,15 +2,21 @@
 Reports Router
 회의 리포트 생성 및 조회
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
+from typing import Optional
 from supabase import create_client
 from gateway.config import settings
+from gateway.routers.meetings import resolve_user_id, user_can_access_meeting
 
 router = APIRouter()
 supabase = create_client(settings.supabase_url, settings.supabase_service_role_key)
 
 @router.get("/{meeting_id}")
-async def get_meeting_report(meeting_id: str):
+async def get_meeting_report(meeting_id: str, authorization: Optional[str] = Header(None)):
+    user_id = await resolve_user_id(authorization)
+    if not user_can_access_meeting(meeting_id, user_id):
+        raise HTTPException(status_code=403, detail="Meeting access denied")
+
     try:
         # 회의 정보
         meeting = supabase.table("meetings").select("*").eq("id", meeting_id).execute()

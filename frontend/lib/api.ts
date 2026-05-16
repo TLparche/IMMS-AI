@@ -2,6 +2,8 @@ import type {
   AgendaMarkdownExportResponse,
   AgendaSnapshotExportResponse,
   AgendaSnapshotImportResponse,
+  AiTaskPoliciesResponse,
+  AiTasksResponse,
   AudioImportJobStartResponse,
   AudioImportJobStatusResponse,
   CanvasLocalState,
@@ -61,6 +63,34 @@ export async function getLlmStatus(): Promise<LlmStatus> {
 
 export async function getLastLlmJson(): Promise<LastLlmJsonResponse> {
   return requestJson<LastLlmJsonResponse>("/api/analysis/last-llm-json", { cache: "no-store" });
+}
+
+export async function getAiTaskPolicies(): Promise<AiTaskPoliciesResponse> {
+  return requestJson<AiTaskPoliciesResponse>("/api/ai/tasks/policies", { cache: "no-store" });
+}
+
+export async function getAiTasks(
+  meetingId?: string,
+  options?: {
+    limit?: number;
+    status?: string | string[];
+    taskType?: string | string[];
+    queueName?: string | string[];
+  },
+): Promise<AiTasksResponse> {
+  const params = new URLSearchParams();
+  if (meetingId) params.set("meeting_id", meetingId);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const appendFilter = (key: string, value?: string | string[]) => {
+    const items = Array.isArray(value) ? value : value ? [value] : [];
+    const normalized = items.map((item) => item.trim()).filter(Boolean);
+    if (normalized.length > 0) params.set(key, normalized.join(","));
+  };
+  appendFilter("status", options?.status);
+  appendFilter("task_type", options?.taskType);
+  appendFilter("queue_name", options?.queueName);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return requestJson<AiTasksResponse>(`/api/ai/tasks${suffix}`, { cache: "no-store" });
 }
 
 export async function saveConfig(payload: {
@@ -141,6 +171,8 @@ export async function generateCanvasProblemDefinition(payload: {
     keywords: string[];
     summary_bullets: string[];
   }>;
+  source_group_id?: string;
+  source_group_title?: string;
   ideas: Array<{
     id: string;
     agenda_id: string;
@@ -149,7 +181,7 @@ export async function generateCanvasProblemDefinition(payload: {
     body: string;
   }>;
 }): Promise<CanvasProblemDefinitionResponse> {
-  return requestJson<CanvasProblemDefinitionResponse>("/api/canvas/problem-definition", {
+  return requestJson<CanvasProblemDefinitionResponse>("/api/canvas/problem/groups/generate", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -173,7 +205,7 @@ export async function generateProblemGroupConclusion(payload: {
     }>;
   };
 }): Promise<CanvasProblemConclusionResponse> {
-  return requestJson<CanvasProblemConclusionResponse>("/api/canvas/problem-conclusion", {
+  return requestJson<CanvasProblemConclusionResponse>("/api/canvas/problem/groups/conclusion", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -184,7 +216,7 @@ export async function generateMeetingGoal(payload: {
   meeting_id: string;
   topic: string;
 }): Promise<MeetingGoalSuggestionResponse> {
-  return requestJson<MeetingGoalSuggestionResponse>("/api/canvas/meeting-goal", {
+  return requestJson<MeetingGoalSuggestionResponse>("/api/canvas/meeting/goal", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -201,7 +233,7 @@ export async function generateCanvasSolutionStage(payload: {
     conclusion: string;
   }>;
 }): Promise<CanvasSolutionStageResponse> {
-  return requestJson<CanvasSolutionStageResponse>("/api/canvas/solution-stage", {
+  return requestJson<CanvasSolutionStageResponse>("/api/canvas/solution/stage/generate", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -225,7 +257,7 @@ export async function generateCanvasIdeationSuggestions(payload: {
     keywords: string[];
   }>;
 }): Promise<CanvasIdeationSuggestionResponse> {
-  return requestJson<CanvasIdeationSuggestionResponse>("/api/canvas/ideation-suggestions", {
+  return requestJson<CanvasIdeationSuggestionResponse>("/api/canvas/ideation/suggestions/generate", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -240,7 +272,7 @@ export async function assimilateCanvasIdeas(payload: {
   target_utterances: CanvasIdeaAssimilationUtterance[];
   existing_ideas: CanvasIdeaAssimilationIdea[];
 }) {
-  return requestJson<CanvasIdeaAssimilationResponse>("/api/canvas/idea-assimilation", {
+  return requestJson<CanvasIdeaAssimilationResponse>("/api/canvas/ideation/ideas/assimilate-preview", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -266,7 +298,7 @@ export async function startCanvasIdeaAssimilationWorkspace(payload: {
   target_signature?: string;
   workspace?: CanvasWorkspaceStateResponse;
 }> {
-  return requestJson("/api/canvas/idea-assimilation-workspace/start", {
+  return requestJson("/api/canvas/ideation/ideas/assimilate", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -290,7 +322,7 @@ export async function startCanvasTopicSummaryWorkspace(payload: {
   target_signature?: string;
   workspace?: CanvasWorkspaceStateResponse;
 }> {
-  return requestJson("/api/canvas/topic-summary-workspace/start", {
+  return requestJson("/api/canvas/ideation/topics/summarize", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -314,7 +346,7 @@ export async function getCanvasIdeaAssimilationWorkspaceJob(
   workspace?: CanvasWorkspaceStateResponse;
 }> {
   const params = new URLSearchParams({ meeting_id: meetingId });
-  return requestJson(`/api/canvas/idea-assimilation-workspace/jobs/${encodeURIComponent(jobId)}?${params.toString()}`, {
+  return requestJson(`/api/canvas/ideation/jobs/${encodeURIComponent(jobId)}?${params.toString()}`, {
     cache: "no-store",
   });
 }
@@ -338,7 +370,7 @@ export async function startCanvasProblemDiscussionWorkspace(payload: {
   target_signature?: string;
   workspace?: CanvasWorkspaceStateResponse;
 }> {
-  return requestJson("/api/canvas/problem-discussion-workspace/start", {
+  return requestJson("/api/canvas/problem/discussions/assimilate", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -362,7 +394,7 @@ export async function getCanvasProblemDiscussionWorkspaceJob(
   workspace?: CanvasWorkspaceStateResponse;
 }> {
   const params = new URLSearchParams({ meeting_id: meetingId });
-  return requestJson(`/api/canvas/problem-discussion-workspace/jobs/${encodeURIComponent(jobId)}?${params.toString()}`, {
+  return requestJson(`/api/canvas/problem/jobs/${encodeURIComponent(jobId)}?${params.toString()}`, {
     cache: "no-store",
   });
 }
