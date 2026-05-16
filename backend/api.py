@@ -1839,6 +1839,88 @@ def _canvas_task_signature_preview(raw: Any) -> str:
     return hashlib.sha256(signature.encode("utf-8")).hexdigest()
 
 
+def _canvas_task_activity_type(task_type: str) -> str:
+    normalized = _safe_text(task_type, "generic")
+    if normalized in {"ideation.assimilate", "ideation.assimilate_preview"}:
+        return "assimilate"
+    if normalized == "ideation.topic_summary":
+        return "extract"
+    if normalized == "ideation.topic_clustering":
+        return "cluster"
+    if normalized == "ideation.recommend":
+        return "recommend"
+    if normalized == "problem.discussion":
+        return "summarize"
+    if normalized == "problem.definition":
+        return "generate_problem"
+    if normalized == "problem.conclusion":
+        return "conclude"
+    if normalized == "meeting.goal":
+        return "generate_goal"
+    if normalized == "solution.stage":
+        return "generate_solution"
+    return "task"
+
+
+def _canvas_task_activity_base(task_type: str, target_count: int = 0) -> str:
+    normalized = _safe_text(task_type, "generic")
+    count = _safe_nonnegative_int(target_count)
+    if normalized == "ideation.assimilate":
+        return f"발화 {count}개를 아이디어로 정리" if count > 0 else "발화를 아이디어로 정리"
+    if normalized == "ideation.assimilate_preview":
+        return f"발화 {count}개 아이디어 정리안 계산" if count > 0 else "아이디어 정리안 계산"
+    if normalized == "ideation.topic_summary":
+        return "토픽 핵심 추출"
+    if normalized == "ideation.topic_clustering":
+        return "아이디어를 토픽으로 분류"
+    if normalized == "ideation.recommend":
+        return "아이디어 추천 생성"
+    if normalized == "problem.discussion":
+        return f"문제정의 발화 {count}개 정리" if count > 0 else "문제정의 발화 정리"
+    if normalized == "problem.definition":
+        return "문제정의 그룹 생성"
+    if normalized == "problem.conclusion":
+        return "문제정의 결론 갱신"
+    if normalized == "meeting.goal":
+        return "회의 목표 후보 생성"
+    if normalized == "solution.stage":
+        return "해결책 후보 생성"
+    return "AI 작업 처리"
+
+
+def _short_canvas_activity_reason(detail: Any) -> str:
+    text = _safe_text(detail)
+    if len(text) <= 48:
+        return text
+    return f"{text[:45]}..."
+
+
+def _canvas_task_activity_line(
+    task_type: str,
+    status: str = "",
+    detail: str = "",
+    target_count: int = 0,
+    stale_reason: str = "",
+) -> str:
+    normalized_status = _safe_text(status, "idle")
+    base = _canvas_task_activity_base(task_type, target_count)
+    if normalized_status == "queued":
+        return f"{base} 대기"
+    if normalized_status == "processing":
+        return f"{base} 중"
+    if normalized_status in {"error", "error_retryable", "error_final"}:
+        reason = _short_canvas_activity_reason(detail)
+        return f"{base} 실패: {reason}" if reason else f"{base} 실패"
+    if normalized_status.startswith("stale_"):
+        reason = _short_canvas_activity_reason(detail or stale_reason)
+        return f"{base} 생략: {reason}" if reason else f"{base} 생략"
+    if normalized_status == "missing":
+        return f"{base} 기록 없음"
+    if normalized_status == "idle":
+        return f"{base} 대기"
+    return base
+
+
 def _upsert_canvas_task_record_locked(
     rt: "RuntimeStore",
     meeting_id: str,
@@ -1855,6 +1937,24 @@ def _upsert_canvas_task_record_locked(
     task_type = _safe_text(fields.get("task_type") or current.get("task_type"), "generic")
     now = _now_ts()
     current_status = _safe_text(fields.get("status") or current.get("status"), "processing")
+    target_count = _safe_nonnegative_int(fields.get("target_count", current.get("target_count")))
+    explicit_activity_line = _safe_text(fields.get("activity_line"))
+    should_refresh_activity_line = bool(fields.get("status")) or bool(fields.get("detail")) or bool(fields.get("target_count"))
+    activity_line = (
+        explicit_activity_line
+        or (
+            _canvas_task_activity_line(
+                task_type,
+                current_status,
+                _safe_text(fields.get("detail") or current.get("detail")),
+                target_count,
+                _safe_text(fields.get("stale_reason") or current.get("stale_reason")),
+            )
+            if should_refresh_activity_line or not _safe_text(current.get("activity_line"))
+            else _safe_text(current.get("activity_line"))
+        )
+    )
+    activity_type = _safe_text(fields.get("activity_type") or current.get("activity_type")) or _canvas_task_activity_type(task_type)
 
     record = {
         **current,
@@ -1863,6 +1963,8 @@ def _upsert_canvas_task_record_locked(
         "task_id": normalized_task_id,
         "meeting_id": normalized_meeting_id,
         "status": current_status,
+        "activity_type": activity_type,
+        "activity_line": activity_line,
         "created_at": _safe_text(current.get("created_at") or fields.get("created_at"), now),
         "updated_at": now,
     }
@@ -1922,6 +2024,14 @@ def _canvas_task_record_response(record: dict[str, Any]) -> dict[str, Any]:
         "job_type": _safe_text(record.get("job_type")),
         "scope_key": _safe_text(record.get("scope_key")),
         "status": _safe_text(record.get("status"), "idle"),
+        "activity_type": _safe_text(record.get("activity_type")) or _canvas_task_activity_type(task_type),
+        "activity_line": _safe_text(record.get("activity_line")) or _canvas_task_activity_line(
+            task_type,
+            _safe_text(record.get("status"), "idle"),
+            _safe_text(record.get("detail")),
+            int(record.get("target_count") or 0),
+            _safe_text(record.get("stale_reason")),
+        ),
         "stale_reason": _safe_text(record.get("stale_reason")),
         "retryable": bool(record.get("retryable")),
         "detail": _safe_text(record.get("detail")),
@@ -1965,6 +2075,14 @@ def _canvas_task_job_summary(job: dict[str, Any], source: str = "") -> dict[str,
         "job_type": _safe_text(job.get("job_type")),
         "scope_key": _safe_text(job.get("scope_key")),
         "status": _safe_text(job.get("status"), "idle"),
+        "activity_type": _safe_text(job.get("activity_type")) or _canvas_task_activity_type(task_type),
+        "activity_line": _safe_text(job.get("activity_line")) or _canvas_task_activity_line(
+            task_type,
+            _safe_text(job.get("status"), "idle"),
+            _safe_text(job.get("detail")),
+            int(job.get("target_count") or 0),
+            _safe_text(job.get("stale_reason")),
+        ),
         "stale_reason": _safe_text(job.get("stale_reason")),
         "retryable": bool(job.get("retryable")),
         "detail": _safe_text(job.get("detail")),
@@ -2049,6 +2167,8 @@ def _run_canvas_task_cached_request(
         task_id,
         **_canvas_task_job_fields(policy.task_type),
         source="cached_request",
+        activity_type=_canvas_task_activity_type(policy.task_type),
+        activity_line=_canvas_task_activity_line(policy.task_type, "processing"),
         scope_key=normalized_scope_key,
         cache_key=cache_key,
         input_signature=input_signature,
@@ -2087,6 +2207,8 @@ def _run_canvas_task_cached_request(
         normalized_meeting_id,
         task_id,
         status="completed",
+        activity_type=_canvas_task_activity_type(policy.task_type),
+        activity_line=_canvas_task_activity_line(policy.task_type, "completed"),
         detail="AI task 완료",
         cache_hit=bool(task_meta.get("cache_hit")),
         deduped=bool(task_meta.get("deduped")),
@@ -2098,6 +2220,8 @@ def _run_canvas_task_cached_request(
             "cache_key": cache_key,
             "cache_hit": bool(task_meta.get("cache_hit")),
             "deduped": bool(task_meta.get("deduped")),
+            "activity_type": _canvas_task_activity_type(policy.task_type),
+            "activity_line": _canvas_task_activity_line(policy.task_type, "completed"),
             **result,
         }
     return result
@@ -7557,9 +7681,27 @@ def get_ai_task_policies():
     }
 
 
+def _task_query_filter_values(raw: str) -> set[str]:
+    return {
+        _safe_text(value)
+        for value in _safe_text(raw).split(",")
+        if _safe_text(value)
+    }
+
+
 @app.get("/api/ai/tasks")
-def get_ai_tasks(meeting_id: str = ""):
+def get_ai_tasks(
+    meeting_id: str = "",
+    status: str = "",
+    task_type: str = "",
+    queue_name: str = "",
+    limit: int = 200,
+):
     normalized_meeting_id = _safe_text(meeting_id)
+    status_filters = _task_query_filter_values(status)
+    task_type_filters = _task_query_filter_values(task_type)
+    queue_name_filters = _task_query_filter_values(queue_name)
+    result_limit = min(max(_safe_nonnegative_int(limit, 200), 1), 500)
     tasks: list[dict[str, Any]] = []
     seen_task_ids: set[str] = set()
     with RT.lock:
@@ -7599,19 +7741,34 @@ def get_ai_tasks(meeting_id: str = ""):
                     continue
                 tasks.append(summary)
 
+    filtered_tasks = [
+        task
+        for task in tasks
+        if (not status_filters or _safe_text(task.get("status"), "idle") in status_filters)
+        and (not task_type_filters or _safe_text(task.get("task_type"), "generic") in task_type_filters)
+        and (not queue_name_filters or _safe_text(task.get("queue_name"), "generic") in queue_name_filters)
+    ]
+
     queue_counts: dict[str, dict[str, int]] = {}
-    for task in tasks:
+    for task in filtered_tasks:
         queue_name = _safe_text(task.get("queue_name"), "generic")
         status = _safe_text(task.get("status"), "idle")
         queue_counts.setdefault(queue_name, {})
         queue_counts[queue_name][status] = queue_counts[queue_name].get(status, 0) + 1
 
-    tasks.sort(key=lambda item: _safe_text(item.get("updated_at")), reverse=True)
+    filtered_tasks.sort(key=lambda item: _safe_text(item.get("updated_at")), reverse=True)
     return {
         "ok": True,
         "meeting_id": normalized_meeting_id,
+        "limit": result_limit,
+        "total": len(filtered_tasks),
+        "filters": {
+            "status": sorted(status_filters),
+            "task_type": sorted(task_type_filters),
+            "queue_name": sorted(queue_name_filters),
+        },
         "queues": queue_counts,
-        "tasks": tasks[:200],
+        "tasks": filtered_tasks[:result_limit],
         "policies": [_canvas_task_policy_response(policy) for policy in CANVAS_TASK_POLICIES.values()],
     }
 
@@ -8519,6 +8676,14 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
         "scope_key": _safe_text(job.get("scope_key")),
         "stale_reason": _safe_text(job.get("stale_reason")),
         "retryable": bool(job.get("retryable")),
+        "activity_type": _safe_text(job.get("activity_type")) or _canvas_task_activity_type(_safe_text(job.get("task_type"))),
+        "activity_line": _safe_text(job.get("activity_line")) or _canvas_task_activity_line(
+            _safe_text(job.get("task_type")),
+            _safe_text(job.get("status"), "idle"),
+            _safe_text(job.get("detail")),
+            int(job.get("target_count") or 0),
+            _safe_text(job.get("stale_reason")),
+        ),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -8600,6 +8765,14 @@ def _canvas_problem_job_response(job: dict[str, Any], workspace: dict[str, Any] 
         "stale_policy": _safe_text(job.get("stale_policy")),
         "output_policy": _safe_text(job.get("output_policy")),
         "priority": int(job.get("priority") or 0),
+        "activity_type": _safe_text(job.get("activity_type")) or _canvas_task_activity_type(_safe_text(job.get("task_type"))),
+        "activity_line": _safe_text(job.get("activity_line")) or _canvas_task_activity_line(
+            _safe_text(job.get("task_type")),
+            _safe_text(job.get("status"), "idle"),
+            _safe_text(job.get("detail")),
+            int(job.get("target_count") or 0),
+            _safe_text(job.get("stale_reason")),
+        ),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -9907,10 +10080,12 @@ def _finalize_canvas_topic_summary_workspace_job(
             return
 
         _save_canvas_workspace_runtime(meeting_id, patched_workspace)
+        patch_title = _safe_text((patch_payload.get("patch") or {}).get("title")) if isinstance(patch_payload.get("patch"), dict) else ""
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
             status="completed",
+            activity_line=f'"{patch_title}" 핵심 추출' if patch_title else "토픽 핵심 추출",
             detail="AI topic 정리 완료",
             workspace=copy.deepcopy(patched_workspace),
             patch=copy.deepcopy(patch_payload),
@@ -10274,6 +10449,7 @@ def _finalize_canvas_idea_workspace_job(
         target_ids = [_safe_text(item.id) for item in (payload.target_utterances or []) if _safe_text(item.id)]
         starting_create_stack = _canvas_idea_create_stack_value(latest_workspace)
         created_node_count = 0
+        merged_update_count = 0
         clustering_result: dict[str, Any] = {"changed": 0, "target": _canvas_topic_cluster_target(latest_workspace)}
         topic_child_merge_result: dict[str, Any] = {
             "merged": 0,
@@ -10334,6 +10510,8 @@ def _finalize_canvas_idea_workspace_job(
         else:
             next_items = list(base_items)
             create_updates = [update for update in updates if _safe_text(update.get("action")) == "create"]
+            merge_updates = [update for update in updates if _safe_text(update.get("action")) == "merge"]
+            merged_update_count = len(merge_updates)
             for update in updates:
                 if _safe_text(update.get("action")) != "merge":
                     continue
@@ -10414,10 +10592,21 @@ def _finalize_canvas_idea_workspace_job(
             if merged_child_count > 0
             else "AI 아이디어 정리 완료"
         )
+        activity_parts = []
+        if created_node_count > 0:
+            activity_parts.append(f"아이디어 {created_node_count}개 생성")
+        if merged_update_count > 0:
+            activity_parts.append(f"기존 아이디어 {merged_update_count}개 병합")
+        if clustered_count > 0:
+            activity_parts.append(f"토픽 분류 {clustered_count}건")
+        if merged_child_count > 0:
+            activity_parts.append(f"유사 아이디어 {merged_child_count}건 병합")
+        activity_line = " · ".join(activity_parts) if activity_parts else "새 발화 확인"
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
             status="completed",
+            activity_line=activity_line,
             detail=detail,
             workspace=copy.deepcopy(latest_workspace),
             used_llm=bool(result.get("used_llm")),

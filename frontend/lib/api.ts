@@ -69,9 +69,26 @@ export async function getAiTaskPolicies(): Promise<AiTaskPoliciesResponse> {
   return requestJson<AiTaskPoliciesResponse>("/api/ai/tasks/policies", { cache: "no-store" });
 }
 
-export async function getAiTasks(meetingId?: string): Promise<AiTasksResponse> {
+export async function getAiTasks(
+  meetingId?: string,
+  options?: {
+    limit?: number;
+    status?: string | string[];
+    taskType?: string | string[];
+    queueName?: string | string[];
+  },
+): Promise<AiTasksResponse> {
   const params = new URLSearchParams();
   if (meetingId) params.set("meeting_id", meetingId);
+  if (options?.limit) params.set("limit", String(options.limit));
+  const appendFilter = (key: string, value?: string | string[]) => {
+    const items = Array.isArray(value) ? value : value ? [value] : [];
+    const normalized = items.map((item) => item.trim()).filter(Boolean);
+    if (normalized.length > 0) params.set(key, normalized.join(","));
+  };
+  appendFilter("status", options?.status);
+  appendFilter("task_type", options?.taskType);
+  appendFilter("queue_name", options?.queueName);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return requestJson<AiTasksResponse>(`/api/ai/tasks${suffix}`, { cache: "no-store" });
 }

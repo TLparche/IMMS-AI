@@ -168,6 +168,20 @@ class CanvasTaskRouteSmokeTest(unittest.TestCase):
         task_types = {task["task_type"] for task in body["tasks"]}
         self.assertIn("problem.definition", task_types)
         self.assertIn("problem_definition", body["queues"])
+        problem_definition_task = next(task for task in body["tasks"] if task["task_type"] == "problem.definition")
+        self.assertEqual(problem_definition_task["activity_type"], "generate_problem")
+        self.assertEqual(problem_definition_task["activity_line"], "문제정의 그룹 생성")
+
+        filtered_response = self._get(
+            f"/api/ai/tasks?meeting_id={self.meeting_id}&task_type=problem.definition&limit=1"
+        )
+        self.assertEqual(filtered_response.status_code, 200)
+        filtered = filtered_response.json()
+        self.assertEqual(filtered["limit"], 1)
+        self.assertGreaterEqual(filtered["total"], 1)
+        self.assertLessEqual(len(filtered["tasks"]), 1)
+        self.assertTrue(all(task["task_type"] == "problem.definition" for task in filtered["tasks"]))
+        self.assertEqual(filtered["filters"]["task_type"], ["problem.definition"])
 
 
 if __name__ == "__main__":

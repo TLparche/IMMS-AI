@@ -49,6 +49,8 @@ export interface AiTaskRecord extends AiTaskPolicy {
   job_type?: string;
   scope_key?: string;
   status: string;
+  activity_type?: string;
+  activity_line?: string;
   stale_reason?: string;
   retryable?: boolean;
   detail?: string;
@@ -80,6 +82,13 @@ export interface AiTaskPoliciesResponse {
 export interface AiTasksResponse {
   ok: boolean;
   meeting_id?: string;
+  limit?: number;
+  total?: number;
+  filters?: {
+    status?: string[];
+    task_type?: string[];
+    queue_name?: string[];
+  };
   queues: Record<string, Record<string, number>>;
   tasks: AiTaskRecord[];
   policies: AiTaskPolicy[];

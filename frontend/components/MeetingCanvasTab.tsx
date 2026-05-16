@@ -928,6 +928,10 @@ function formatAiTaskTime(raw?: string) {
   });
 }
 
+function aiTaskActivityLine(task: AiTaskRecord) {
+  return task.activity_line || task.detail || aiTaskLabel(task.task_type);
+}
+
 function KeyboardDoubleArrowDownIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -4131,6 +4135,7 @@ export default function MeetingCanvasTab({
   const [aiTaskQueues, setAiTaskQueues] = useState<Record<string, Record<string, number>>>({});
   const [aiTaskLoading, setAiTaskLoading] = useState(false);
   const [aiTaskError, setAiTaskError] = useState("");
+  const [expandedAiTaskIds, setExpandedAiTaskIds] = useState<Record<string, boolean>>({});
   const [ideaCreateStack, setIdeaCreateStack] = useState(0);
   const [ideationSuggestionBusyRootId, setIdeationSuggestionBusyRootId] = useState("");
   const [ideationSuggestionCollapsedByRootId, setIdeationSuggestionCollapsedByRootId] = useState<Record<string, boolean>>({});
@@ -4244,8 +4249,8 @@ export default function MeetingCanvasTab({
         setAiTaskLoading(true);
       }
       try {
-        const result = await getAiTasks(meetingId);
-        setAiTasks((result.tasks || []).slice(0, 80));
+        const result = await getAiTasks(meetingId, { limit: 80 });
+        setAiTasks(result.tasks || []);
         setAiTaskQueues(result.queues || {});
         setAiTaskError("");
       } catch (error) {
@@ -4287,6 +4292,13 @@ export default function MeetingCanvasTab({
     },
     [aiTaskPanelOpen, meetingId, userId],
   );
+
+  const toggleAiTaskExpanded = useCallback((taskKey: string) => {
+    setExpandedAiTaskIds((current) => ({
+      ...current,
+      [taskKey]: !current[taskKey],
+    }));
+  }, []);
 
   useEffect(() => {
     void refreshAiTasks({ silent: true });
@@ -12823,28 +12835,43 @@ export default function MeetingCanvasTab({
 
               {latestTasks.length > 0 ? (
                 <div className="space-y-2">
-                  {latestTasks.map((task) => (
-                    <div key={task.task_id || `${task.task_type}-${task.updated_at}`} className="rounded-[10px] border border-slate-100 px-3 py-2">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-slate-900">{aiTaskLabel(task.task_type)}</p>
-                          <p className="mt-0.5 line-clamp-1 text-xs text-slate-500">{task.detail || task.queue_name || "작업 기록"}</p>
-                        </div>
-                        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${aiTaskStatusClassName(task.status)}`}>
-                          {aiTaskStatusLabel(task.status)}
+                  {latestTasks.map((task) => {
+                    const taskKey = task.task_id || `${task.task_type}-${task.updated_at}`;
+                    const expanded = Boolean(expandedAiTaskIds[taskKey]);
+                    return (
+                      <button
+                        key={taskKey}
+                        type="button"
+                        aria-expanded={expanded}
+                        onClick={() => toggleAiTaskExpanded(taskKey)}
+                        className="w-full rounded-[10px] border border-slate-100 px-3 py-2 text-left transition hover:border-slate-200 hover:bg-slate-50"
+                      >
+                        <span className="flex items-start justify-between gap-3">
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-semibold text-slate-900">{aiTaskActivityLine(task)}</span>
+                            <span className="mt-0.5 block truncate text-xs text-slate-500">
+                              {aiTaskLabel(task.task_type)}
+                              {formatAiTaskTime(task.updated_at) ? ` · ${formatAiTaskTime(task.updated_at)}` : ""}
+                            </span>
+                          </span>
+                          <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${aiTaskStatusClassName(task.status)}`}>
+                            {aiTaskStatusLabel(task.status)}
+                          </span>
                         </span>
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                        {task.scope_key ? <span className="inline-block max-w-[10rem] truncate rounded-full bg-slate-100 px-2 py-0.5">{task.scope_key}</span> : null}
-                        {task.queue_name ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.queue_name}</span> : null}
-                        {task.model_policy ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.model_policy}</span> : null}
-                        {task.cache_hit ? <span>cache hit</span> : null}
-                        {task.deduped ? <span>dedupe</span> : null}
-                        {task.duration_ms ? <span>{Math.max(1, Math.round(task.duration_ms / 100) / 10)}초</span> : null}
-                        {formatAiTaskTime(task.updated_at) ? <span>{formatAiTaskTime(task.updated_at)}</span> : null}
-                      </div>
-                    </div>
-                  ))}
+                        {expanded ? (
+                          <span className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                            {task.detail ? <span className="basis-full leading-5 text-slate-600">{task.detail}</span> : null}
+                            {task.scope_key ? <span className="inline-block max-w-[10rem] truncate rounded-full bg-slate-100 px-2 py-0.5">{task.scope_key}</span> : null}
+                            {task.queue_name ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.queue_name}</span> : null}
+                            {task.model_policy ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.model_policy}</span> : null}
+                            {task.cache_hit ? <span>cache hit</span> : null}
+                            {task.deduped ? <span>dedupe</span> : null}
+                            {task.duration_ms ? <span>{Math.max(1, Math.round(task.duration_ms / 100) / 10)}초</span> : null}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="rounded-[10px] bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">
