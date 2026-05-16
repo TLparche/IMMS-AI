@@ -41,6 +41,7 @@ SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
 LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
+CANVAS_OPERATION_LOG_MAX = 400
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
 CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
@@ -412,6 +413,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
             for item in (workspace.get("problem_processed_utterance_ids") or [])
             if _safe_text(item)
         ][:1000],
+        "operation_log": _normalize_canvas_operation_log(workspace.get("operation_log")),
         "imported_state": copy.deepcopy(workspace.get("imported_state"))
         if isinstance(workspace.get("imported_state"), dict)
         else None,
@@ -452,12 +454,255 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
             for item in (shared_state.get("problem_processed_utterance_ids") or [])
             if _safe_text(item)
         ][:1000],
+        "operation_log": _normalize_canvas_operation_log(shared_state.get("operation_log")),
         "imported_state": copy.deepcopy(shared_state.get("imported_state"))
         if isinstance(shared_state.get("imported_state"), dict)
         else None,
         "saved_at": _safe_text(shared_state.get("saved_at") or row.get("updated_at")),
         "llm_cache": copy.deepcopy(llm_cache),
     }
+
+
+def _dedup_canvas_operation_ids(raw_ids: Any, limit: int = 80) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_ids, str):
+        iterable_ids = [raw_ids]
+    elif isinstance(raw_ids, (list, tuple, set)):
+        iterable_ids = raw_ids
+    else:
+        iterable_ids = []
+    for raw_id in iterable_ids:
+        node_id = _safe_text(raw_id)
+        if not node_id or node_id in seen:
+            continue
+        seen.add(node_id)
+        ids.append(node_id)
+        if len(ids) >= limit:
+            break
+    return ids
+
+
+def _safe_operation_epoch(raw: Any) -> float:
+    try:
+        return max(0.0, float(raw or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_canvas_operation_log(
+    raw_log: Any,
+    limit: int = CANVAS_OPERATION_LOG_MAX,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_log, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for index, raw_entry in enumerate(raw_log[-limit:]):
+        if not isinstance(raw_entry, dict):
+            continue
+        operation_type = _safe_text(raw_entry.get("operation_type"))
+        if not operation_type:
+            continue
+        operation_id = _safe_text(raw_entry.get("operation_id") or raw_entry.get("id"))
+        normalized.append(
+            {
+                "operation_id": operation_id or f"legacy-operation-{index + 1}",
+                "operation_type": operation_type[:80],
+                "source": _safe_text(raw_entry.get("source"), "server")[:80],
+                "target_node_id": _safe_text(raw_entry.get("target_node_id"))[:160],
+                "source_node_ids": _dedup_canvas_operation_ids(raw_entry.get("source_node_ids"), limit=80),
+                "previous_parent_id": _safe_text(raw_entry.get("previous_parent_id"))[:160],
+                "next_parent_id": _safe_text(raw_entry.get("next_parent_id"))[:160],
+                "summary": _safe_text(raw_entry.get("summary"))[:240],
+                "created_at": _safe_text(raw_entry.get("created_at"))[:40],
+                "created_epoch": _safe_operation_epoch(raw_entry.get("created_epoch")),
+            }
+        )
+
+    return normalized[-limit:]
+
+
+def _canvas_operation_item_map(workspace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    items = workspace.get("canvas_items") if isinstance(workspace, dict) else []
+    mapped: dict[str, dict[str, Any]] = {}
+    if not isinstance(items, list):
+        return mapped
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = _safe_text(item.get("id"))
+        if item_id:
+            mapped[item_id] = item
+    return mapped
+
+
+def _canvas_operation_source_ids(item: dict[str, Any]) -> list[str]:
+    child_item_ids = item.get("child_item_ids") if isinstance(item.get("child_item_ids"), list) else []
+    compacted_from_ids = (
+        item.get("compacted_from_ids") if isinstance(item.get("compacted_from_ids"), list) else []
+    )
+    merged_child_ids = [
+        _safe_text(child.get("id"))
+        for child in (item.get("merged_children") or [])
+        if isinstance(child, dict) and _safe_text(child.get("id"))
+    ]
+    return _dedup_canvas_operation_ids(
+        [*child_item_ids, *compacted_from_ids, *merged_child_ids],
+        limit=120,
+    )
+
+
+def _canvas_operation_node_label(item: dict[str, Any] | None, fallback: str = "노드") -> str:
+    if not isinstance(item, dict):
+        return fallback
+    label = _safe_text(item.get("title") or item.get("body") or item.get("id"), fallback)
+    return label[:80]
+
+
+def _make_canvas_operation_entry(
+    operation_type: str,
+    source: str,
+    summary: str,
+    target_node_id: str = "",
+    source_node_ids: list[str] | None = None,
+    previous_parent_id: str = "",
+    next_parent_id: str = "",
+) -> dict[str, Any]:
+    created_epoch = time.time()
+    return {
+        "operation_id": f"op-{int(created_epoch * 1000)}-{uuid4().hex[:8]}",
+        "operation_type": operation_type,
+        "source": _safe_text(source, "server"),
+        "target_node_id": _safe_text(target_node_id),
+        "source_node_ids": _dedup_canvas_operation_ids(source_node_ids or [], limit=80),
+        "previous_parent_id": _safe_text(previous_parent_id),
+        "next_parent_id": _safe_text(next_parent_id),
+        "summary": _safe_text(summary)[:240],
+        "created_at": _utc_iso_now(),
+        "created_epoch": created_epoch,
+    }
+
+
+def _append_canvas_operation_log_from_change(
+    previous_workspace: dict[str, Any],
+    next_workspace: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    workspace = copy.deepcopy(next_workspace) if isinstance(next_workspace, dict) else {}
+    previous_items_by_id = _canvas_operation_item_map(previous_workspace)
+    next_items_by_id = _canvas_operation_item_map(workspace)
+    existing_log = _normalize_canvas_operation_log(
+        workspace.get("operation_log") or (previous_workspace or {}).get("operation_log")
+    )
+
+    if not previous_items_by_id:
+        workspace["operation_log"] = existing_log
+        return workspace
+
+    previous_ids = set(previous_items_by_id.keys())
+    next_ids = set(next_items_by_id.keys())
+    added_ids = next_ids - previous_ids
+    common_ids = previous_ids & next_ids
+    removed_ids = previous_ids - next_ids
+    covered_removed_ids: set[str] = set()
+    merge_targets_by_source: dict[str, str] = {}
+    entries: list[dict[str, Any]] = []
+
+    for item_id in sorted(added_ids):
+        item = next_items_by_id[item_id]
+        source_ids = _canvas_operation_source_ids(item)
+        previous_source_ids = [source_id for source_id in source_ids if source_id in previous_ids]
+        effective_source_ids = previous_source_ids or source_ids
+        label = _canvas_operation_node_label(item)
+        is_topic = _safe_text(item.get("kind"), "note") == "topic"
+        is_ai_created = bool(item.get("ai_generated")) or _safe_text(item.get("created_by")) == "ai"
+
+        if is_topic and len(effective_source_ids) >= 2:
+            entries.append(
+                _make_canvas_operation_entry(
+                    "node_merged",
+                    source,
+                    f'"{label}" 노드가 {len(effective_source_ids)}개 원본을 묶었습니다.',
+                    target_node_id=item_id,
+                    source_node_ids=effective_source_ids,
+                )
+            )
+            for source_id in effective_source_ids:
+                merge_targets_by_source[source_id] = item_id
+                if source_id in removed_ids:
+                    covered_removed_ids.add(source_id)
+        elif is_topic or is_ai_created:
+            entries.append(
+                _make_canvas_operation_entry(
+                    "node_created",
+                    source,
+                    f'"{label}" 노드가 생성되었습니다.',
+                    target_node_id=item_id,
+                    source_node_ids=effective_source_ids,
+                )
+            )
+
+    for item_id in sorted(common_ids):
+        previous_item = previous_items_by_id[item_id]
+        next_item = next_items_by_id[item_id]
+        previous_sources = set(_canvas_operation_source_ids(previous_item))
+        next_sources = _canvas_operation_source_ids(next_item)
+        added_sources = [source_id for source_id in next_sources if source_id not in previous_sources]
+        if not added_sources:
+            continue
+        label = _canvas_operation_node_label(next_item)
+        entries.append(
+            _make_canvas_operation_entry(
+                "node_compacted",
+                source,
+                f'"{label}" 노드가 {len(added_sources)}개 원본을 흡수했습니다.',
+                target_node_id=item_id,
+                source_node_ids=added_sources,
+            )
+        )
+        for source_id in added_sources:
+            if source_id in removed_ids:
+                covered_removed_ids.add(source_id)
+
+    for item_id in sorted(common_ids):
+        previous_item = previous_items_by_id[item_id]
+        next_item = next_items_by_id[item_id]
+        previous_parent_id = _safe_text(previous_item.get("parent_topic_id"))
+        next_parent_id = _safe_text(next_item.get("parent_topic_id"))
+        if previous_parent_id == next_parent_id:
+            continue
+        if merge_targets_by_source.get(item_id) == next_parent_id:
+            continue
+        label = _canvas_operation_node_label(next_item)
+        entries.append(
+            _make_canvas_operation_entry(
+                "node_moved",
+                source,
+                f'"{label}" 노드 위치가 변경되었습니다.',
+                target_node_id=item_id,
+                source_node_ids=[item_id],
+                previous_parent_id=previous_parent_id,
+                next_parent_id=next_parent_id,
+            )
+        )
+
+    for item_id in sorted(removed_ids - covered_removed_ids):
+        previous_item = previous_items_by_id[item_id]
+        label = _canvas_operation_node_label(previous_item, item_id)
+        entries.append(
+            _make_canvas_operation_entry(
+                "node_deleted",
+                source,
+                f'"{label}" 노드가 제거되었습니다.',
+                source_node_ids=[item_id],
+            )
+        )
+
+    if entries:
+        existing_log = [*existing_log, *entries[:80]]
+    workspace["operation_log"] = _normalize_canvas_operation_log(existing_log)
+    return workspace
 
 
 def _normalize_canvas_workspace_problem_groups(
@@ -970,6 +1215,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
             for item in (source.get("problem_processed_utterance_ids") or [])
             if _safe_text(item)
         ][:1000],
+        "operation_log": _normalize_canvas_operation_log(source.get("operation_log")),
         "imported_state": copy.deepcopy(source.get("imported_state"))
         if isinstance(source.get("imported_state"), dict)
         else None,
@@ -1007,6 +1253,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
             for item in (workspace.get("problem_processed_utterance_ids") or [])
             if _safe_text(item)
         ][:1000],
+        "operation_log": _normalize_canvas_operation_log(workspace.get("operation_log")),
         "imported_state": copy.deepcopy(workspace.get("imported_state"))
         if isinstance(workspace.get("imported_state"), dict)
         else None,
@@ -1218,6 +1465,8 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     workspace.setdefault("node_positions", {})
     workspace.setdefault("idea_create_stack", 0)
     workspace.setdefault("idea_processed_utterance_ids", [])
+    workspace.setdefault("problem_processed_utterance_ids", [])
+    workspace.setdefault("operation_log", [])
     workspace.setdefault("imported_state", None)
     workspace.setdefault("saved_at", "")
     workspace.setdefault("llm_cache", {})
@@ -7114,7 +7363,15 @@ def _save_canvas_workspace_runtime(meeting_id: str, workspace: dict[str, Any]) -
     workspace["meeting_id"] = normalized_meeting_id
     workspace["saved_at"] = _now_ts()
     with RT.lock:
-        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
+        previous_workspace = copy.deepcopy(RT.canvas_workspace_by_meeting.get(normalized_meeting_id) or {})
+        prepared_workspace = _append_canvas_operation_log_from_change(
+            previous_workspace,
+            workspace,
+            source="runtime_save",
+        )
+        workspace.clear()
+        workspace.update(copy.deepcopy(prepared_workspace))
+        RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(prepared_workspace)
     _save_canvas_workspace_to_db(normalized_meeting_id, workspace)
 
 
@@ -9906,6 +10163,11 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     workspace["imported_state"] = (
         copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
     )
+    workspace = _append_canvas_operation_log_from_change(
+        previous_workspace,
+        workspace,
+        source="workspace_state",
+    )
     with RT.lock:
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 
@@ -9965,6 +10227,11 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
             copy.deepcopy(payload.imported_state) if isinstance(payload.imported_state, dict) else None
         )
 
+    workspace = _append_canvas_operation_log_from_change(
+        previous_workspace,
+        workspace,
+        source="workspace_patch",
+    )
     with RT.lock:
         RT.canvas_workspace_by_meeting[normalized_meeting_id] = copy.deepcopy(workspace)
 

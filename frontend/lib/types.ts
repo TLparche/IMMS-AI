@@ -405,6 +405,25 @@ export interface CanvasNodePositionsByStage {
   solution?: Record<string, CanvasNodePosition>;
 }
 
+export interface CanvasOperationLogEntry {
+  operation_id: string;
+  operation_type:
+    | "node_created"
+    | "node_moved"
+    | "node_merged"
+    | "node_compacted"
+    | "node_deleted"
+    | string;
+  source?: string;
+  target_node_id?: string;
+  source_node_ids?: string[];
+  previous_parent_id?: string;
+  next_parent_id?: string;
+  summary?: string;
+  created_at?: string;
+  created_epoch?: number;
+}
+
 export interface CanvasWorkspaceStateResponse {
   ok: boolean;
   meeting_id: string;
@@ -428,6 +447,7 @@ export interface CanvasWorkspaceStateResponse {
   idea_create_stack?: number;
   idea_processed_utterance_ids?: string[];
   problem_processed_utterance_ids?: string[];
+  operation_log?: CanvasOperationLogEntry[];
   imported_state?: MeetingState | null;
   saved_at?: string;
 }
