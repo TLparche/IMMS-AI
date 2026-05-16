@@ -2336,6 +2336,7 @@ function canvasItemTone(kind: ComposerTool) {
       shell: "bg-[linear-gradient(128deg,#eef7ff_0%,#ffffff_100%)]",
       badge: "bg-sky-100 text-sky-700",
       accent: "text-sky-700",
+      border: "border-black/10",
     };
   }
   if (kind === "topic") {
@@ -2343,13 +2344,32 @@ function canvasItemTone(kind: ComposerTool) {
       shell: "bg-[linear-gradient(128deg,#eefbf7_0%,#ffffff_100%)]",
       badge: "bg-fuchsia-100 text-fuchsia-700",
       accent: "text-fuchsia-700",
+      border: "border-black/10",
     };
   }
   return {
     shell: "bg-[linear-gradient(128deg,#fefbee_0%,#ffffff_100%)]",
     badge: "bg-amber-100 text-amber-700",
     accent: "text-amber-700",
+    border: "border-black/10",
   };
+}
+
+function isUserCreatedCanvasItem(item: CanvasItemViewModel) {
+  return item.created_by === "user" && !item.ai_generated;
+}
+
+function canvasItemDisplayTone(item: CanvasItemViewModel) {
+  if (isUserCreatedCanvasItem(item)) {
+    return {
+      shell: "bg-[linear-gradient(128deg,#fff4ec_0%,#ffffff_100%)]",
+      badge: "bg-[#fff1e7] text-[#c2410c]",
+      accent: "text-[#c2410c]",
+      border: "border-[#f97316]/35",
+    };
+  }
+
+  return canvasItemTone((item.kind as ComposerTool) || "note");
 }
 
 const CANVAS_ITEM_NODE_WIDTH = 320;
@@ -2527,9 +2547,13 @@ function isCountableIdeationChildNode(item: CanvasItemViewModel) {
   return !item.ai_pending && Boolean(item.title.trim() || item.body.trim());
 }
 
+function isCanvasIdeaStackSource(item: CanvasItemViewModel) {
+  return !item.ai_pending && Boolean(item.title.trim() || item.body.trim());
+}
+
 function getCanvasIdeaCreateStackFallback(items: CanvasItemViewModel[]) {
   return items
-    .filter((item) => item.ai_generated && !item.ai_pending && Boolean(item.title.trim() || item.body.trim()))
+    .filter(isCanvasIdeaStackSource)
     .reduce((sum, item) => sum + getCanvasItemMergedSourceCount(item), 0);
 }
 
@@ -2917,7 +2941,7 @@ function makeCanvasItemNodeLabel(
   onToggleTopicCollapsed?: (itemId: string) => void,
   highlighted = false,
 ) {
-  const tone = canvasItemTone((item.kind as ComposerTool) || "note");
+  const tone = canvasItemDisplayTone(item);
   const keywords = (item.keywords || []).filter(Boolean);
   const pending = Boolean(item.ai_pending);
   const mergedSourceCount = getCanvasItemMergedSourceCount(item);
@@ -2926,7 +2950,7 @@ function makeCanvasItemNodeLabel(
   const title = pending ? "AI 정리 중" : item.title || "내용 상세보기";
   const body = pending ? "" : cleanCanvasNodeBodyText(item.body);
   const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
-  const borderClass = selected ? "border-black" : "border-black/10";
+  const borderClass = selected ? "border-black" : tone.border;
   const displayKeywords = pending ? [] : keywords.length > 0 ? keywords : ["키워드", "키워드", "키워드"];
 
   return (
@@ -3004,7 +3028,7 @@ function makeIdeationDetailClusterNodeLabel(
   onCommitInlineEdit?: (itemId: string, title: string, body: string) => void,
   onCancelInlineEdit?: () => void,
 ) {
-  const tone = canvasItemTone((item.kind as ComposerTool) || "note");
+  const tone = canvasItemDisplayTone(item);
   const keywords = (item.keywords || []).filter(Boolean).slice(0, 4);
   const pending = Boolean(item.ai_pending);
   const title = pending ? "AI 정리 중" : item.title || "내용 상세보기";
@@ -3015,7 +3039,7 @@ function makeIdeationDetailClusterNodeLabel(
   const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fff3ed_0%,#ffffff_100%)]" : tone.shell;
   const borderClass = selected
     ? "border-black shadow-[0_16px_34px_rgba(15,23,42,0.16)]"
-    : "border-black/10 shadow-[0_10px_28px_rgba(15,23,42,0.08)]";
+    : `${tone.border} shadow-[0_10px_28px_rgba(15,23,42,0.08)]`;
   const isEditingInline = typeof editingTitle === "string" && !pending;
 
   return (
@@ -3221,11 +3245,20 @@ function makeIdeationGroupNodeLabel(
   const body = item.ai_pending ? "하위 내용을 정리하는 중" : cleanCanvasNodeBodyText(item.body);
   const childPreview = childItems.slice(0, 3);
   const status = normalizeCanvasItemStatus(item.status);
+  const userCreated = isUserCreatedCanvasItem(item);
+  const sourceTone = canvasItemDisplayTone(item);
   const borderClass = dropTarget
     ? "border-[#1b59f8] shadow-[0_0_0_4px_rgba(27,89,248,0.14),0_14px_30px_rgba(15,23,42,0.16)]"
     : selected
       ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]"
-      : "border-black/10";
+      : userCreated
+        ? sourceTone.border
+        : "border-black/10";
+  const backgroundClass = highlighted
+    ? "bg-[linear-gradient(128deg,#fff3ed_0%,#ffffff_100%)]"
+    : userCreated
+      ? sourceTone.shell
+      : "bg-white";
   const levelTone =
     depth === 0
       ? "bg-[#1b59f8] text-white"
@@ -3248,7 +3281,7 @@ function makeIdeationGroupNodeLabel(
 
   return (
     <div className="h-full min-w-0">
-      <div className={`nopan imms-canvas-node-drag-handle grid h-full cursor-grab grid-cols-[auto_1fr_auto] items-center gap-3 rounded-[12px] border bg-white px-3 py-3 font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition active:cursor-grabbing ${borderClass}`}>
+      <div className={`nopan imms-canvas-node-drag-handle grid h-full cursor-grab grid-cols-[auto_1fr_auto] items-center gap-3 rounded-[12px] border px-3 py-3 font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition active:cursor-grabbing ${backgroundClass} ${borderClass}`}>
         <div className="relative h-full shrink-0" style={{ width: IDEATION_LEFT_VISIBLE_MAX_DEPTH * IDEATION_LEFT_DEPTH_INDENT + 34 }}>
           {Array.from({ length: IDEATION_LEFT_VISIBLE_LEVELS }).map((_, index) => (
             <span
@@ -3398,11 +3431,11 @@ function makeIdeationEmptyDetailLabel(title: string, body: string) {
 }
 
 function makeIdeationDragGhostLabel(item: CanvasItemViewModel, dropLabel = "이동 중") {
-  const tone = canvasItemTone((item.kind as ComposerTool) || "note");
+  const tone = canvasItemDisplayTone(item);
   const body = cleanCanvasNodeBodyText(item.body);
 
   return (
-    <div className={`rounded-[18px] border px-4 py-3 shadow-[0_20px_48px_rgba(15,23,42,0.22)] backdrop-blur ${tone.shell} border-black/10`}>
+    <div className={`rounded-[18px] border px-4 py-3 shadow-[0_20px_48px_rgba(15,23,42,0.22)] backdrop-blur ${tone.shell} ${tone.border}`}>
       <div className="flex items-center justify-between gap-2">
         <span className="rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-semibold text-[#1b59f8]">
           {dropLabel}
@@ -9572,6 +9605,9 @@ export default function MeetingCanvasTab({
               item.status || "",
               item.title,
               item.body,
+              item.created_by || "",
+              item.ai_generated,
+              item.user_edited,
               item.ai_pending,
               activeFocusItem?.id === item.id,
               highlighted,
@@ -9647,6 +9683,9 @@ export default function MeetingCanvasTab({
                     item.status || "",
                     item.title,
                     item.body,
+                    item.created_by || "",
+                    item.ai_generated,
+                    item.user_edited,
                     ...(item.keywords || []),
                     item.agenda_id,
                     item.point_id,
@@ -9666,6 +9705,9 @@ export default function MeetingCanvasTab({
                       child.status || "",
                       child.title,
                       child.body,
+                      child.created_by || "",
+                      child.ai_generated,
+                      child.user_edited,
                       ...(child.keywords || []),
                     ]),
                   ]),
@@ -10108,6 +10150,9 @@ export default function MeetingCanvasTab({
                 item.status || "",
                 item.title,
                 item.body,
+                item.created_by || "",
+                item.ai_generated,
+                item.user_edited,
                 ...(item.keywords || []),
                 item.agenda_id,
                 item.point_id,

@@ -9330,7 +9330,6 @@ def _canvas_idea_visible_items(workspace: dict[str, Any]) -> list[dict[str, Any]
         for item in (workspace.get("canvas_items") or [])
         if isinstance(item, dict)
         and _safe_text(item.get("id"))
-        and bool(item.get("ai_generated"))
         and not bool(item.get("ai_pending"))
         and (_safe_text(item.get("title")) or _safe_text(item.get("body")))
     ]
