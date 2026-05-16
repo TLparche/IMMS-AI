@@ -162,6 +162,7 @@ type CanvasIdeaAssimilationJobSnapshot = {
   used_llm?: boolean;
   warning?: string;
   pending_item_id?: string;
+  resolved_node_id?: string;
   target_count?: number;
   target_signature?: string;
   job_type?: string;
@@ -236,6 +237,7 @@ function logCanvasIdeaAssimilationJob(
     staleReason: job?.stale_reason || "",
     retryable: Boolean(job?.retryable),
     pendingItemId: job?.pending_item_id || "",
+    resolvedNodeId: job?.resolved_node_id || "",
     targetCount: job?.target_count || 0,
     targetSignature: job?.target_signature || "",
     ok: Boolean(job?.ok),

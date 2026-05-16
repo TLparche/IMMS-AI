@@ -424,6 +424,18 @@ export interface CanvasOperationLogEntry {
   created_epoch?: number;
 }
 
+export interface CanvasNodeLineageRecord {
+  node_id: string;
+  current_node_id?: string;
+  status?: "active" | "merged" | "deleted" | string;
+  source_operation_id?: string;
+  source_node_ids?: string[];
+  created_at?: string;
+  created_epoch?: number;
+  updated_at?: string;
+  updated_epoch?: number;
+}
+
 export interface CanvasWorkspaceStateResponse {
   ok: boolean;
   meeting_id: string;
@@ -448,6 +460,7 @@ export interface CanvasWorkspaceStateResponse {
   idea_processed_utterance_ids?: string[];
   problem_processed_utterance_ids?: string[];
   operation_log?: CanvasOperationLogEntry[];
+  node_lineage?: Record<string, CanvasNodeLineageRecord>;
   imported_state?: MeetingState | null;
   saved_at?: string;
 }

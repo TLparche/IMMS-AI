@@ -42,6 +42,7 @@ REALTIME_MIN_SHIFT_SPAN = 6
 LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
 CANVAS_OPERATION_LOG_MAX = 400
+CANVAS_NODE_LINEAGE_MAX = 2000
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
 CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
@@ -414,6 +415,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
             if _safe_text(item)
         ][:1000],
         "operation_log": _normalize_canvas_operation_log(workspace.get("operation_log")),
+        "node_lineage": _normalize_canvas_node_lineage(workspace.get("node_lineage")),
         "imported_state": copy.deepcopy(workspace.get("imported_state"))
         if isinstance(workspace.get("imported_state"), dict)
         else None,
@@ -455,6 +457,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
             if _safe_text(item)
         ][:1000],
         "operation_log": _normalize_canvas_operation_log(shared_state.get("operation_log")),
+        "node_lineage": _normalize_canvas_node_lineage(shared_state.get("node_lineage")),
         "imported_state": copy.deepcopy(shared_state.get("imported_state"))
         if isinstance(shared_state.get("imported_state"), dict)
         else None,
@@ -488,6 +491,69 @@ def _safe_operation_epoch(raw: Any) -> float:
         return max(0.0, float(raw or 0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _normalize_canvas_node_lineage(
+    raw_lineage: Any,
+    limit: int = CANVAS_NODE_LINEAGE_MAX,
+) -> dict[str, dict[str, Any]]:
+    raw_records: list[tuple[str, Any]] = []
+    if isinstance(raw_lineage, dict):
+        raw_records = [(_safe_text(key), value) for key, value in raw_lineage.items()]
+    elif isinstance(raw_lineage, list):
+        raw_records = [("", value) for value in raw_lineage]
+
+    records: list[dict[str, Any]] = []
+    for fallback_node_id, raw_record in raw_records:
+        if isinstance(raw_record, dict):
+            node_id = _safe_text(raw_record.get("node_id") or fallback_node_id)
+            current_node_id = _safe_text(
+                raw_record.get("current_node_id") or raw_record.get("target_node_id")
+            )
+            status = _safe_text(raw_record.get("status"), "merged")
+            if status not in {"active", "merged", "deleted"}:
+                status = "merged" if current_node_id else "deleted"
+            source_operation_id = _safe_text(raw_record.get("source_operation_id"))
+            source_node_ids = _dedup_canvas_operation_ids(raw_record.get("source_node_ids"), limit=80)
+            created_at = _safe_text(raw_record.get("created_at"))[:40]
+            created_epoch = _safe_operation_epoch(raw_record.get("created_epoch"))
+            updated_at = _safe_text(raw_record.get("updated_at") or raw_record.get("created_at"))[:40]
+            updated_epoch = _safe_operation_epoch(
+                raw_record.get("updated_epoch") or raw_record.get("created_epoch")
+            )
+        else:
+            node_id = fallback_node_id
+            current_node_id = _safe_text(raw_record)
+            status = "merged" if current_node_id else "deleted"
+            source_operation_id = ""
+            source_node_ids = []
+            created_at = ""
+            created_epoch = 0.0
+            updated_at = ""
+            updated_epoch = 0.0
+
+        if not node_id:
+            continue
+        if status != "deleted" and not current_node_id:
+            continue
+        if current_node_id == node_id and status != "deleted":
+            continue
+        records.append(
+            {
+                "node_id": node_id[:160],
+                "current_node_id": current_node_id[:160],
+                "status": status,
+                "source_operation_id": source_operation_id[:120],
+                "source_node_ids": source_node_ids,
+                "created_at": created_at,
+                "created_epoch": created_epoch,
+                "updated_at": updated_at,
+                "updated_epoch": updated_epoch,
+            }
+        )
+
+    records = sorted(records, key=lambda item: _safe_operation_epoch(item.get("updated_epoch")))[-limit:]
+    return {record["node_id"]: record for record in records}
 
 
 def _normalize_canvas_operation_log(
@@ -553,6 +619,46 @@ def _canvas_operation_source_ids(item: dict[str, Any]) -> list[str]:
     )
 
 
+def _is_canvas_operation_topic_item(item: dict[str, Any] | None) -> bool:
+    return isinstance(item, dict) and _safe_text(item.get("kind"), "note") == "topic"
+
+
+def _canvas_operation_child_ids(workspace: dict[str, Any], topic_id: str) -> list[str]:
+    normalized_topic_id = _safe_text(topic_id)
+    if not normalized_topic_id:
+        return []
+    items_by_id = _canvas_operation_item_map(workspace)
+    topic = items_by_id.get(normalized_topic_id) or {}
+    explicit = _dedup_canvas_operation_ids(topic.get("child_item_ids"), limit=400)
+    derived = [
+        _safe_text(item.get("id"))
+        for item in items_by_id.values()
+        if _safe_text(item.get("parent_topic_id")) == normalized_topic_id and _safe_text(item.get("id"))
+    ]
+    return _dedup_canvas_operation_ids([*explicit, *derived], limit=400)
+
+
+def _canvas_operation_leaf_child_ids(workspace: dict[str, Any], topic_id: str) -> list[str]:
+    leaves: list[str] = []
+    items_by_id = _canvas_operation_item_map(workspace)
+    pending = list(_canvas_operation_child_ids(workspace, topic_id))
+    seen: set[str] = set()
+
+    while pending:
+        child_id = _safe_text(pending.pop(0))
+        if not child_id or child_id in seen:
+            continue
+        seen.add(child_id)
+        child = items_by_id.get(child_id)
+        if _is_canvas_operation_topic_item(child):
+            pending.extend(_canvas_operation_child_ids(workspace, child_id))
+            continue
+        if child:
+            leaves.append(child_id)
+
+    return _dedup_canvas_operation_ids(leaves, limit=400)
+
+
 def _canvas_operation_node_label(item: dict[str, Any] | None, fallback: str = "노드") -> str:
     if not isinstance(item, dict):
         return fallback
@@ -584,6 +690,197 @@ def _make_canvas_operation_entry(
     }
 
 
+def _canvas_lineage_current_id(lineage: dict[str, dict[str, Any]], node_id: str) -> str:
+    current_id = _safe_text(node_id)
+    visited: set[str] = set()
+    while current_id and current_id not in visited:
+        visited.add(current_id)
+        record = lineage.get(current_id)
+        if not isinstance(record, dict):
+            break
+        next_id = _safe_text(record.get("current_node_id"))
+        if not next_id or next_id == current_id:
+            break
+        current_id = next_id
+    return current_id
+
+
+def _record_canvas_node_lineage(
+    lineage: dict[str, dict[str, Any]],
+    node_id: str,
+    current_node_id: str,
+    status: str,
+    entry: dict[str, Any] | None = None,
+) -> None:
+    normalized_node_id = _safe_text(node_id)
+    normalized_current_id = _safe_text(current_node_id)
+    normalized_status = status if status in {"merged", "deleted"} else "merged"
+    if not normalized_node_id:
+        return
+    if normalized_status != "deleted" and not normalized_current_id:
+        return
+    if normalized_status != "deleted":
+        normalized_current_id = _canvas_lineage_current_id(lineage, normalized_current_id)
+    if normalized_status != "deleted" and normalized_node_id == normalized_current_id:
+        return
+
+    entry = entry or {}
+    existing = lineage.get(normalized_node_id) if isinstance(lineage.get(normalized_node_id), dict) else {}
+    created_at = _safe_text((existing or {}).get("created_at") or entry.get("created_at") or _utc_iso_now())[:40]
+    created_epoch = _safe_operation_epoch(
+        (existing or {}).get("created_epoch") or entry.get("created_epoch") or time.time()
+    )
+    updated_at = _safe_text(entry.get("created_at") or _utc_iso_now())[:40]
+    updated_epoch = _safe_operation_epoch(entry.get("created_epoch") or time.time())
+    source_node_ids = _dedup_canvas_operation_ids(
+        [
+            *((existing or {}).get("source_node_ids") or []),
+            *(entry.get("source_node_ids") or []),
+            normalized_node_id,
+        ],
+        limit=80,
+    )
+    lineage[normalized_node_id] = {
+        "node_id": normalized_node_id,
+        "current_node_id": normalized_current_id,
+        "status": normalized_status,
+        "source_operation_id": _safe_text(entry.get("operation_id")),
+        "source_node_ids": source_node_ids,
+        "created_at": created_at,
+        "created_epoch": created_epoch,
+        "updated_at": updated_at,
+        "updated_epoch": updated_epoch,
+    }
+
+    for alias_id, record in list(lineage.items()):
+        if alias_id == normalized_node_id or not isinstance(record, dict):
+            continue
+        if _safe_text(record.get("current_node_id")) != normalized_node_id:
+            continue
+        _record_canvas_node_lineage(
+            lineage,
+            alias_id,
+            normalized_current_id,
+            normalized_status,
+            entry,
+        )
+
+
+def _append_canvas_node_lineage_from_change(
+    previous_workspace: dict[str, Any],
+    next_workspace: dict[str, Any],
+    entries: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    lineage = _normalize_canvas_node_lineage(
+        next_workspace.get("node_lineage") or (previous_workspace or {}).get("node_lineage")
+    )
+    previous_items_by_id = _canvas_operation_item_map(previous_workspace)
+    next_items_by_id = _canvas_operation_item_map(next_workspace)
+    previous_ids = set(previous_items_by_id.keys())
+    next_ids = set(next_items_by_id.keys())
+    removed_ids = previous_ids - next_ids
+
+    for active_id in next_ids:
+        active_record = lineage.get(active_id)
+        if isinstance(active_record, dict) and not _safe_text(active_record.get("current_node_id")):
+            lineage.pop(active_id, None)
+
+    for entry in entries:
+        operation_type = _safe_text(entry.get("operation_type"))
+        target_id = _safe_text(entry.get("target_node_id"))
+        if operation_type not in {"node_merged", "node_compacted"} or not target_id:
+            continue
+
+        target_item = next_items_by_id.get(target_id)
+        target_source_ids = set(_dedup_canvas_operation_ids(entry.get("source_node_ids"), limit=400))
+        if _is_canvas_operation_topic_item(target_item):
+            target_source_ids.update(_canvas_operation_leaf_child_ids(next_workspace, target_id))
+
+        for source_id in list(target_source_ids):
+            if source_id in removed_ids:
+                _record_canvas_node_lineage(lineage, source_id, target_id, "merged", entry)
+
+        for removed_id in sorted(removed_ids):
+            if removed_id in lineage:
+                continue
+            removed_item = previous_items_by_id.get(removed_id)
+            if not _is_canvas_operation_topic_item(removed_item):
+                continue
+            removed_leaf_ids = set(_canvas_operation_leaf_child_ids(previous_workspace, removed_id))
+            if not removed_leaf_ids or not target_source_ids:
+                continue
+            if removed_leaf_ids.issubset(target_source_ids):
+                _record_canvas_node_lineage(lineage, removed_id, target_id, "merged", entry)
+
+    for entry in entries:
+        if _safe_text(entry.get("operation_type")) != "node_deleted":
+            continue
+        for source_id in _dedup_canvas_operation_ids(entry.get("source_node_ids"), limit=80):
+            if source_id in next_ids or source_id in lineage:
+                continue
+            _record_canvas_node_lineage(lineage, source_id, "", "deleted", entry)
+
+    return _normalize_canvas_node_lineage(lineage)
+
+
+def _resolve_canvas_node_lineage(workspace: dict[str, Any], node_id: str) -> dict[str, Any]:
+    normalized_node_id = _safe_text(node_id)
+    items_by_id = _canvas_operation_item_map(workspace)
+    if not normalized_node_id:
+        return {"node_id": "", "current_node_id": "", "status": "missing", "exists": False}
+    if normalized_node_id in items_by_id:
+        return {
+            "node_id": normalized_node_id,
+            "current_node_id": normalized_node_id,
+            "status": "active",
+            "exists": True,
+        }
+
+    lineage = _normalize_canvas_node_lineage(workspace.get("node_lineage"))
+    record = lineage.get(normalized_node_id)
+    if not record:
+        return {
+            "node_id": normalized_node_id,
+            "current_node_id": "",
+            "status": "missing",
+            "exists": False,
+        }
+
+    current_id = _canvas_lineage_current_id(lineage, normalized_node_id)
+    status = _safe_text(record.get("status"), "merged")
+    return {
+        "node_id": normalized_node_id,
+        "current_node_id": current_id,
+        "status": status,
+        "exists": bool(current_id and current_id in items_by_id),
+        "record": copy.deepcopy(record),
+    }
+
+
+def _canvas_missing_topic_summary_state(workspace: dict[str, Any], topic_id: str) -> dict[str, str]:
+    resolution = _resolve_canvas_node_lineage(workspace, topic_id)
+    current_id = _safe_text(resolution.get("current_node_id"))
+    if current_id and current_id != _safe_text(topic_id):
+        target_item = _canvas_operation_item_map(workspace).get(current_id)
+        label = _canvas_operation_node_label(target_item, current_id)
+        return {
+            "detail": f'정리 대상 topic이 "{label}" 노드로 병합되어 이전 AI 정리 결과를 적용하지 않았습니다.',
+            "stale_reason": "absorbed",
+            "resolved_node_id": current_id,
+        }
+    if _safe_text(resolution.get("status")) == "deleted":
+        return {
+            "detail": "정리 대상 topic이 삭제되어 이전 AI 정리 결과를 적용하지 않았습니다.",
+            "stale_reason": "deleted",
+            "resolved_node_id": "",
+        }
+    return {
+        "detail": "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+        "stale_reason": "obsolete",
+        "resolved_node_id": "",
+    }
+
+
 def _append_canvas_operation_log_from_change(
     previous_workspace: dict[str, Any],
     next_workspace: dict[str, Any],
@@ -595,9 +892,13 @@ def _append_canvas_operation_log_from_change(
     existing_log = _normalize_canvas_operation_log(
         workspace.get("operation_log") or (previous_workspace or {}).get("operation_log")
     )
+    existing_lineage = _normalize_canvas_node_lineage(
+        workspace.get("node_lineage") or (previous_workspace or {}).get("node_lineage")
+    )
 
     if not previous_items_by_id:
         workspace["operation_log"] = existing_log
+        workspace["node_lineage"] = existing_lineage
         return workspace
 
     previous_ids = set(previous_items_by_id.keys())
@@ -617,6 +918,21 @@ def _append_canvas_operation_log_from_change(
         label = _canvas_operation_node_label(item)
         is_topic = _safe_text(item.get("kind"), "note") == "topic"
         is_ai_created = bool(item.get("ai_generated")) or _safe_text(item.get("created_by")) == "ai"
+        absorbed_removed_topic_ids: list[str] = []
+        if is_topic and effective_source_ids:
+            source_id_set = set(effective_source_ids)
+            for removed_id in sorted(removed_ids):
+                removed_item = previous_items_by_id.get(removed_id)
+                if not _is_canvas_operation_topic_item(removed_item):
+                    continue
+                removed_leaf_ids = set(_canvas_operation_leaf_child_ids(previous_workspace, removed_id))
+                if removed_leaf_ids and removed_leaf_ids.issubset(source_id_set):
+                    absorbed_removed_topic_ids.append(removed_id)
+                    covered_removed_ids.add(removed_id)
+        operation_source_ids = _dedup_canvas_operation_ids(
+            [*effective_source_ids, *absorbed_removed_topic_ids],
+            limit=120,
+        )
 
         if is_topic and len(effective_source_ids) >= 2:
             entries.append(
@@ -625,10 +941,10 @@ def _append_canvas_operation_log_from_change(
                     source,
                     f'"{label}" 노드가 {len(effective_source_ids)}개 원본을 묶었습니다.',
                     target_node_id=item_id,
-                    source_node_ids=effective_source_ids,
+                    source_node_ids=operation_source_ids,
                 )
             )
-            for source_id in effective_source_ids:
+            for source_id in operation_source_ids:
                 merge_targets_by_source[source_id] = item_id
                 if source_id in removed_ids:
                     covered_removed_ids.add(source_id)
@@ -649,6 +965,19 @@ def _append_canvas_operation_log_from_change(
         previous_sources = set(_canvas_operation_source_ids(previous_item))
         next_sources = _canvas_operation_source_ids(next_item)
         added_sources = [source_id for source_id in next_sources if source_id not in previous_sources]
+        if _is_canvas_operation_topic_item(next_item) and next_sources:
+            next_source_set = set(next_sources)
+            for removed_id in sorted(removed_ids):
+                if removed_id in covered_removed_ids:
+                    continue
+                removed_item = previous_items_by_id.get(removed_id)
+                if not _is_canvas_operation_topic_item(removed_item):
+                    continue
+                removed_leaf_ids = set(_canvas_operation_leaf_child_ids(previous_workspace, removed_id))
+                if removed_leaf_ids and removed_leaf_ids.issubset(next_source_set):
+                    added_sources.append(removed_id)
+                    covered_removed_ids.add(removed_id)
+        added_sources = _dedup_canvas_operation_ids(added_sources, limit=120)
         if not added_sources:
             continue
         label = _canvas_operation_node_label(next_item)
@@ -702,6 +1031,11 @@ def _append_canvas_operation_log_from_change(
     if entries:
         existing_log = [*existing_log, *entries[:80]]
     workspace["operation_log"] = _normalize_canvas_operation_log(existing_log)
+    workspace["node_lineage"] = _append_canvas_node_lineage_from_change(
+        previous_workspace,
+        workspace,
+        entries,
+    )
     return workspace
 
 
@@ -1216,6 +1550,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
             if _safe_text(item)
         ][:1000],
         "operation_log": _normalize_canvas_operation_log(source.get("operation_log")),
+        "node_lineage": _normalize_canvas_node_lineage(source.get("node_lineage")),
         "imported_state": copy.deepcopy(source.get("imported_state"))
         if isinstance(source.get("imported_state"), dict)
         else None,
@@ -1254,6 +1589,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
             if _safe_text(item)
         ][:1000],
         "operation_log": _normalize_canvas_operation_log(workspace.get("operation_log")),
+        "node_lineage": _normalize_canvas_node_lineage(workspace.get("node_lineage")),
         "imported_state": copy.deepcopy(workspace.get("imported_state"))
         if isinstance(workspace.get("imported_state"), dict)
         else None,
@@ -1467,6 +1803,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     workspace.setdefault("idea_processed_utterance_ids", [])
     workspace.setdefault("problem_processed_utterance_ids", [])
     workspace.setdefault("operation_log", [])
+    workspace.setdefault("node_lineage", {})
     workspace.setdefault("imported_state", None)
     workspace.setdefault("saved_at", "")
     workspace.setdefault("llm_cache", {})
@@ -7487,6 +7824,7 @@ def _finish_stale_canvas_topic_summary_job(
     status: str = "stale_obsolete",
     stale_reason: str = "obsolete",
     retryable: bool = False,
+    resolved_node_id: str = "",
 ) -> None:
     latest_workspace = _clone_runtime_workspace_state(
         meeting_id,
@@ -7514,6 +7852,7 @@ def _finish_stale_canvas_topic_summary_job(
         used_llm=False,
         warning="",
         pending_item_id=topic_id,
+        resolved_node_id=_safe_text(resolved_node_id),
     )
 
 
@@ -7531,6 +7870,7 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
         "pending_item_id": _safe_text(job.get("pending_item_id")),
+        "resolved_node_id": _safe_text(job.get("resolved_node_id")),
         "target_count": int(job.get("target_count") or 0),
         "created_at": _safe_text(job.get("created_at")),
         "updated_at": _safe_text(job.get("updated_at")),
@@ -8427,11 +8767,14 @@ def _finalize_canvas_topic_summary_workspace_job(
         ]
         topic = next((item for item in source_canvas_items if _safe_text(item.get("id")) == topic_id), None)
         if not topic or not _is_canvas_topic_item(topic):
+            missing_state = _canvas_missing_topic_summary_state(source_workspace, topic_id)
             _finish_stale_canvas_topic_summary_job(
                 meeting_id,
                 job_id,
                 topic_id,
-                "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+                _safe_text(missing_state.get("detail")),
+                stale_reason=_safe_text(missing_state.get("stale_reason"), "obsolete"),
+                resolved_node_id=_safe_text(missing_state.get("resolved_node_id")),
             )
             return
 
@@ -8479,11 +8822,14 @@ def _finalize_canvas_topic_summary_workspace_job(
         ]
         latest_topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_id), None)
         if not latest_topic or not _is_canvas_topic_item(latest_topic):
+            missing_state = _canvas_missing_topic_summary_state(latest_workspace, topic_id)
             _finish_stale_canvas_topic_summary_job(
                 meeting_id,
                 job_id,
                 topic_id,
-                "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+                _safe_text(missing_state.get("detail")),
+                stale_reason=_safe_text(missing_state.get("stale_reason"), "obsolete"),
+                resolved_node_id=_safe_text(missing_state.get("resolved_node_id")),
             )
             return
 
@@ -9297,16 +9643,18 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
     ]
     topic = next((item for item in canvas_items if _safe_text(item.get("id")) == topic_item_id), None)
     if not topic or not _is_canvas_topic_item(topic):
+        missing_state = _canvas_missing_topic_summary_state(workspace, topic_item_id)
         job = {
             "job_id": "",
             "meeting_id": normalized_meeting_id,
             "job_type": "topic_summary",
             "scope_key": topic_item_id,
             "status": "stale_obsolete",
-            "stale_reason": "obsolete",
+            "stale_reason": _safe_text(missing_state.get("stale_reason"), "obsolete"),
             "retryable": False,
-            "detail": "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
+            "detail": _safe_text(missing_state.get("detail")),
             "pending_item_id": topic_item_id,
+            "resolved_node_id": _safe_text(missing_state.get("resolved_node_id")),
             "updated_at": _now_ts(),
         }
         return _canvas_idea_job_response(job, workspace)
