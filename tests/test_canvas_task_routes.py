@@ -5,7 +5,12 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from backend.api import _append_canvas_operation_log_from_change, app
+from backend.api import (
+    _append_canvas_operation_log_from_change,
+    _canvas_activity_events_from_new_operations,
+    _canvas_activity_line_from_activity_events,
+    app,
+)
 
 
 LOCAL_HEADERS = {"x-real-ip": "127.0.0.1"}
@@ -210,6 +215,13 @@ class CanvasTaskRouteSmokeTest(unittest.TestCase):
 
         summaries = [entry["summary"] for entry in result["operation_log"]]
         self.assertIn('"A 아이디어"와 "B 아이디어"를 "C 토픽"에 병합', summaries)
+
+        events = _canvas_activity_events_from_new_operations(result, set())
+        self.assertEqual(events[0]["summary"], '"A 아이디어"와 "B 아이디어"를 "C 토픽"에 병합')
+        self.assertEqual(
+            _canvas_activity_line_from_activity_events(events, "fallback"),
+            '"A 아이디어"와 "B 아이디어"를 "C 토픽"에 병합',
+        )
 
 
 if __name__ == "__main__":

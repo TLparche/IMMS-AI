@@ -726,12 +726,40 @@ def _canvas_activity_line_from_new_operations(
     fallback: str,
     limit: int = 2,
 ) -> str:
-    lines = [
-        _safe_text(entry.get("summary"))
+    return _canvas_activity_line_from_activity_events(
+        _canvas_activity_events_from_new_operations(workspace, previous_operation_ids),
+        fallback,
+        limit=limit,
+    )
+
+
+def _canvas_activity_events_from_new_operations(
+    workspace: dict[str, Any],
+    previous_operation_ids: set[str],
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    events = [
+        {
+            "operation_id": _safe_text(entry.get("operation_id")),
+            "operation_type": _safe_text(entry.get("operation_type")),
+            "summary": _safe_text(entry.get("summary")),
+            "target_node_id": _safe_text(entry.get("target_node_id")),
+            "source_node_ids": _dedup_canvas_operation_ids(entry.get("source_node_ids"), limit=80),
+            "created_at": _safe_text(entry.get("created_at")),
+        }
         for entry in _normalize_canvas_operation_log(workspace.get("operation_log"))
         if _safe_text(entry.get("operation_id")) not in previous_operation_ids
         and _safe_text(entry.get("summary"))
     ]
+    return events[:limit]
+
+
+def _canvas_activity_line_from_activity_events(
+    events: list[dict[str, Any]],
+    fallback: str,
+    limit: int = 2,
+) -> str:
+    lines = [_safe_text(event.get("summary")) for event in events if _safe_text(event.get("summary"))]
     if not lines:
         return fallback
     selected = lines[:limit]
@@ -2099,6 +2127,30 @@ def _mark_canvas_task_record(
         return _upsert_canvas_task_record_locked(rt, meeting_id, task_id, **fields)
 
 
+def _normalize_canvas_task_activity_events(raw_events: Any, limit: int = 12) -> list[dict[str, Any]]:
+    if not isinstance(raw_events, list):
+        return []
+
+    events: list[dict[str, Any]] = []
+    for raw_event in raw_events[:limit]:
+        if not isinstance(raw_event, dict):
+            continue
+        summary = _safe_text(raw_event.get("summary"))
+        if not summary:
+            continue
+        events.append(
+            {
+                "operation_id": _safe_text(raw_event.get("operation_id"))[:120],
+                "operation_type": _safe_text(raw_event.get("operation_type"))[:80],
+                "summary": summary[:240],
+                "target_node_id": _safe_text(raw_event.get("target_node_id"))[:160],
+                "source_node_ids": _dedup_canvas_operation_ids(raw_event.get("source_node_ids"), limit=80),
+                "created_at": _safe_text(raw_event.get("created_at"))[:40],
+            }
+        )
+    return events
+
+
 def _canvas_task_record_response(record: dict[str, Any]) -> dict[str, Any]:
     task_type = _safe_text(record.get("task_type"), "generic")
     policy_fields = _canvas_task_job_fields(task_type)
@@ -2119,6 +2171,7 @@ def _canvas_task_record_response(record: dict[str, Any]) -> dict[str, Any]:
             int(record.get("target_count") or 0),
             _safe_text(record.get("stale_reason")),
         ),
+        "activity_events": _normalize_canvas_task_activity_events(record.get("activity_events")),
         "stale_reason": _safe_text(record.get("stale_reason")),
         "retryable": bool(record.get("retryable")),
         "detail": _safe_text(record.get("detail")),
@@ -2170,6 +2223,7 @@ def _canvas_task_job_summary(job: dict[str, Any], source: str = "") -> dict[str,
             int(job.get("target_count") or 0),
             _safe_text(job.get("stale_reason")),
         ),
+        "activity_events": _normalize_canvas_task_activity_events(job.get("activity_events")),
         "stale_reason": _safe_text(job.get("stale_reason")),
         "retryable": bool(job.get("retryable")),
         "detail": _safe_text(job.get("detail")),
@@ -8771,6 +8825,7 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
             int(job.get("target_count") or 0),
             _safe_text(job.get("stale_reason")),
         ),
+        "activity_events": _normalize_canvas_task_activity_events(job.get("activity_events")),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -8860,6 +8915,7 @@ def _canvas_problem_job_response(job: dict[str, Any], workspace: dict[str, Any] 
             int(job.get("target_count") or 0),
             _safe_text(job.get("stale_reason")),
         ),
+        "activity_events": _normalize_canvas_task_activity_events(job.get("activity_events")),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -10694,16 +10750,14 @@ def _finalize_canvas_idea_workspace_job(
         if merged_child_count > 0:
             activity_parts.append(f"유사 아이디어 {merged_child_count}건 병합")
         activity_line = " · ".join(activity_parts) if activity_parts else "새 발화 확인"
-        activity_line = _canvas_activity_line_from_new_operations(
-            latest_workspace,
-            previous_operation_ids,
-            activity_line,
-        )
+        activity_events = _canvas_activity_events_from_new_operations(latest_workspace, previous_operation_ids)
+        activity_line = _canvas_activity_line_from_activity_events(activity_events, activity_line)
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
             status="completed",
             activity_line=activity_line,
+            activity_events=activity_events,
             detail=detail,
             workspace=copy.deepcopy(latest_workspace),
             used_llm=bool(result.get("used_llm")),

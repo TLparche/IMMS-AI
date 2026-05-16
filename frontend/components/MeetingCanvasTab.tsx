@@ -932,6 +932,10 @@ function aiTaskActivityLine(task: AiTaskRecord) {
   return task.activity_line || task.detail || aiTaskLabel(task.task_type);
 }
 
+function aiTaskActivityEvents(task: AiTaskRecord) {
+  return (task.activity_events || []).filter((event) => event.summary).slice(0, 6);
+}
+
 function KeyboardDoubleArrowDownIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -12838,6 +12842,7 @@ export default function MeetingCanvasTab({
                   {latestTasks.map((task) => {
                     const taskKey = task.task_id || `${task.task_type}-${task.updated_at}`;
                     const expanded = Boolean(expandedAiTaskIds[taskKey]);
+                    const activityEvents = aiTaskActivityEvents(task);
                     return (
                       <button
                         key={taskKey}
@@ -12860,6 +12865,16 @@ export default function MeetingCanvasTab({
                         </span>
                         {expanded ? (
                           <span className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                            {activityEvents.length > 0 ? (
+                              <span className="basis-full rounded-[8px] bg-slate-50 px-2 py-2">
+                                <span className="block text-[11px] font-semibold text-slate-500">변경 내역</span>
+                                {activityEvents.map((event) => (
+                                  <span key={event.operation_id || event.summary} className="mt-1 block leading-5 text-slate-700">
+                                    {event.summary}
+                                  </span>
+                                ))}
+                              </span>
+                            ) : null}
                             {task.detail ? <span className="basis-full leading-5 text-slate-600">{task.detail}</span> : null}
                             {task.scope_key ? <span className="inline-block max-w-[10rem] truncate rounded-full bg-slate-100 px-2 py-0.5">{task.scope_key}</span> : null}
                             {task.queue_name ? <span className="rounded-full bg-slate-100 px-2 py-0.5">{task.queue_name}</span> : null}

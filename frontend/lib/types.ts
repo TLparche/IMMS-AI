@@ -51,6 +51,14 @@ export interface AiTaskRecord extends AiTaskPolicy {
   status: string;
   activity_type?: string;
   activity_line?: string;
+  activity_events?: Array<{
+    operation_id?: string;
+    operation_type?: string;
+    summary?: string;
+    target_node_id?: string;
+    source_node_ids?: string[];
+    created_at?: string;
+  }>;
   stale_reason?: string;
   retryable?: boolean;
   detail?: string;
