@@ -2127,6 +2127,10 @@ def _mark_canvas_task_record(
         return _upsert_canvas_task_record_locked(rt, meeting_id, task_id, **fields)
 
 
+class _CanvasTaskSuperseded(Exception):
+    pass
+
+
 def _is_active_canvas_task_status(status: str) -> bool:
     return _safe_text(status) in {"queued", "processing"}
 
@@ -2236,6 +2240,51 @@ def _has_newer_canvas_task_scope_record(
             if float(record.get("created_epoch") or 0) > current_epoch:
                 return True
     return False
+
+
+def _canvas_task_stale_response(
+    rt: "RuntimeStore",
+    meeting_id: str,
+    task_id: str,
+    task_type: str,
+    cache_key: str,
+    task_meta: dict[str, Any],
+    stale_detail: str,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = _canvas_task_policy(task_type)
+    stale_record = _mark_canvas_task_record(
+        rt,
+        meeting_id,
+        task_id,
+        status="stale_superseded",
+        stale_reason="superseded",
+        retryable=False,
+        activity_type=_canvas_task_activity_type(policy.task_type),
+        detail=stale_detail,
+        warning=stale_detail,
+        cache_hit=bool(task_meta.get("cache_hit")),
+        deduped=bool(task_meta.get("deduped")),
+    )
+    base_result = result if isinstance(result, dict) else {}
+    return {
+        "ok": True,
+        "used_llm": False,
+        "generated_at": _now_ts(),
+        **base_result,
+        **_canvas_task_job_fields(policy.task_type),
+        "task_id": _safe_text(task_id),
+        "cache_key": _safe_text(cache_key),
+        "cache_hit": bool(task_meta.get("cache_hit")),
+        "deduped": bool(task_meta.get("deduped")),
+        "status": "stale_superseded",
+        "stale_reason": "superseded",
+        "retryable": False,
+        "activity_type": _canvas_task_activity_type(policy.task_type),
+        "activity_line": _safe_text(stale_record.get("activity_line")),
+        "warning": stale_detail,
+        "detail": stale_detail,
+    }
 
 
 def _normalize_canvas_task_activity_events(raw_events: Any, limit: int = 12) -> list[dict[str, Any]]:
@@ -2437,9 +2486,25 @@ def _run_canvas_task_cached_request(
         input_signature,
     )
     task_meta: dict[str, Any] = {}
+
+    def raise_if_superseded() -> None:
+        if _has_newer_canvas_task_scope_record(
+            rt,
+            normalized_meeting_id,
+            task_id,
+            policy.task_type,
+            normalized_scope_key,
+            input_signature,
+        ):
+            raise _CanvasTaskSuperseded()
+
+    def guarded_compute() -> dict[str, Any]:
+        raise_if_superseded()
+        return compute()
+
     try:
         if policy.cache_policy == "none":
-            result = compute()
+            result = guarded_compute()
             task_meta["cache_hit"] = False
         else:
             result = _run_canvas_llm_cached_request(
@@ -2447,10 +2512,20 @@ def _run_canvas_task_cached_request(
                 normalized_meeting_id,
                 cache_key,
                 normalized_signature,
-                compute,
+                guarded_compute,
                 task_type=policy.task_type,
                 task_meta=task_meta,
             )
+    except _CanvasTaskSuperseded:
+        return _canvas_task_stale_response(
+            rt,
+            normalized_meeting_id,
+            task_id,
+            policy.task_type,
+            cache_key,
+            task_meta,
+            "더 최신 AI 요청으로 대체되어 LLM 호출을 생략했습니다.",
+        )
     except Exception as exc:
         _mark_canvas_task_record(
             rt,
@@ -2470,37 +2545,16 @@ def _run_canvas_task_cached_request(
         normalized_scope_key,
         input_signature,
     ):
-        stale_detail = "더 최신 AI 요청으로 대체되어 결과를 적용하지 않았습니다."
-        stale_record = _mark_canvas_task_record(
+        return _canvas_task_stale_response(
             rt,
             normalized_meeting_id,
             task_id,
-            status="stale_superseded",
-            stale_reason="superseded",
-            retryable=False,
-            activity_type=_canvas_task_activity_type(policy.task_type),
-            detail=stale_detail,
-            warning=stale_detail,
-            cache_hit=bool(task_meta.get("cache_hit")),
-            deduped=bool(task_meta.get("deduped")),
+            policy.task_type,
+            cache_key,
+            task_meta,
+            "더 최신 AI 요청으로 대체되어 결과를 적용하지 않았습니다.",
+            result if isinstance(result, dict) else None,
         )
-        if isinstance(result, dict):
-            return {
-                **result,
-                **_canvas_task_job_fields(policy.task_type),
-                "task_id": task_id,
-                "cache_key": cache_key,
-                "cache_hit": bool(task_meta.get("cache_hit")),
-                "deduped": bool(task_meta.get("deduped")),
-                "status": "stale_superseded",
-                "stale_reason": "superseded",
-                "retryable": False,
-                "activity_type": _canvas_task_activity_type(policy.task_type),
-                "activity_line": _safe_text(stale_record.get("activity_line")),
-                "warning": stale_detail,
-                "detail": stale_detail,
-            }
-        return result
 
     completed_record = _mark_canvas_task_record(
         rt,

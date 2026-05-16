@@ -284,6 +284,7 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 - topic summary LLM 결과는 `update_topic_summary` patch로 변환한 뒤 현재 workspace에 적용
 - patch 적용 직전에 target/signature를 다시 확인하고, `auto_summary_disabled`가 켜진 노드이면 제목/본문/키워드를 덮어쓰지 않음
 - 사용자가 만든 노드도 기본적으로 자동요약 대상이며, 노드 패널에서 `자동요약 방지`를 켠 경우에만 보호
+- cached request 작업은 LLM 호출 직전에도 같은 scope의 최신 작업 여부를 다시 확인해 이미 superseded 된 작업이면 LLM 호출 자체를 생략
 
 현재 상태는 "늦은 응답이 workspace를 망가뜨리지 않게 하면서, 이후 retry queue가 판단할 수 있는 상태값을 남기는 안전장치"에 가깝다.
 

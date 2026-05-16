@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import threading
+import time
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -10,6 +11,7 @@ from backend.api import (
     _append_canvas_operation_log_from_change,
     _canvas_activity_events_from_new_operations,
     _canvas_activity_line_from_activity_events,
+    _canvas_task_lock,
     _finish_canvas_llm_inflight_entry_locked,
     _has_newer_canvas_task_scope_record,
     _mark_canvas_task_record,
@@ -323,6 +325,78 @@ class CanvasTaskRouteSmokeTest(unittest.TestCase):
         self.assertEqual(response["stale_reason"], "superseded")
         self.assertFalse(response["retryable"])
         self.assertIn("적용하지 않았습니다", response["warning"])
+
+    def test_superseded_task_skips_compute_before_llm_call(self) -> None:
+        rt = RuntimeStore()
+        meeting_id = f"skip-compute-{uuid4().hex}"
+        scope_key = "problem_definition:agenda-1"
+        request_lock = _canvas_task_lock(rt, "problem.definition", "request")
+        request_lock.acquire()
+        compute_called = False
+        response_holder: dict[str, dict] = {}
+        error_holder: dict[str, BaseException] = {}
+
+        def compute() -> dict:
+            nonlocal compute_called
+            compute_called = True
+            return {"ok": True, "used_llm": True, "generated_at": "now", "groups": []}
+
+        def run_request() -> None:
+            try:
+                response_holder["response"] = _run_canvas_task_cached_request(
+                    rt,
+                    "problem.definition",
+                    meeting_id,
+                    scope_key,
+                    "old-signature",
+                    compute,
+                )
+            except BaseException as exc:
+                error_holder["error"] = exc
+
+        worker = threading.Thread(target=run_request, daemon=True)
+        worker.start()
+        try:
+            old_task_id = ""
+            old_created_epoch = 0.0
+            for _ in range(100):
+                with rt.lock:
+                    records = rt.canvas_task_records_by_meeting.get(meeting_id) or {}
+                    old_task_id, old_record = next(iter(records.items()), ("", {}))
+                    old_created_epoch = float((old_record or {}).get("created_epoch") or 0)
+                if old_task_id:
+                    break
+                time.sleep(0.01)
+
+            self.assertTrue(old_task_id)
+            _mark_canvas_task_record(
+                rt,
+                meeting_id,
+                "new-task",
+                task_type="problem.definition",
+                scope_key=scope_key,
+                status="processing",
+                target_signature="new-signature",
+                created_epoch=old_created_epoch + 1.0,
+            )
+            _supersede_older_canvas_task_scope_records(
+                rt,
+                meeting_id,
+                "new-task",
+                "problem.definition",
+                scope_key,
+                "new-signature",
+            )
+        finally:
+            request_lock.release()
+
+        worker.join(timeout=2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", error_holder)
+        self.assertFalse(compute_called)
+        self.assertEqual(response_holder["response"]["status"], "stale_superseded")
+        self.assertIn("LLM 호출을 생략", response_holder["response"]["warning"])
 
     def test_operation_log_summarizes_node_names_for_merge(self) -> None:
         previous_workspace = {
