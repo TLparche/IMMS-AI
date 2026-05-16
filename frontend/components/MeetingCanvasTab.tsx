@@ -2287,18 +2287,24 @@ const CANVAS_IDEATION_FRAME_Y = 0;
 const CANVAS_IDEATION_LEFT_WIDTH = 360;
 const CANVAS_IDEATION_RIGHT_WIDTH = 820;
 const CANVAS_IDEATION_HEADER_HEIGHT = 92;
-const CANVAS_IDEATION_DETAIL_GAP_X = 28;
-const CANVAS_IDEATION_DETAIL_GAP_Y = 24;
 const IDEATION_LEFT_VISIBLE_LEVELS = 3;
 const IDEATION_LEFT_VISIBLE_MAX_DEPTH = IDEATION_LEFT_VISIBLE_LEVELS - 1;
+const IDEATION_RIGHT_VISIBLE_LEVELS = 2;
+const IDEATION_RIGHT_VISIBLE_MAX_DEPTH = IDEATION_RIGHT_VISIBLE_LEVELS - 1;
 const IDEATION_LEFT_GROUP_NODE_HEIGHT = 82;
 const IDEATION_LEFT_GROUP_GAP_Y = 8;
 const IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y = 26;
 const IDEATION_LEFT_NODE_HEIGHT = 96;
 const IDEATION_LEFT_ROOT_NODE_HEIGHT = 108;
-const IDEATION_LEFT_NODE_GAP_Y = 10;
-const IDEATION_LEFT_CHILD_SECTION_GAP_Y = 26;
+const IDEATION_LEFT_ROOT_GAP_Y = 30;
+const IDEATION_LEFT_PARENT_CHILD_GAP_Y = 8;
+const IDEATION_LEFT_CHILD_NODE_GAP_Y = 8;
+const IDEATION_LEFT_BRANCH_GAP_Y = 14;
 const IDEATION_LEFT_DEPTH_INDENT = 22;
+const IDEATION_LEFT_NODE_INDENT_X = 18;
+const IDEATION_RIGHT_CHILD_GAP_X = 36;
+const IDEATION_RIGHT_PARENT_GAP_Y = 34;
+const IDEATION_RIGHT_CHILD_GAP_Y = 16;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
@@ -2489,6 +2495,37 @@ function getCanvasItemVisibleHierarchyItems(
   sortByOriginalOrder(items.filter((item) => item.agenda_id === agendaId && !item.parent_topic_id))
     .forEach((item) => visit(item, 0));
 
+  return visibleItems;
+}
+
+function getCanvasItemVisibleDescendantHierarchyItems(
+  items: CanvasItemViewModel[],
+  rootItemId: string,
+  maxDepth = 1,
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const originalOrder = new Map(items.map((item, index) => [item.id, index]));
+  const visibleItems: Array<{ item: CanvasItemViewModel; depth: number; parentId: string }> = [];
+  const visited = new Set<string>();
+
+  const visitChildren = (parentId: string, depth: number) => {
+    if (depth > maxDepth) return;
+
+    getTopicDirectChildIds(items, parentId)
+      .map((childId) => itemById.get(childId))
+      .filter((child): child is CanvasItemViewModel => Boolean(child))
+      .sort((left, right) => (originalOrder.get(left.id) || 0) - (originalOrder.get(right.id) || 0))
+      .forEach((child) => {
+        if (visited.has(child.id)) return;
+        visited.add(child.id);
+        visibleItems.push({ item: child, depth, parentId });
+        if (isTopicCanvasItem(child)) {
+          visitChildren(child.id, depth + 1);
+        }
+      });
+  };
+
+  visitChildren(rootItemId, 0);
   return visibleItems;
 }
 
@@ -8643,7 +8680,7 @@ export default function MeetingCanvasTab({
         kind: "agenda" as const,
         agenda,
       }));
-      const leftItemEntries = [...rootHierarchyItems, ...expandedHierarchyItems].map(({ item, depth }) => ({
+      const leftItemEntries = hierarchyItems.map(({ item, depth }) => ({
         kind: "item" as const,
         item,
         depth,
@@ -8659,9 +8696,17 @@ export default function MeetingCanvasTab({
       const descendantIdsByItem = new Map(
         hierarchyItems.map(({ item }) => [item.id, getCanvasItemDescendantIds(canvasItems, item.id)] as const),
       );
-      const activeDirectChildItems = activeFocusItem
-        ? getCanvasItemDirectChildItems(rightCanvasItems, activeFocusItem.id)
+      const rightDetailEntries = activeFocusItem
+        ? getCanvasItemVisibleDescendantHierarchyItems(
+            rightCanvasItems,
+            activeFocusItem.id,
+            IDEATION_RIGHT_VISIBLE_MAX_DEPTH,
+          )
         : [];
+      const activeDirectChildItems = rightDetailEntries
+        .filter(({ depth }) => depth === 0)
+        .map(({ item }) => item);
+      const activeNestedChildCount = rightDetailEntries.length - activeDirectChildItems.length;
       const selectedAgendaModel = agendaModels.find((agenda) => agenda.id === selectedAgendaForIdeation) || agendaModels[0] || null;
       const leftHeights = leftLayoutEntries.map((entry) =>
         entry.kind === "agenda"
@@ -8680,36 +8725,102 @@ export default function MeetingCanvasTab({
             nextLeftY += IDEATION_LEFT_GROUP_GAP_Y;
           } else if (currentEntry?.kind === "item" && previousEntry?.kind === "agenda") {
             nextLeftY += IDEATION_LEFT_GROUP_TO_ITEMS_GAP_Y;
-          } else if (currentEntry?.kind === "item" && currentEntry.depth > 0 && previousEntry?.kind === "item" && previousEntry.depth === 0) {
-            nextLeftY += IDEATION_LEFT_CHILD_SECTION_GAP_Y;
+          } else if (currentEntry?.kind === "item" && previousEntry?.kind === "item") {
+            if (currentEntry.depth === 0) {
+              nextLeftY += IDEATION_LEFT_ROOT_GAP_Y;
+            } else if (currentEntry.depth > previousEntry.depth) {
+              nextLeftY += IDEATION_LEFT_PARENT_CHILD_GAP_Y;
+            } else if (currentEntry.depth === previousEntry.depth) {
+              nextLeftY += IDEATION_LEFT_CHILD_NODE_GAP_Y;
+            } else {
+              nextLeftY += IDEATION_LEFT_BRANCH_GAP_Y;
+            }
           } else {
-            nextLeftY += IDEATION_LEFT_NODE_GAP_Y;
+            nextLeftY += IDEATION_LEFT_CHILD_NODE_GAP_Y;
           }
         }
         leftPositions.push({
-          x: CANVAS_IDEATION_LEFT_X + 20,
+          x:
+            CANVAS_IDEATION_LEFT_X +
+            20 +
+            (currentEntry?.kind === "item" ? currentEntry.depth * IDEATION_LEFT_NODE_INDENT_X : 0),
           y: nextLeftY,
         });
         nextLeftY += height;
       });
 
-      const rightUsesEmptyDetail = !activeFocusItem;
-      const rightItemHeights = rightUsesEmptyDetail
-        ? [180]
-        : activeDirectChildItems.map((item) => rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item));
-      const rightPositions = buildGridPositions(
-        rightItemHeights,
-        CANVAS_ITEM_NODE_WIDTH + CANVAS_IDEATION_DETAIL_GAP_X,
-        CANVAS_IDEATION_DETAIL_GAP_Y,
-        CANVAS_IDEATION_RIGHT_X + 28,
-        CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT,
+      const rightUsesEmptyDetail = rightDetailEntries.length === 0;
+      const rightDetailHeightsById = new Map(
+        rightDetailEntries.map(({ item }) => [
+          item.id,
+          rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item),
+        ] as const),
       );
+      const rightPositionsById = new Map<string, { x: number; y: number }>();
+      const rightChildEntriesByParentId = new Map<string, typeof rightDetailEntries>();
+      rightDetailEntries
+        .filter(({ depth }) => depth > 0)
+        .forEach((entry) => {
+          const entries = rightChildEntriesByParentId.get(entry.parentId) || [];
+          entries.push(entry);
+          rightChildEntriesByParentId.set(entry.parentId, entries);
+        });
+
+      const rightBaseX = CANVAS_IDEATION_RIGHT_X + 28;
+      const rightBaseY = CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT;
+      let nextRightY = rightBaseY;
+      rightDetailEntries
+        .filter(({ depth }) => depth === 0)
+        .forEach((entry, index) => {
+          if (index > 0) {
+            nextRightY += IDEATION_RIGHT_PARENT_GAP_Y;
+          }
+
+          const parentHeight = rightDetailHeightsById.get(entry.item.id) || estimateCanvasItemNodeHeight(entry.item);
+          rightPositionsById.set(entry.item.id, {
+            x: rightBaseX,
+            y: nextRightY,
+          });
+
+          const childEntries = rightChildEntriesByParentId.get(entry.item.id) || [];
+          let childY = nextRightY;
+          let previousChildHeight = 0;
+          let childStackHeight = 0;
+          childEntries.forEach((childEntry, childIndex) => {
+            if (childIndex > 0) {
+              childY += previousChildHeight + IDEATION_RIGHT_CHILD_GAP_Y;
+            }
+
+            const childHeight = rightDetailHeightsById.get(childEntry.item.id) || estimateCanvasItemNodeHeight(childEntry.item);
+            rightPositionsById.set(childEntry.item.id, {
+              x: rightBaseX + CANVAS_ITEM_NODE_WIDTH + IDEATION_RIGHT_CHILD_GAP_X,
+              y: childY,
+            });
+            childStackHeight = Math.max(childStackHeight, childY - nextRightY + childHeight);
+            previousChildHeight = childHeight;
+          });
+
+          nextRightY += Math.max(parentHeight, childStackHeight);
+        });
+
+      const rightPositions = rightUsesEmptyDetail
+        ? [
+            {
+              x: CANVAS_IDEATION_RIGHT_X + 110,
+              y: CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 60,
+            },
+          ]
+        : rightDetailEntries.map(({ item }) => rightPositionsById.get(item.id) || { x: rightBaseX, y: rightBaseY });
       const leftBottom = leftPositions.reduce(
         (maxBottom, position, index) => Math.max(maxBottom, position.y + (leftHeights[index] || 0)),
         CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 180,
       );
       const rightBottom = rightPositions.reduce(
-        (maxBottom, position, index) => Math.max(maxBottom, position.y + (rightItemHeights[index] || 0)),
+        (maxBottom, position, index) => {
+          const item = rightDetailEntries[index]?.item;
+          const height = item ? rightDetailHeightsById.get(item.id) || estimateCanvasItemNodeHeight(item) : 180;
+          return Math.max(maxBottom, position.y + height);
+        },
         CANVAS_IDEATION_FRAME_Y + CANVAS_IDEATION_HEADER_HEIGHT + 220,
       );
       const frameHeight = Math.max(640, leftBottom, rightBottom) - CANVAS_IDEATION_FRAME_Y + 56;
@@ -8762,14 +8873,21 @@ export default function MeetingCanvasTab({
               activeFocusItem?.id || "empty-detail",
               rightUsesEmptyDetail,
               activeDirectChildItems.length,
+              activeNestedChildCount,
               frameHeight,
             ]),
             label: makeIdeationFrameLabel(
               "Detail Canvas",
-              rightUsesEmptyDetail
+              !activeFocusItem
                 ? "왼쪽 그룹분류에서 1차 노드를 선택하면 상세 내용이 표시됩니다."
-                : `${activeFocusItem?.title || "선택 노드"}의 직계 하위 내용만 표시합니다.`,
-              rightUsesEmptyDetail ? `${selectedAgendaRootCount}개 1차 노드` : `${activeDirectChildItems.length}개`,
+                : activeDirectChildItems.length > 0
+                  ? `${activeFocusItem.title || "선택 노드"}의 하위 구조를 2단계까지 표시합니다.`
+                  : `${activeFocusItem.title || "선택 노드"}에는 아직 하위 내용이 없습니다.`,
+              !activeFocusItem
+                ? `${selectedAgendaRootCount}개 1차 노드`
+                : activeNestedChildCount > 0
+                  ? `직계 ${activeDirectChildItems.length}개 · 하위 ${activeNestedChildCount}개`
+                  : `직계 ${activeDirectChildItems.length}개`,
             ),
           },
         },
@@ -8849,7 +8967,7 @@ export default function MeetingCanvasTab({
           targetPosition: Position.Left,
           className: "nopan imms-canvas-node-drag-handle !border-0 !bg-transparent !p-0 !shadow-none",
           style: {
-            width: CANVAS_IDEATION_LEFT_WIDTH - 40,
+            width: CANVAS_IDEATION_LEFT_WIDTH - 40 - depth * IDEATION_LEFT_NODE_INDENT_X,
             height: leftHeights[layoutIndex],
             background: "transparent",
             border: "none",
@@ -8895,12 +9013,12 @@ export default function MeetingCanvasTab({
           },
         };
       });
-      const rightDetailDescriptors: CanvasNodeDescriptor[] = activeDirectChildItems.length > 0
-          ? activeDirectChildItems.map((item, index) => {
+      const rightDetailDescriptors: CanvasNodeDescriptor[] = rightDetailEntries.length > 0
+          ? rightDetailEntries.map(({ item, depth: relativeDepth, parentId }, index) => {
               const nodeId = `canvas-item-${item.id}`;
               const linkedAgendaTitle =
                 agendaModels.find((agenda) => agenda.id === item.agenda_id)?.title || "";
-              const itemHeight = rightCanvasItemHeights.get(item.id) || estimateCanvasItemNodeHeight(item);
+              const itemHeight = rightDetailHeightsById.get(item.id) || estimateCanvasItemNodeHeight(item);
               const depth = getCanvasItemDepth(rightCanvasItems, item.id);
 
               return {
@@ -8937,7 +9055,9 @@ export default function MeetingCanvasTab({
                     item.agenda_id,
                     item.point_id,
                     item.parent_topic_id || "",
+                    parentId,
                     depth,
+                    relativeDepth,
                     selectedCanvasItemId === item.id,
                     Boolean(pendingIdeationFocusUpdate),
                     ...(item.child_item_ids || []),
@@ -13281,9 +13401,13 @@ export default function MeetingCanvasTab({
       )
         .map(({ item }) => item.id),
     );
-    const directChildIds = new Set(
+    const rightVisibleIds = new Set(
       visibleRootItemForIdeationCanvas
-        ? getCanvasItemDirectChildItems(visibleIdeationRightCanvasItems, visibleRootItemForIdeationCanvas.id).map((item) => item.id)
+        ? getCanvasItemVisibleDescendantHierarchyItems(
+            visibleIdeationRightCanvasItems,
+            visibleRootItemForIdeationCanvas.id,
+            IDEATION_RIGHT_VISIBLE_MAX_DEPTH,
+          ).map(({ item }) => item.id)
         : [],
     );
 
@@ -13316,14 +13440,14 @@ export default function MeetingCanvasTab({
           return true;
         }
 
-        return Boolean(targetItem.parent_topic_id && directChildIds.has(targetItem.id));
+        return Boolean(targetItem.parent_topic_id && rightVisibleIds.has(targetItem.id));
       }
 
       const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
       const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
       if (visibleRootItemForIdeationCanvas) {
         return canvasItemId
-          ? directChildIds.has(canvasItemId) && paneRole === "ideation-right"
+          ? rightVisibleIds.has(canvasItemId) && paneRole === "ideation-right"
           : node.id === "ideation-empty-detail";
       }
       return node.id === "ideation-empty-detail";
