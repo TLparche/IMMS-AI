@@ -4562,26 +4562,30 @@ export default function MeetingCanvasTab({
 
     const normalized = normalizeTranscriptRows(transcripts).filter((row) => row.canvas_stage === stage);
     const recentRows = normalized.slice(-3);
-    const rows = recentRows.length
-      ? recentRows
-      : liveSpeechPreview
-      ? [{ speaker: liveSpeechPreview.speaker, text: liveSpeechPreview.text, timestamp: liveSpeechPreview.timestamp }]
-      : [];
+    const hasIncomingSpeech = recentRows.length > 0 || Boolean(liveSpeechPreview?.text) || isRecording;
 
-    if (rows.length === 0) {
+    if (hasIncomingSpeech) {
+      const latestTimestamp = recentRows.at(-1)?.timestamp || liveSpeechPreview?.timestamp || "";
       return [
-        { speaker: "STT", text: "녹음을 시작하면 현재 발언이 표시됩니다.", timestamp: "" },
-        { speaker: "AI", text: "발언은 2줄 이내로 요약되어 canvas와 함께 보입니다.", timestamp: "" },
-        { speaker: "Canvas", text: "안건과 메모를 같은 화면에서 정리합니다.", timestamp: "" },
+        {
+          speaker: "STT",
+          text: liveSpeechPreview?.text ? "STT 수신 중..." : "STT 수신 대기 중...",
+          timestamp: liveSpeechPreview?.timestamp || latestTimestamp,
+        },
+        {
+          speaker: "AI 요약",
+          text: recentRows.length >= 3 ? "요약 생성 중..." : "발화 3개 단위로 요약 준비 중...",
+          timestamp: latestTimestamp,
+        },
       ];
     }
 
-    return rows.map((row) => ({
-      speaker: row.speaker || "알 수 없음",
-      text: row.text || "발언 내용 없음",
-      timestamp: row.timestamp || "",
-    }));
-  }, [liveSpeechPreview, sttFlowSummaries, stage, transcripts]);
+    return [
+      { speaker: "STT", text: "녹음을 시작하면 현재 발언이 표시됩니다.", timestamp: "" },
+      { speaker: "AI", text: "발언은 2줄 이내로 요약되어 canvas와 함께 보입니다.", timestamp: "" },
+      { speaker: "Canvas", text: "안건과 메모를 같은 화면에서 정리합니다.", timestamp: "" },
+    ];
+  }, [isRecording, liveSpeechPreview, sttFlowSummaries, stage, transcripts]);
 
   useEffect(() => {
     if (!selectedAgendaId && agendaModels[0]) {
