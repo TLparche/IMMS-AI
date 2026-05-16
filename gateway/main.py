@@ -15,6 +15,7 @@ IP_WHITELIST = parse_ip_whitelist(settings.ip_whitelist)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.cors_origin_regex or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,6 +30,9 @@ app.include_router(reports.router, prefix="/gateway/reports", tags=["reports"])
 
 @app.middleware("http")
 async def enforce_ip_whitelist(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     client_ip = extract_client_ip(request.headers, request.client.host if request.client else None)
     if not is_ip_allowed(client_ip, IP_WHITELIST):
         return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
