@@ -19,6 +19,7 @@ import {
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type ReactNode } from "react";
 import {
+  getAiTasks,
   getCanvasWorkspaceState,
   getCanvasPersonalNotes,
   confirmCanvasPlacement,
@@ -40,6 +41,7 @@ import {
 import type {
   AgendaActionItemDetail,
   AgendaDecisionDetail,
+  AiTaskRecord,
   CanvasCustomGroup,
   CanvasFinalSolutionSummary,
   CanvasLocalState,
@@ -805,6 +807,83 @@ function stageLabel(stage: CanvasStage) {
 
 function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
+}
+
+const ACTIVE_AI_TASK_STATUSES = new Set(["processing", "queued"]);
+const FAILED_AI_TASK_STATUSES = new Set(["error", "error_retryable", "error_final"]);
+const STALE_AI_TASK_STATUSES = new Set(["stale_superseded", "stale_obsolete", "stale_rebasable"]);
+
+function aiTaskLabel(taskType?: string) {
+  switch (taskType) {
+    case "ideation.assimilate":
+      return "아이디어 정리";
+    case "ideation.assimilate_preview":
+      return "아이디어 미리보기";
+    case "ideation.topic_summary":
+      return "토픽 요약";
+    case "ideation.topic_clustering":
+      return "토픽 분류";
+    case "ideation.recommend":
+      return "아이디어 추천";
+    case "problem.discussion":
+      return "문제 의견 정리";
+    case "problem.definition":
+      return "문제정의 생성";
+    case "problem.conclusion":
+      return "문제 결론";
+    case "meeting.goal":
+      return "회의 목표";
+    case "solution.stage":
+      return "해결책 생성";
+    default:
+      return taskType || "AI 작업";
+  }
+}
+
+function aiTaskStatusLabel(status?: string) {
+  switch (status) {
+    case "processing":
+      return "진행 중";
+    case "queued":
+      return "대기";
+    case "completed":
+      return "완료";
+    case "idle":
+      return "대기";
+    case "missing":
+      return "없음";
+    case "stale_superseded":
+      return "대체됨";
+    case "stale_obsolete":
+      return "종료됨";
+    case "stale_rebasable":
+      return "재시도 가능";
+    case "error_retryable":
+      return "재시도 가능";
+    case "error_final":
+    case "error":
+      return "실패";
+    default:
+      return status || "상태 없음";
+  }
+}
+
+function aiTaskStatusClassName(status?: string) {
+  if (ACTIVE_AI_TASK_STATUSES.has(status || "")) return "border-blue-100 bg-blue-50 text-blue-700";
+  if (FAILED_AI_TASK_STATUSES.has(status || "")) return "border-rose-100 bg-rose-50 text-rose-700";
+  if (STALE_AI_TASK_STATUSES.has(status || "")) return "border-amber-100 bg-amber-50 text-amber-700";
+  if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  return "border-slate-200 bg-slate-50 text-slate-600";
+}
+
+function formatAiTaskTime(raw?: string) {
+  if (!raw) return "";
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toLocaleTimeString("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function KeyboardDoubleArrowDownIcon({ className = "" }: { className?: string }) {
@@ -4004,6 +4083,11 @@ export default function MeetingCanvasTab({
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
+  const [aiTaskPanelOpen, setAiTaskPanelOpen] = useState(false);
+  const [aiTasks, setAiTasks] = useState<AiTaskRecord[]>([]);
+  const [aiTaskQueues, setAiTaskQueues] = useState<Record<string, Record<string, number>>>({});
+  const [aiTaskLoading, setAiTaskLoading] = useState(false);
+  const [aiTaskError, setAiTaskError] = useState("");
   const [ideaCreateStack, setIdeaCreateStack] = useState(0);
   const [ideationSuggestionBusyRootId, setIdeationSuggestionBusyRootId] = useState("");
   const [ideationSuggestionCollapsedByRootId, setIdeationSuggestionCollapsedByRootId] = useState<Record<string, boolean>>({});
@@ -4109,6 +4193,80 @@ export default function MeetingCanvasTab({
   const pendingNodePlacementsRef = useRef<Record<string, { x: number; y: number }>>({});
   const hoveredProblemDropTargetElementRef = useRef<HTMLElement | null>(null);
   const agendaDragPreviewRef = useRef<AgendaDragPreviewState | null>(null);
+
+  const refreshAiTasks = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!meetingId) return;
+      if (!options?.silent) {
+        setAiTaskLoading(true);
+      }
+      try {
+        const result = await getAiTasks(meetingId);
+        setAiTasks((result.tasks || []).slice(0, 80));
+        setAiTaskQueues(result.queues || {});
+        setAiTaskError("");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAiTaskError(message);
+      } finally {
+        if (!options?.silent) {
+          setAiTaskLoading(false);
+        }
+      }
+    },
+    [meetingId],
+  );
+
+  useEffect(() => {
+    void refreshAiTasks({ silent: true });
+  }, [refreshAiTasks]);
+
+  const aiTaskActiveCount = useMemo(
+    () => aiTasks.filter((task) => ACTIVE_AI_TASK_STATUSES.has(task.status || "")).length,
+    [aiTasks],
+  );
+
+  const aiTaskQueueRows = useMemo(
+    () =>
+      Object.entries(aiTaskQueues)
+        .map(([queueName, counts]) => ({
+          queueName,
+          total: Object.values(counts || {}).reduce((sum, value) => sum + Number(value || 0), 0),
+          active: Number(counts?.processing || 0) + Number(counts?.queued || 0),
+          failed:
+            Number(counts?.error || 0) +
+            Number(counts?.error_retryable || 0) +
+            Number(counts?.error_final || 0),
+        }))
+        .filter((item) => item.total > 0)
+        .sort((left, right) => right.active - left.active || right.total - left.total)
+        .slice(0, 4),
+    [aiTaskQueues],
+  );
+
+  useEffect(() => {
+    if (!meetingId) return;
+    const shouldPoll =
+      aiTaskPanelOpen ||
+      aiTaskActiveCount > 0 ||
+      Boolean(ideaAssimilationStatus || problemDiscussionStatus || problemDefinitionStagePending || solutionStagePending);
+    if (!shouldPoll) return;
+
+    const interval = window.setInterval(() => {
+      void refreshAiTasks({ silent: true });
+    }, aiTaskPanelOpen ? 5000 : 8000);
+
+    return () => window.clearInterval(interval);
+  }, [
+    aiTaskActiveCount,
+    aiTaskPanelOpen,
+    ideaAssimilationStatus,
+    meetingId,
+    problemDefinitionStagePending,
+    problemDiscussionStatus,
+    refreshAiTasks,
+    solutionStagePending,
+  ]);
   const ideationDropPreviewRef = useRef<IdeationDropPreviewState | null>(null);
   const stableIdeationDragRef = useRef<StableIdeationDragState | null>(null);
   const problemIdeaDragRef = useRef<ProblemIdeaDragState | null>(null);
@@ -12471,6 +12629,111 @@ export default function MeetingCanvasTab({
     setAgendaDragPreview(nextPreview);
   };
 
+  const renderAiTaskPanel = () => {
+    const latestTasks = aiTasks.slice(0, 8);
+    const totalCount = aiTasks.length;
+
+    return (
+      <div className="pointer-events-auto absolute left-4 top-4 z-20 w-[min(22rem,calc(100%-2rem))]">
+        <button
+          type="button"
+          onClick={() => {
+            const nextOpen = !aiTaskPanelOpen;
+            setAiTaskPanelOpen(nextOpen);
+            if (nextOpen) {
+              void refreshAiTasks();
+            }
+          }}
+          className={`flex min-h-10 w-full items-center justify-between gap-3 rounded-[12px] border px-3 py-2 text-left text-sm shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)] backdrop-blur-sm transition ${
+            aiTaskPanelOpen
+              ? "border-black/10 bg-white text-black"
+              : aiTaskActiveCount > 0
+                ? "border-blue-100 bg-blue-50/95 text-blue-800"
+                : "border-black/10 bg-white/95 text-[#4d4d4d] hover:bg-white"
+          }`}
+          aria-expanded={aiTaskPanelOpen}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${aiTaskActiveCount > 0 ? "bg-blue-500" : "bg-slate-300"}`} />
+            <span className="truncate font-semibold">AI 진행</span>
+            {aiTaskActiveCount > 0 ? (
+              <span className="rounded-full bg-blue-600 px-2 py-0.5 text-xs font-semibold text-white">{aiTaskActiveCount}</span>
+            ) : null}
+          </span>
+          <span className="text-xs font-medium text-current/60">{aiTaskPanelOpen ? "접기" : "열기"}</span>
+        </button>
+
+        {aiTaskPanelOpen ? (
+          <div className="mt-2 max-h-[min(420px,56vh)] overflow-hidden rounded-[14px] border border-black/10 bg-white shadow-[0_18px_42px_rgba(15,23,42,0.12)]">
+            <div className="flex items-center justify-between gap-3 border-b border-black/10 px-4 py-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-900">AI 작업 기록</p>
+                <p className="mt-0.5 text-xs text-slate-500">최근 {totalCount}개 작업</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshAiTasks()}
+                disabled={aiTaskLoading}
+                className="shrink-0 rounded-[8px] bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {aiTaskLoading ? "확인 중" : "새로고침"}
+              </button>
+            </div>
+
+            <div className="max-h-[min(350px,48vh)] overflow-y-auto px-4 py-3">
+              {aiTaskError ? (
+                <div className="rounded-[10px] border border-rose-100 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700">
+                  {aiTaskError}
+                </div>
+              ) : null}
+
+              {aiTaskQueueRows.length > 0 ? (
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  {aiTaskQueueRows.map((queue) => (
+                    <div key={queue.queueName} className="rounded-[10px] bg-slate-50 px-3 py-2">
+                      <p className="truncate text-xs font-semibold text-slate-700">{queue.queueName}</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        진행 {queue.active} · 전체 {queue.total}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {latestTasks.length > 0 ? (
+                <div className="space-y-2">
+                  {latestTasks.map((task) => (
+                    <div key={task.task_id || `${task.task_type}-${task.updated_at}`} className="rounded-[10px] border border-slate-100 px-3 py-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-900">{aiTaskLabel(task.task_type)}</p>
+                          <p className="mt-0.5 line-clamp-1 text-xs text-slate-500">{task.detail || task.queue_name || "작업 기록"}</p>
+                        </div>
+                        <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${aiTaskStatusClassName(task.status)}`}>
+                          {aiTaskStatusLabel(task.status)}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                        {task.cache_hit ? <span>cache hit</span> : null}
+                        {task.deduped ? <span>dedupe</span> : null}
+                        {task.duration_ms ? <span>{Math.max(1, Math.round(task.duration_ms / 100) / 10)}초</span> : null}
+                        {formatAiTaskTime(task.updated_at) ? <span>{formatAiTaskTime(task.updated_at)}</span> : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-[10px] bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">
+                  아직 기록된 AI 작업이 없습니다.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
   const rightDrawerShowsDetailPanel = stage === "ideation";
   const rightDrawerExpandedWidth = `clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
@@ -14543,6 +14806,7 @@ export default function MeetingCanvasTab({
               }}
             >
               {renderCanvasFloatingStatusControls()}
+              {renderAiTaskPanel()}
               {stage === "ideation" ? (
                 <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]">
                   <div
