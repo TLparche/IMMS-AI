@@ -77,6 +77,7 @@ type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
 type CanvasTool = ComposerTool | "group" | "problem-idea";
 type ProblemCanvasToolbarAction = "group" | "problem-link" | "note" | "problem-idea" | "adopt";
+type IdeationCanvasToolbarPane = "ideation-left" | "ideation-right";
 type LeftPanelTab = "detail";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type CanvasItemStatus = "discussion" | "confirmed" | "closed";
@@ -1389,6 +1390,25 @@ function toolLabel(tool: CanvasTool, stage?: CanvasStage) {
   return "주제";
 }
 
+function ideationToolbarActionLabel(action: CanvasTool) {
+  if (action === "group") return "그룹 분류 추가";
+  if (action === "comment") return "댓글 추가";
+  return "아이디어 추가";
+}
+
+function ideationPlacementLabel(action: CanvasTool) {
+  if (action === "group") return "그룹 분류";
+  if (action === "comment") return "댓글";
+  if (action === "topic") return "아이디어";
+  return toolLabel(action, "ideation");
+}
+
+function isIdeationToolAllowedForPane(tool: CanvasTool, pane: IdeationCanvasToolbarPane | null) {
+  if (pane === "ideation-left") return tool === "group" || tool === "topic";
+  if (pane === "ideation-right") return tool === "topic" || tool === "comment";
+  return false;
+}
+
 function toolPreviewHint(tool: CanvasTool, stage?: CanvasStage) {
   if (stage === "problem-definition") {
     if (tool === "group") return "새 문제정의 그룹을 만들 위치";
@@ -1397,8 +1417,8 @@ function toolPreviewHint(tool: CanvasTool, stage?: CanvasStage) {
     return "문제 의견을 추가할 위치";
   }
   if (tool === "group") return "프로젝트 그룹을 만들 위치";
-  if (tool === "topic") return "새 주제를 만들 위치";
-  if (tool === "comment") return "코멘트를 남길 위치";
+  if (tool === "topic") return "새 아이디어를 만들 위치";
+  if (tool === "comment") return "댓글을 남길 위치";
   return "메모를 붙일 위치";
 }
 
@@ -4382,6 +4402,7 @@ export default function MeetingCanvasTab({
   const [stage, setStage] = useState<CanvasStage>("ideation");
   const [composerTool, setComposerTool] = useState<ComposerTool>("note");
   const [armedCanvasTool, setArmedCanvasTool] = useState<CanvasTool | null>(null);
+  const [armedIdeationToolbarPane, setArmedIdeationToolbarPane] = useState<IdeationCanvasToolbarPane | null>(null);
   const [composerAgendaId, setComposerAgendaId] = useState("");
   const [composerTitle, setComposerTitle] = useState("");
   const [composerBody, setComposerBody] = useState("");
@@ -4934,6 +4955,7 @@ export default function MeetingCanvasTab({
     setSolutionNoteFinalCommentDraft("");
     setSelectedProblemSourceNodeId("");
     setArmedCanvasTool(null);
+    setArmedIdeationToolbarPane(null);
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
     setProblemDiscussionStatus("");
@@ -10543,11 +10565,15 @@ export default function MeetingCanvasTab({
     () =>
       stage === "problem-definition"
         ? ["note", "problem-idea", "group"]
-        : ["note", "comment", "topic", "group"],
+        : stage === "ideation"
+          ? ["comment", "topic", "group"]
+          : [],
     [stage],
   );
   const problemLeftCanvasToolbarActions: ProblemCanvasToolbarAction[] = ["group", "problem-link"];
   const problemRightCanvasToolbarActions: ProblemCanvasToolbarAction[] = ["note", "problem-idea", "adopt"];
+  const ideationLeftCanvasToolbarActions: CanvasTool[] = ["group", "topic"];
+  const ideationRightCanvasToolbarActions: CanvasTool[] = ["topic", "comment"];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
     if (action === "group") return "문제정의 그룹 추가";
@@ -10563,48 +10589,72 @@ export default function MeetingCanvasTab({
     return armedCanvasTool === action;
   };
 
-  const armCanvasTool = (tool: CanvasTool) => {
+  const isIdeationToolbarActionActive = (action: CanvasTool, pane: IdeationCanvasToolbarPane) =>
+    stage === "ideation" && armedCanvasTool === action && armedIdeationToolbarPane === pane;
+
+  const armCanvasTool = (tool: CanvasTool, ideationPane?: IdeationCanvasToolbarPane) => {
     if (!canUseCanvasToolbar || !visibleCanvasTools.includes(tool)) {
       setActivityMessage("현재 단계에서는 이 도구를 사용할 수 없습니다.");
+      return;
+    }
+    const nextIdeationPane = stage === "ideation" ? ideationPane || null : null;
+    if (stage === "ideation" && !isIdeationToolAllowedForPane(tool, nextIdeationPane)) {
+      setActivityMessage("이 도구는 해당 캔버스에서 사용할 수 없습니다.");
       return;
     }
     setPendingProblemGroupLinkId("");
     if (isComposerTool(tool)) {
       setComposerTool(tool);
     }
-    const isDisarming = armedCanvasTool === tool;
+    const isDisarming = armedCanvasTool === tool && (stage !== "ideation" || armedIdeationToolbarPane === nextIdeationPane);
     setArmedCanvasTool(isDisarming ? null : tool);
+    setArmedIdeationToolbarPane(isDisarming ? null : nextIdeationPane);
     setCanvasPlacementPreview((prev) =>
       !prev || isDisarming
         ? null
         : {
             ...prev,
-            label: toolLabel(tool, stage),
+            label: stage === "ideation" ? ideationPlacementLabel(tool) : toolLabel(tool, stage),
             hint: toolPreviewHint(tool, stage),
             tone: toolPreviewTone(tool, stage),
           },
     );
-    setActivityMessage(
-      isDisarming
-        ? "보드 클릭 도구를 해제했습니다."
-        : stage === "problem-definition" && tool === "group"
-          ? "문제정의 그룹 도구를 선택했습니다. 보드를 클릭하면 새 문제정의 그룹이 생성됩니다."
-          : stage === "problem-definition" && tool === "problem-idea"
-            ? "아이디어 추가 도구를 선택했습니다. 문제정의 그룹을 클릭하면 아이디어 카드가 추가됩니다."
-          : stage === "ideation" && tool === "group"
-            ? "그룹 도구를 선택했습니다. 보드를 클릭하면 프로젝트 그룹 분류가 생성됩니다."
-            : stage === "problem-definition"
-              ? `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 문제정의 의견 노드가 생성됩니다.`
-              : `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
-    );
+    let nextActivityMessage = `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`;
+    if (isDisarming) {
+      nextActivityMessage = "보드 클릭 도구를 해제했습니다.";
+    } else if (stage === "ideation" && nextIdeationPane === "ideation-left" && tool === "group") {
+      nextActivityMessage = "왼쪽 캔버스에서 그룹 분류를 추가할 위치를 클릭해 주세요.";
+    } else if (stage === "ideation" && nextIdeationPane === "ideation-left" && tool === "topic") {
+      nextActivityMessage = "왼쪽 캔버스에서 선택된 그룹 분류의 1차 아이디어를 추가할 위치를 클릭해 주세요.";
+    } else if (stage === "ideation" && nextIdeationPane === "ideation-right" && tool === "topic") {
+      nextActivityMessage = "오른쪽 포커스 캔버스가 보여주는 노드의 자식 아이디어를 추가할 위치를 클릭해 주세요.";
+    } else if (stage === "ideation" && nextIdeationPane === "ideation-right" && tool === "comment") {
+      nextActivityMessage = "오른쪽 포커스 캔버스가 보여주는 노드에 댓글을 추가할 위치를 클릭해 주세요.";
+    } else if (stage === "problem-definition" && tool === "group") {
+      nextActivityMessage = "문제정의 그룹 도구를 선택했습니다. 보드를 클릭하면 새 문제정의 그룹이 생성됩니다.";
+    } else if (stage === "problem-definition" && tool === "problem-idea") {
+      nextActivityMessage = "아이디어 추가 도구를 선택했습니다. 문제정의 그룹을 클릭하면 아이디어 카드가 추가됩니다.";
+    } else if (stage === "problem-definition") {
+      nextActivityMessage = `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 문제정의 의견 노드가 생성됩니다.`;
+    }
+    setActivityMessage(nextActivityMessage);
   };
 
   useEffect(() => {
-    if (!canUseCanvasToolbar || !armedCanvasTool || !visibleCanvasTools.includes(armedCanvasTool)) {
+    const invalidIdeationTool =
+      stage === "ideation" &&
+      armedCanvasTool &&
+      !isIdeationToolAllowedForPane(armedCanvasTool, armedIdeationToolbarPane);
+    if (!canUseCanvasToolbar || !armedCanvasTool || !visibleCanvasTools.includes(armedCanvasTool) || invalidIdeationTool) {
       setArmedCanvasTool(null);
+      setArmedIdeationToolbarPane(null);
       setCanvasPlacementPreview(null);
+      return;
     }
-  }, [armedCanvasTool, canUseCanvasToolbar, visibleCanvasTools]);
+    if (stage !== "ideation" && armedIdeationToolbarPane) {
+      setArmedIdeationToolbarPane(null);
+    }
+  }, [armedCanvasTool, armedIdeationToolbarPane, canUseCanvasToolbar, stage, visibleCanvasTools]);
 
   useEffect(() => {
     if (stage !== "problem-definition") {
@@ -10619,12 +10669,14 @@ export default function MeetingCanvasTab({
         return;
       }
 
-      if (
-        stage === "ideation" &&
-        (armedCanvasTool === "note" || armedCanvasTool === "comment")
-      ) {
-        const rightPaneRect = getReactFlowCanvasRect(ideationRightPaneRef.current);
-        if (!pointInRect(clientX, clientY, rightPaneRect)) {
+      if (stage === "ideation") {
+        const targetPaneRect =
+          armedIdeationToolbarPane === "ideation-left"
+            ? getReactFlowCanvasRect(ideationLeftPaneRef.current)
+            : armedIdeationToolbarPane === "ideation-right"
+              ? getReactFlowCanvasRect(ideationRightPaneRef.current)
+              : null;
+        if (!targetPaneRect || !pointInRect(clientX, clientY, targetPaneRect)) {
           setCanvasPlacementPreview(null);
           return;
         }
@@ -10652,12 +10704,12 @@ export default function MeetingCanvasTab({
       setCanvasPlacementPreview({
         x,
         y,
-        label: toolLabel(armedCanvasTool, stage),
+        label: stage === "ideation" ? ideationPlacementLabel(armedCanvasTool) : toolLabel(armedCanvasTool, stage),
         hint: toolPreviewHint(armedCanvasTool, stage),
         tone: toolPreviewTone(armedCanvasTool, stage),
       });
     },
-    [armedCanvasTool, canUseCanvasToolbar, stage, visibleCanvasTools],
+    [armedCanvasTool, armedIdeationToolbarPane, canUseCanvasToolbar, stage, visibleCanvasTools],
   );
 
   const clearCanvasPlacementPreview = useCallback(() => {
@@ -10670,12 +10722,36 @@ export default function MeetingCanvasTab({
         return;
       }
 
-      if (stage === "ideation" && (tool === "note" || tool === "comment")) {
-        const rightPaneRect = getReactFlowCanvasRect(ideationRightPaneRef.current);
-        if (!pointInRect(clientX, clientY, rightPaneRect)) {
+      if (stage === "ideation") {
+        if (!isIdeationToolAllowedForPane(tool, armedIdeationToolbarPane)) {
           setArmedCanvasTool(null);
+          setArmedIdeationToolbarPane(null);
           setCanvasPlacementPreview(null);
-          setActivityMessage("메모와 댓글은 오른쪽 상세 캔버스에서 추가해 주세요.");
+          setActivityMessage("아이디어 단계에서는 왼쪽/오른쪽 캔버스의 도구바에서 도구를 선택해 주세요.");
+          return;
+        }
+
+        if (armedIdeationToolbarPane === "ideation-right" && pendingIdeationFocusUpdate) {
+          setArmedCanvasTool(null);
+          setArmedIdeationToolbarPane(null);
+          setCanvasPlacementPreview(null);
+          setActivityMessage("포커스 캔버스 업데이트를 먼저 반영해 주세요.");
+          return;
+        }
+
+        const targetPaneRect =
+          armedIdeationToolbarPane === "ideation-left"
+            ? getReactFlowCanvasRect(ideationLeftPaneRef.current)
+            : getReactFlowCanvasRect(ideationRightPaneRef.current);
+        if (!pointInRect(clientX, clientY, targetPaneRect)) {
+          setArmedCanvasTool(null);
+          setArmedIdeationToolbarPane(null);
+          setCanvasPlacementPreview(null);
+          setActivityMessage(
+            armedIdeationToolbarPane === "ideation-left"
+              ? "그룹 분류와 1차 아이디어는 왼쪽 캔버스에서 추가해 주세요."
+              : "하위 아이디어와 댓글은 오른쪽 포커스 캔버스에서 추가해 주세요.",
+          );
           return;
         }
       }
@@ -10689,6 +10765,7 @@ export default function MeetingCanvasTab({
               : null;
         if (targetPaneRect && !pointInRect(clientX, clientY, targetPaneRect)) {
           setArmedCanvasTool(null);
+          setArmedIdeationToolbarPane(null);
           setCanvasPlacementPreview(null);
           setActivityMessage(
             tool === "group"
@@ -10888,6 +10965,7 @@ export default function MeetingCanvasTab({
         };
 
         setArmedCanvasTool(null);
+        setArmedIdeationToolbarPane(null);
         setCanvasPlacementPreview(null);
         setProblemGroups(nextProblemGroupsSnapshot);
         setNodePositions(nextNodePositionsSnapshot);
@@ -10984,6 +11062,7 @@ export default function MeetingCanvasTab({
         };
 
         setArmedCanvasTool(null);
+        setArmedIdeationToolbarPane(null);
         setCanvasPlacementPreview(null);
         setCustomGroups(nextCustomGroupsSnapshot);
         setNodePositions(nextNodePositionsSnapshot);
@@ -11002,7 +11081,7 @@ export default function MeetingCanvasTab({
           id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
           x: uiX,
           y: uiY,
-          label: toolLabel(tool),
+          label: stage === "ideation" ? ideationPlacementLabel(tool) : toolLabel(tool),
         });
         if (placementFeedbackTimerRef.current) {
           window.clearTimeout(placementFeedbackTimerRef.current);
@@ -11071,20 +11150,19 @@ export default function MeetingCanvasTab({
       const clickedCanvasItem = clickedCanvasItemId
         ? canvasItems.find((item) => item.id === clickedCanvasItemId) || null
         : null;
-      const selectedRootItemId = selectedCanvasItemId
-        ? getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId)
-        : "";
-      const selectedRootItem = selectedRootItemId
-        ? canvasItems.find((item) => item.id === selectedRootItemId) || null
+      const rightFocusItemId = ideationFocusItemId || selectedCanvasItemId;
+      const rightFocusItem = rightFocusItemId
+        ? canvasItems.find((item) => item.id === rightFocusItemId) || null
         : null;
       const parentItemForPlacement =
-        stage === "ideation" && tool !== "topic"
-          ? clickedCanvasItem || selectedRootItem
+        stage === "ideation" && armedIdeationToolbarPane === "ideation-right"
+          ? rightFocusItem
           : null;
 
-      if (stage === "ideation" && tool !== "topic" && !parentItemForPlacement) {
-        setActivityMessage("먼저 왼쪽 그룹을 선택한 뒤 오른쪽 캔버스에 메모나 댓글을 추가해 주세요.");
+      if (stage === "ideation" && armedIdeationToolbarPane === "ideation-right" && !parentItemForPlacement) {
+        setActivityMessage("먼저 왼쪽 캔버스에서 포커스로 볼 노드를 선택해 주세요.");
         setArmedCanvasTool(null);
+        setArmedIdeationToolbarPane(null);
         setCanvasPlacementPreview(null);
         return;
       }
@@ -11092,18 +11170,21 @@ export default function MeetingCanvasTab({
       const nextAgendaId =
         agendaId ||
         parentItemForPlacement?.agenda_id ||
+        clickedCanvasItem?.agenda_id ||
         selectedAgendaId ||
         agendaModels[0]?.id ||
         "";
       const nextParentItemId = parentItemForPlacement?.id || "";
-      const draftTitle = `${toolLabel(tool)} ${canvasItems.filter((item) => item.kind === tool).length + 1}`;
+      const draftTitle = stage === "ideation" && tool === "topic"
+        ? `아이디어 ${canvasItems.filter((item) => item.kind === tool).length + 1}`
+        : `${toolLabel(tool)} ${canvasItems.filter((item) => item.kind === tool).length + 1}`;
       const nextItemId = `item-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
       const nextNodeId = `canvas-item-${nextItemId}`;
       const draftBody =
         tool === "topic"
-          ? "새 주제를 정리해 주세요."
+          ? "새 아이디어를 정리해 주세요."
           : tool === "comment"
-            ? "코멘트 내용을 입력해 주세요."
+            ? "댓글 내용을 입력해 주세요."
             : "메모 내용을 입력해 주세요.";
       const nextItem: CanvasItemViewModel = {
         id: nextItemId,
@@ -11153,9 +11234,15 @@ export default function MeetingCanvasTab({
       }
       setComposerTool(tool);
       setArmedCanvasTool(null);
+      setArmedIdeationToolbarPane(null);
       setCanvasPlacementPreview(null);
       setCanvasItems(nextCanvasItemsSnapshot);
       setSelectedCanvasItemId(nextItemId);
+      if (stage === "ideation" && armedIdeationToolbarPane === "ideation-left" && tool === "topic") {
+        setIdeationFocusItemId(nextItemId);
+      } else if (stage === "ideation" && armedIdeationToolbarPane === "ideation-right" && parentItemForPlacement) {
+        setIdeationFocusItemId(parentItemForPlacement.id);
+      }
       setSelectedNodeId(nextNodeId);
       setEditingCanvasItemId(nextItemId);
       setCanvasItemDraftTitle(nextItem.title);
@@ -11165,7 +11252,7 @@ export default function MeetingCanvasTab({
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         x: uiX,
         y: uiY,
-        label: toolLabel(tool),
+        label: stage === "ideation" ? ideationPlacementLabel(tool) : toolLabel(tool),
       });
       if (placementFeedbackTimerRef.current) {
         window.clearTimeout(placementFeedbackTimerRef.current);
@@ -11175,7 +11262,13 @@ export default function MeetingCanvasTab({
         placementFeedbackTimerRef.current = null;
       }, 1500);
 
-      setActivityMessage("보드 위치에 공용 canvas 아이템을 생성했습니다.");
+      setActivityMessage(
+        stage === "ideation" && armedIdeationToolbarPane === "ideation-left"
+          ? "선택된 그룹 분류 아래에 1차 아이디어를 추가했습니다."
+          : stage === "ideation" && armedIdeationToolbarPane === "ideation-right"
+            ? `${parentItemForPlacement?.title || "포커스 노드"} 아래에 ${ideationPlacementLabel(tool)}을 추가했습니다.`
+            : "보드 위치에 공용 canvas 아이템을 생성했습니다.",
+      );
 
       if (sharedSyncEnabled) {
         writeSharedWorkspaceSessionCache(
@@ -11227,14 +11320,17 @@ export default function MeetingCanvasTab({
     [
       agendaOverrides,
       agendaModels,
+      armedIdeationToolbarPane,
       canvasItems,
       customGroupDraftTitle,
       customGroups,
       forceBroadcastSharedCanvas,
+      ideationFocusItemId,
       meetingGoalContextDraft,
       meetingGoalDraft,
       meetingId,
       nodePositions,
+      pendingIdeationFocusUpdate,
       persistedSharedImportedState,
       problemGroups,
       selectedAgendaId,
@@ -14198,16 +14294,6 @@ export default function MeetingCanvasTab({
       if (canvasItem?.agenda_id) {
         setSelectedAgendaId(canvasItem.agenda_id);
       }
-      if (
-        armedCanvasTool &&
-        stage === "ideation" &&
-        (armedCanvasTool === "note" || armedCanvasTool === "comment") &&
-        canvasItem &&
-        !canvasItem.parent_topic_id
-      ) {
-        setActivityMessage("메모와 댓글은 오른쪽 상세 캔버스에서 추가해 주세요.");
-        return;
-      }
     } else {
       setSelectedCanvasItemId("");
       if (stage === "ideation") {
@@ -14324,14 +14410,17 @@ export default function MeetingCanvasTab({
       }
       return;
     }
-    if (
-      stage === "ideation" &&
-      pane !== "ideation-right" &&
-      (armedCanvasTool === "note" || armedCanvasTool === "comment")
-    ) {
-      setCanvasPlacementPreview(null);
-      setActivityMessage("메모와 댓글은 오른쪽 상세 캔버스에서 추가해 주세요.");
-      return;
+    if (stage === "ideation") {
+      if (armedIdeationToolbarPane === "ideation-left" && pane !== "ideation-left") {
+        setCanvasPlacementPreview(null);
+        setActivityMessage("그룹 분류와 1차 아이디어는 왼쪽 캔버스에서 추가해 주세요.");
+        return;
+      }
+      if (armedIdeationToolbarPane === "ideation-right" && pane !== "ideation-right") {
+        setCanvasPlacementPreview(null);
+        setActivityMessage("하위 아이디어와 댓글은 오른쪽 포커스 캔버스에서 추가해 주세요.");
+        return;
+      }
     }
     setSelectedCanvasItemId("");
     void handleCanvasPlacementStart(
@@ -14345,6 +14434,7 @@ export default function MeetingCanvasTab({
   const handleProblemToolbarAction = (action: ProblemCanvasToolbarAction) => {
     if (action === "problem-link") {
       setArmedCanvasTool(null);
+      setArmedIdeationToolbarPane(null);
       setCanvasPlacementPreview(null);
       if (pendingProblemGroupLinkId) {
         setPendingProblemGroupLinkId("");
@@ -14362,6 +14452,7 @@ export default function MeetingCanvasTab({
 
     if (action === "adopt") {
       setArmedCanvasTool(null);
+      setArmedIdeationToolbarPane(null);
       setCanvasPlacementPreview(null);
       setPendingProblemGroupLinkId("");
       if (!selectedProblemGroup) {
@@ -16170,32 +16261,65 @@ export default function MeetingCanvasTab({
                   </div>
                 </div>
               </>
-            ) : (
-              <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
-                <div className="pointer-events-auto flex min-h-[clamp(52px,7vh,60px)] w-auto max-w-[min(720px,calc(100%-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
-                  {visibleCanvasTools.map((item) => (
-                    <button
-                      key={item}
-                      type="button"
-                      onClick={() => armCanvasTool(item)}
-                      disabled={!canUseCanvasToolbar}
-                      className={`flex h-[clamp(36px,4.4vh,40px)] min-w-[clamp(74px,7vw,92px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(12px,1.2vw,16px)] text-[clamp(13px,1vw,16px)] font-medium transition-all duration-150 ease-out ${
-                        armedCanvasTool === item
-                          ? "bg-[#1b59f8]/10 text-[#1b59f8]"
-                          : "text-[#4d4d4d] hover:bg-black/5"
-                      } disabled:cursor-not-allowed disabled:opacity-45`}
-                    >
-                      <span>{toolLabel(item, stage)}</span>
-                    </button>
-                  ))}
-                  {armedCanvasTool ? (
-                    <span className="hidden shrink-0 rounded-full bg-[#eff0f6] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] sm:inline-flex">
-                      클릭 대기
-                    </span>
-                  ) : null}
+            ) : stage === "ideation" ? (
+              <>
+                <div className="pointer-events-none absolute bottom-[clamp(78px,10vh,96px)] left-1/2 z-10 flex -translate-x-1/2 justify-center px-3 xl:bottom-[clamp(16px,3vh,32px)] xl:left-[19%]">
+                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(420px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
+                    {ideationLeftCanvasToolbarActions.map((item) => {
+                      const disabled = !canUseCanvasToolbar || (item === "topic" && !selectedAgendaForIdeationCanvas);
+                      return (
+                        <button
+                          key={`ideation-left-toolbar-${item}`}
+                          type="button"
+                          onClick={() => armCanvasTool(item, "ideation-left")}
+                          disabled={disabled}
+                          className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(112px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
+                            isIdeationToolbarActionActive(item, "ideation-left")
+                              ? "bg-[#1b59f8]/10 text-[#1b59f8]"
+                              : "text-[#4d4d4d] hover:bg-black/5"
+                          } disabled:cursor-not-allowed disabled:opacity-45`}
+                        >
+                          <span>{ideationToolbarActionLabel(item)}</span>
+                        </button>
+                      );
+                    })}
+                    {armedIdeationToolbarPane === "ideation-left" && armedCanvasTool ? (
+                      <span className="hidden shrink-0 rounded-full bg-[#eff0f6] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] sm:inline-flex">
+                        클릭 대기
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            )}
+
+                <div className="pointer-events-none absolute bottom-[clamp(16px,3vh,32px)] left-1/2 z-10 flex -translate-x-1/2 justify-center px-3 xl:left-[69%]">
+                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(420px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
+                    {ideationRightCanvasToolbarActions.map((item) => {
+                      const disabled = !canUseCanvasToolbar || !selectedRootItemForIdeationCanvas || Boolean(pendingIdeationFocusUpdate);
+                      return (
+                        <button
+                          key={`ideation-right-toolbar-${item}`}
+                          type="button"
+                          onClick={() => armCanvasTool(item, "ideation-right")}
+                          disabled={disabled}
+                          className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(96px,8vw,128px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
+                            isIdeationToolbarActionActive(item, "ideation-right")
+                              ? "bg-[#1b59f8]/10 text-[#1b59f8]"
+                              : "text-[#4d4d4d] hover:bg-black/5"
+                          } disabled:cursor-not-allowed disabled:opacity-45`}
+                        >
+                          <span>{ideationToolbarActionLabel(item)}</span>
+                        </button>
+                      );
+                    })}
+                    {armedIdeationToolbarPane === "ideation-right" && armedCanvasTool ? (
+                      <span className="hidden shrink-0 rounded-full bg-[#eff0f6] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] sm:inline-flex">
+                        클릭 대기
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              </>
+            ) : null}
           </section>
 
           <div className={rightDrawerWrapperClassName}>
