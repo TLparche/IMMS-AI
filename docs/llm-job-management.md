@@ -260,6 +260,12 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 
 현재 코드에는 1차 안전장치가 들어가 있다.
 
+- LLM 작업은 `task_type` 기준으로 `ideation.assimilate`, `ideation.topic_summary`, `problem.definition`, `solution.stage`처럼 분리
+- task별 `queue_name`, `worker_name`, `model_policy`, `cache_policy`, `stale_policy`, `output_policy`, `priority`를 `CanvasTaskPolicy`로 관리
+- cacheable 작업은 task_type이 포함된 cache key를 사용해 서로 다른 작업 결과가 섞이지 않도록 분리
+- LLM cached request lock은 task queue별로 분리해 문제정의/해결책/추천 같은 독립 작업이 하나의 전역 lock에 막히지 않도록 변경
+- async workspace 작업도 task별 worker lock을 거쳐 실행하므로 같은 queue는 순서를 지키고, 다른 queue는 병렬 실행 가능
+- 새 endpoint는 도메인 행위 기준으로 분리하고, 기존 endpoint는 호환을 위해 유지
 - `topic_summary`와 `idea_assimilation` 작업을 `job_type`으로 구분
 - 아이디어 정리 요청이 진행 중인 topic summary 작업을 잘못 반환받지 않도록 분리
 - topic summary에 `scope_key = topic_item_id` 저장
@@ -279,6 +285,36 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 - 사용자가 만든 노드도 기본적으로 자동요약 대상이며, 노드 패널에서 `자동요약 방지`를 켠 경우에만 보호
 
 현재 상태는 "늦은 응답이 workspace를 망가뜨리지 않게 하면서, 이후 retry queue가 판단할 수 있는 상태값을 남기는 안전장치"에 가깝다.
+
+## Task Router 구조
+
+새로운 호출 흐름은 다음을 기준으로 한다.
+
+```text
+사용자 요청
+  -> domain endpoint
+  -> task policy lookup
+  -> task별 queue / worker / cache policy
+  -> LLM Gateway
+  -> patch / suggestion / structured result
+```
+
+대표 endpoint:
+
+```text
+POST /api/canvas/ideation/ideas/assimilate
+POST /api/canvas/ideation/topics/summarize
+POST /api/canvas/ideation/suggestions/generate
+POST /api/canvas/problem/groups/generate
+POST /api/canvas/problem/groups/conclusion
+POST /api/canvas/problem/discussions/assimilate
+POST /api/canvas/solution/stage/generate
+
+GET /api/ai/tasks/policies
+GET /api/ai/tasks?meeting_id=...
+```
+
+기존 `/api/canvas/*-workspace/start`와 `/api/canvas/problem-definition` 계열 endpoint는 호환 목적으로 유지한다.
 
 ## 다음 구현 순서
 

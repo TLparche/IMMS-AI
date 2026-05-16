@@ -1783,6 +1783,156 @@ def _canvas_hash_signature(payload: Any) -> str:
     return hashlib.sha256(_canvas_llm_signature(payload).encode("utf-8")).hexdigest()
 
 
+def _canvas_task_policy(task_type: str) -> CanvasTaskPolicy:
+    normalized_task_type = _safe_text(task_type, "generic")
+    policy = CANVAS_TASK_POLICIES.get(normalized_task_type)
+    if policy:
+        return policy
+    return CanvasTaskPolicy(
+        task_type=normalized_task_type,
+        queue_name="generic",
+        worker_name="generic-task",
+        model_policy="default_json",
+        cache_policy="signature",
+        stale_policy="manual",
+        output_policy="json",
+        priority=10,
+        description="등록되지 않은 일반 LLM 작업",
+    )
+
+
+def _canvas_task_policy_response(policy: CanvasTaskPolicy) -> dict[str, Any]:
+    return {
+        "task_type": policy.task_type,
+        "queue_name": policy.queue_name,
+        "worker_name": policy.worker_name,
+        "model_policy": policy.model_policy,
+        "cache_policy": policy.cache_policy,
+        "stale_policy": policy.stale_policy,
+        "output_policy": policy.output_policy,
+        "priority": policy.priority,
+        "description": policy.description,
+    }
+
+
+def _canvas_task_job_fields(task_type: str) -> dict[str, Any]:
+    policy = _canvas_task_policy(task_type)
+    return {
+        "task_type": policy.task_type,
+        "queue_name": policy.queue_name,
+        "worker_name": policy.worker_name,
+        "model_policy": policy.model_policy,
+        "cache_policy": policy.cache_policy,
+        "stale_policy": policy.stale_policy,
+        "output_policy": policy.output_policy,
+        "priority": policy.priority,
+    }
+
+
+def _canvas_task_job_summary(job: dict[str, Any], source: str = "") -> dict[str, Any]:
+    normalized_source = _safe_text(source)
+    task_type = _safe_text(job.get("task_type"))
+    if not task_type:
+        task_type = (
+            "problem.discussion"
+            if normalized_source == "canvas_problem"
+            else _canvas_task_type_for_idea_job(_safe_text(job.get("job_type")))
+        )
+    policy_fields = _canvas_task_job_fields(task_type)
+    return {
+        **policy_fields,
+        "source": normalized_source,
+        "job_id": _safe_text(job.get("job_id")),
+        "meeting_id": _safe_text(job.get("meeting_id")),
+        "job_type": _safe_text(job.get("job_type")),
+        "scope_key": _safe_text(job.get("scope_key")),
+        "status": _safe_text(job.get("status"), "idle"),
+        "stale_reason": _safe_text(job.get("stale_reason")),
+        "retryable": bool(job.get("retryable")),
+        "detail": _safe_text(job.get("detail")),
+        "pending_item_id": _safe_text(job.get("pending_item_id")),
+        "target_count": int(job.get("target_count") or 0),
+        "target_signature": _safe_text(job.get("target_signature")),
+        "created_at": _safe_text(job.get("created_at")),
+        "updated_at": _safe_text(job.get("updated_at")),
+    }
+
+
+def _canvas_task_type_for_idea_job(job_type: str) -> str:
+    normalized_job_type = _safe_text(job_type)
+    if normalized_job_type == "topic_summary":
+        return "ideation.topic_summary"
+    return "ideation.assimilate"
+
+
+def _canvas_task_lock(rt: "RuntimeStore", task_type: str, kind: str) -> threading.Lock:
+    policy = _canvas_task_policy(task_type)
+    attr = "canvas_task_worker_locks" if kind == "worker" else "canvas_task_request_locks"
+    lock_key = policy.queue_name
+    with rt.lock:
+        locks = getattr(rt, attr, None)
+        if not isinstance(locks, dict):
+            locks = {}
+            setattr(rt, attr, locks)
+        lock = locks.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            locks[lock_key] = lock
+        return lock
+
+
+def _run_canvas_task_worker_inline(task_type: str, target: Callable[..., None], args: tuple[Any, ...]) -> None:
+    lock = _canvas_task_lock(RT, task_type, "worker")
+    with lock:
+        target(*args)
+
+
+def _start_canvas_task_worker(
+    task_type: str,
+    job_id: str,
+    target: Callable[..., None],
+    args: tuple[Any, ...],
+) -> threading.Thread:
+    policy = _canvas_task_policy(task_type)
+    normalized_job_id = _safe_text(job_id) or uuid4().hex
+    thread = threading.Thread(
+        target=_run_canvas_task_worker_inline,
+        args=(policy.task_type, target, args),
+        daemon=True,
+        name=f"canvas-{policy.worker_name}-{normalized_job_id[:8]}",
+    )
+    thread.start()
+    return thread
+
+
+def _run_canvas_task_cached_request(
+    rt: "RuntimeStore",
+    task_type: str,
+    meeting_id: str,
+    scope_key: str,
+    signature: str,
+    compute: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    policy = _canvas_task_policy(task_type)
+    if policy.cache_policy == "none":
+        result = compute()
+    else:
+        result = _run_canvas_llm_cached_request(
+            rt,
+            meeting_id,
+            f"{policy.task_type}:{_safe_text(scope_key, 'default')}",
+            signature,
+            compute,
+            task_type=policy.task_type,
+        )
+    if isinstance(result, dict):
+        return {
+            **_canvas_task_job_fields(policy.task_type),
+            **result,
+        }
+    return result
+
+
 def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[str, Any]:
     normalized_meeting_id = _safe_text(meeting_id)
     if not normalized_meeting_id:
@@ -1876,6 +2026,7 @@ def _run_canvas_llm_cached_request(
     cache_key: str,
     signature: str,
     compute: Callable[[], dict[str, Any]],
+    task_type: str = "generic",
 ) -> dict[str, Any]:
     normalized_meeting_id = _safe_text(meeting_id)
     normalized_cache_key = _safe_text(cache_key)
@@ -1945,7 +2096,8 @@ def _run_canvas_llm_cached_request(
             continue
 
         try:
-            with rt.canvas_llm_request_lock:
+            request_lock = _canvas_task_lock(rt, task_type, "request")
+            with request_lock:
                 result = compute()
         except Exception as exc:
             with rt.lock:
@@ -2730,6 +2882,133 @@ class CanvasPersonalNotesStateInput(BaseModel):
     local_canvas_state: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class CanvasTaskPolicy:
+    task_type: str
+    queue_name: str
+    worker_name: str
+    model_policy: str
+    cache_policy: str
+    stale_policy: str
+    output_policy: str
+    priority: int
+    description: str = ""
+
+
+CANVAS_TASK_POLICIES: dict[str, CanvasTaskPolicy] = {
+    "ideation.assimilate": CanvasTaskPolicy(
+        task_type="ideation.assimilate",
+        queue_name="ideation_realtime",
+        worker_name="idea-assimilation",
+        model_policy="fast_json",
+        cache_policy="none",
+        stale_policy="utterance_dedupe",
+        output_policy="workspace_patch",
+        priority=90,
+        description="전사 발화를 아이디어 노드로 정리하거나 기존 노드에 병합",
+    ),
+    "ideation.assimilate_preview": CanvasTaskPolicy(
+        task_type="ideation.assimilate_preview",
+        queue_name="ideation_preview",
+        worker_name="idea-assimilation-preview",
+        model_policy="fast_json",
+        cache_policy="signature",
+        stale_policy="input_signature",
+        output_policy="structured_update",
+        priority=45,
+        description="workspace 적용 없이 발화-아이디어 병합 결과만 미리 계산",
+    ),
+    "ideation.topic_summary": CanvasTaskPolicy(
+        task_type="ideation.topic_summary",
+        queue_name="topic_summary",
+        worker_name="topic-summary",
+        model_policy="fast_json",
+        cache_policy="signature",
+        stale_policy="latest_by_topic_signature",
+        output_policy="patch",
+        priority=50,
+        description="topic 노드의 제목, content, 키워드 요약",
+    ),
+    "ideation.topic_clustering": CanvasTaskPolicy(
+        task_type="ideation.topic_clustering",
+        queue_name="topic_clustering",
+        worker_name="topic-clustering",
+        model_policy="fast_json",
+        cache_policy="short_signature",
+        stale_policy="latest_by_agenda",
+        output_policy="workspace_patch",
+        priority=35,
+        description="아이디어 노드를 topic 계층으로 묶거나 재배치",
+    ),
+    "ideation.recommend": CanvasTaskPolicy(
+        task_type="ideation.recommend",
+        queue_name="recommendation",
+        worker_name="idea-recommendation",
+        model_policy="cheap_fast_json",
+        cache_policy="short_signature",
+        stale_policy="focus_context",
+        output_policy="suggestion",
+        priority=40,
+        description="선택 topic 기준 아이디어 추천",
+    ),
+    "problem.discussion": CanvasTaskPolicy(
+        task_type="problem.discussion",
+        queue_name="problem_discussion",
+        worker_name="problem-discussion",
+        model_policy="fast_json",
+        cache_policy="none",
+        stale_policy="utterance_dedupe",
+        output_policy="workspace_patch",
+        priority=80,
+        description="문제정의 단계 발화를 의견 노드로 정리",
+    ),
+    "problem.definition": CanvasTaskPolicy(
+        task_type="problem.definition",
+        queue_name="problem_definition",
+        worker_name="problem-definition",
+        model_policy="strong_json",
+        cache_policy="signature",
+        stale_policy="source_signature",
+        output_policy="structured_groups",
+        priority=70,
+        description="아이디어 트리에서 문제정의 그룹 생성",
+    ),
+    "problem.conclusion": CanvasTaskPolicy(
+        task_type="problem.conclusion",
+        queue_name="problem_conclusion",
+        worker_name="problem-conclusion",
+        model_policy="fast_json",
+        cache_policy="signature",
+        stale_policy="group_signature",
+        output_policy="structured_text",
+        priority=60,
+        description="문제정의 그룹의 insight와 결론 생성",
+    ),
+    "meeting.goal": CanvasTaskPolicy(
+        task_type="meeting.goal",
+        queue_name="meeting_goal",
+        worker_name="meeting-goal",
+        model_policy="cheap_fast_json",
+        cache_policy="signature",
+        stale_policy="topic_signature",
+        output_policy="structured_text",
+        priority=55,
+        description="회의 제목에서 회의 목표 후보 생성",
+    ),
+    "solution.stage": CanvasTaskPolicy(
+        task_type="solution.stage",
+        queue_name="solution_stage",
+        worker_name="solution-stage",
+        model_policy="strong_json",
+        cache_policy="signature",
+        stale_policy="problem_groups_signature",
+        output_policy="structured_topics",
+        priority=70,
+        description="문제정의 그룹에서 해결책 후보 생성",
+    ),
+}
+
+
 @dataclass
 class RuntimeStore:
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -2772,6 +3051,8 @@ class RuntimeStore:
     canvas_last_placement: dict[str, Any] = field(default_factory=dict)
     canvas_workspace_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_llm_inflight_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
+    canvas_task_request_locks: dict[str, threading.Lock] = field(default_factory=dict)
+    canvas_task_worker_locks: dict[str, threading.Lock] = field(default_factory=dict)
     canvas_idea_jobs_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_problem_jobs_by_meeting: dict[str, dict[str, Any]] = field(default_factory=dict)
     canvas_personal_notes_by_meeting_user: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
@@ -2814,6 +3095,8 @@ class RuntimeStore:
         self.canvas_last_placement = {}
         self.canvas_workspace_by_meeting = {}
         self.canvas_llm_inflight_by_meeting = {}
+        self.canvas_task_request_locks = {}
+        self.canvas_task_worker_locks = {}
         self.canvas_idea_jobs_by_meeting = {}
         self.canvas_problem_jobs_by_meeting = {}
         self.canvas_personal_notes_by_meeting_user = {}
@@ -7076,6 +7359,54 @@ def get_health():
     }
 
 
+@app.get("/api/ai/tasks/policies")
+def get_ai_task_policies():
+    policies = sorted(CANVAS_TASK_POLICIES.values(), key=lambda item: (-item.priority, item.task_type))
+    return {
+        "ok": True,
+        "policies": [_canvas_task_policy_response(policy) for policy in policies],
+    }
+
+
+@app.get("/api/ai/tasks")
+def get_ai_tasks(meeting_id: str = ""):
+    normalized_meeting_id = _safe_text(meeting_id)
+    jobs: list[dict[str, Any]] = []
+    with RT.lock:
+        idea_meetings = copy.deepcopy(RT.canvas_idea_jobs_by_meeting)
+        problem_meetings = copy.deepcopy(RT.canvas_problem_jobs_by_meeting)
+
+    for current_meeting_id, meeting_jobs in idea_meetings.items():
+        if normalized_meeting_id and _safe_text(current_meeting_id) != normalized_meeting_id:
+            continue
+        for job in (meeting_jobs or {}).values():
+            if isinstance(job, dict):
+                jobs.append(_canvas_task_job_summary(job, "canvas_idea"))
+
+    for current_meeting_id, meeting_jobs in problem_meetings.items():
+        if normalized_meeting_id and _safe_text(current_meeting_id) != normalized_meeting_id:
+            continue
+        for job in (meeting_jobs or {}).values():
+            if isinstance(job, dict):
+                jobs.append(_canvas_task_job_summary(job, "canvas_problem"))
+
+    queue_counts: dict[str, dict[str, int]] = {}
+    for job in jobs:
+        queue_name = _safe_text(job.get("queue_name"), "generic")
+        status = _safe_text(job.get("status"), "idle")
+        queue_counts.setdefault(queue_name, {})
+        queue_counts[queue_name][status] = queue_counts[queue_name].get(status, 0) + 1
+
+    jobs.sort(key=lambda item: _safe_text(item.get("updated_at")), reverse=True)
+    return {
+        "ok": True,
+        "meeting_id": normalized_meeting_id,
+        "queues": queue_counts,
+        "tasks": jobs[:200],
+        "policies": [_canvas_task_policy_response(policy) for policy in CANVAS_TASK_POLICIES.values()],
+    }
+
+
 @app.get("/api/state")
 def get_state():
     with RT.lock:
@@ -7475,6 +7806,7 @@ def get_last_llm_json():
 
 
 @app.post("/api/canvas/idea-assimilation")
+@app.post("/api/canvas/ideation/ideas/assimilate-preview")
 def post_canvas_idea_assimilation(payload: CanvasIdeaAssimilationInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
     signature = _canvas_llm_signature(payload)
@@ -7482,8 +7814,9 @@ def post_canvas_idea_assimilation(payload: CanvasIdeaAssimilationInput):
     def _compute() -> dict[str, Any]:
         return _compute_idea_assimilation_result(payload)
 
-    return _run_canvas_llm_cached_request(
+    return _run_canvas_task_cached_request(
         RT,
+        "ideation.assimilate_preview",
         normalized_meeting_id,
         "idea_assimilation",
         signature,
@@ -7728,8 +8061,14 @@ def _mark_canvas_idea_job(
     with RT.lock:
         meeting_jobs = RT.canvas_idea_jobs_by_meeting.setdefault(normalized_meeting_id, {})
         current = meeting_jobs.get(job_id) if isinstance(meeting_jobs.get(job_id), dict) else {}
+        task_type = _safe_text(
+            fields.get("task_type")
+            or current.get("task_type")
+            or _canvas_task_type_for_idea_job(_safe_text(fields.get("job_type") or current.get("job_type"))),
+        )
         current = {
             **current,
+            **_canvas_task_job_fields(task_type),
             **fields,
             "job_id": job_id,
             "meeting_id": normalized_meeting_id,
@@ -7886,6 +8225,14 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
         "meeting_id": _safe_text(job.get("meeting_id")),
         "status": _safe_text(job.get("status"), "idle"),
         "job_type": _canvas_job_type(job),
+        "task_type": _safe_text(job.get("task_type")),
+        "queue_name": _safe_text(job.get("queue_name")),
+        "worker_name": _safe_text(job.get("worker_name")),
+        "model_policy": _safe_text(job.get("model_policy")),
+        "cache_policy": _safe_text(job.get("cache_policy")),
+        "stale_policy": _safe_text(job.get("stale_policy")),
+        "output_policy": _safe_text(job.get("output_policy")),
+        "priority": int(job.get("priority") or 0),
         "scope_key": _safe_text(job.get("scope_key")),
         "stale_reason": _safe_text(job.get("stale_reason")),
         "retryable": bool(job.get("retryable")),
@@ -7923,8 +8270,10 @@ def _mark_canvas_problem_job(
     with RT.lock:
         meeting_jobs = RT.canvas_problem_jobs_by_meeting.setdefault(normalized_meeting_id, {})
         current = meeting_jobs.get(job_id) if isinstance(meeting_jobs.get(job_id), dict) else {}
+        task_type = _safe_text(fields.get("task_type") or current.get("task_type") or "problem.discussion")
         current = {
             **current,
+            **_canvas_task_job_fields(task_type),
             **fields,
             "job_id": job_id,
             "meeting_id": normalized_meeting_id,
@@ -7940,6 +8289,14 @@ def _canvas_problem_job_response(job: dict[str, Any], workspace: dict[str, Any] 
         "job_id": _safe_text(job.get("job_id")),
         "meeting_id": _safe_text(job.get("meeting_id")),
         "status": _safe_text(job.get("status"), "idle"),
+        "task_type": _safe_text(job.get("task_type")),
+        "queue_name": _safe_text(job.get("queue_name")),
+        "worker_name": _safe_text(job.get("worker_name")),
+        "model_policy": _safe_text(job.get("model_policy")),
+        "cache_policy": _safe_text(job.get("cache_policy")),
+        "stale_policy": _safe_text(job.get("stale_policy")),
+        "output_policy": _safe_text(job.get("output_policy")),
+        "priority": int(job.get("priority") or 0),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -8372,7 +8729,7 @@ def _schedule_canvas_topic_summary_retry(source_job: dict[str, Any]) -> dict[str
         target=_run_queued_canvas_topic_summary_retry,
         args=(normalized_meeting_id, retry_job_id, topic_id, meeting_topic, retry_after_epoch),
         daemon=True,
-        name=f"canvas-topic-retry-{retry_job_id[:8]}",
+        name=f"canvas-topic-summary-retry-{retry_job_id[:8]}",
     ).start()
     return queued_job
 
@@ -8500,11 +8857,15 @@ def _run_queued_canvas_topic_summary_retry(
         workspace=copy.deepcopy(workspace),
         processing_started_at=_now_ts(),
     )
-    _finalize_canvas_topic_summary_workspace_job(
-        normalized_meeting_id,
-        normalized_job_id,
-        topic_id,
-        _safe_text(meeting_topic, "회의 주제"),
+    _run_canvas_task_worker_inline(
+        "ideation.topic_summary",
+        _finalize_canvas_topic_summary_workspace_job,
+        (
+            normalized_meeting_id,
+            normalized_job_id,
+            topic_id,
+            _safe_text(meeting_topic, "회의 주제"),
+        ),
     )
 
 
@@ -9783,6 +10144,7 @@ def _finalize_canvas_idea_workspace_job(
         )
 
 
+@app.post("/api/canvas/ideation/ideas/assimilate")
 @app.post("/api/canvas/idea-assimilation-workspace/start")
 def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilationWorkspaceStartInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -9950,6 +10312,7 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
     job = _mark_canvas_idea_job(
         normalized_meeting_id,
         job_id,
+        task_type="ideation.assimilate",
         job_type="idea_assimilation",
         scope_key="idea_assimilation",
         status="processing",
@@ -9961,15 +10324,16 @@ def post_canvas_idea_assimilation_workspace_start(payload: CanvasIdeaAssimilatio
         created_epoch=time.time(),
         workspace=copy.deepcopy(workspace),
     )
-    threading.Thread(
-        target=_finalize_canvas_idea_workspace_job,
-        args=(normalized_meeting_id, job_id, pending_item_id, idea_payload),
-        daemon=True,
-        name=f"canvas-idea-{job_id[:8]}",
-    ).start()
+    _start_canvas_task_worker(
+        "ideation.assimilate",
+        job_id,
+        _finalize_canvas_idea_workspace_job,
+        (normalized_meeting_id, job_id, pending_item_id, idea_payload),
+    )
     return _canvas_idea_job_response(job, workspace)
 
 
+@app.post("/api/canvas/ideation/topics/summarize")
 @app.post("/api/canvas/topic-summary-workspace/start")
 def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspaceStartInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10049,6 +10413,7 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
     job = _mark_canvas_idea_job(
         normalized_meeting_id,
         job_id,
+        task_type="ideation.topic_summary",
         job_type="topic_summary",
         scope_key=topic_item_id,
         status="processing",
@@ -10062,15 +10427,16 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
         created_epoch=time.time(),
         workspace=copy.deepcopy(workspace),
     )
-    threading.Thread(
-        target=_finalize_canvas_topic_summary_workspace_job,
-        args=(normalized_meeting_id, job_id, topic_item_id, _safe_text(payload.meeting_topic, "회의 주제")),
-        daemon=True,
-        name=f"canvas-topic-{job_id[:8]}",
-    ).start()
+    _start_canvas_task_worker(
+        "ideation.topic_summary",
+        job_id,
+        _finalize_canvas_topic_summary_workspace_job,
+        (normalized_meeting_id, job_id, topic_item_id, _safe_text(payload.meeting_topic, "회의 주제")),
+    )
     return _canvas_idea_job_response(job, workspace)
 
 
+@app.get("/api/canvas/ideation/jobs/{job_id}")
 @app.get("/api/canvas/idea-assimilation-workspace/jobs/{job_id}")
 def get_canvas_idea_assimilation_workspace_job(job_id: str, meeting_id: str):
     normalized_meeting_id = _safe_text(meeting_id)
@@ -10257,6 +10623,7 @@ def _finalize_canvas_problem_discussion_workspace_job(
         )
 
 
+@app.post("/api/canvas/problem/discussions/assimilate")
 @app.post("/api/canvas/problem-discussion-workspace/start")
 def post_canvas_problem_discussion_workspace_start(payload: CanvasProblemDiscussionWorkspaceStartInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10360,6 +10727,7 @@ def post_canvas_problem_discussion_workspace_start(payload: CanvasProblemDiscuss
     job = _mark_canvas_problem_job(
         normalized_meeting_id,
         job_id,
+        task_type="problem.discussion",
         status="processing",
         detail="AI가 문제정의 의견을 생성 중",
         pending_item_id=pending_item_id,
@@ -10368,15 +10736,16 @@ def post_canvas_problem_discussion_workspace_start(payload: CanvasProblemDiscuss
         created_at=_now_ts(),
         workspace=copy.deepcopy(workspace),
     )
-    threading.Thread(
-        target=_finalize_canvas_problem_discussion_workspace_job,
-        args=(normalized_meeting_id, job_id, selected_group_id, pending_item_id, discussion_payload),
-        daemon=True,
-        name=f"canvas-problem-note-{job_id[:8]}",
-    ).start()
+    _start_canvas_task_worker(
+        "problem.discussion",
+        job_id,
+        _finalize_canvas_problem_discussion_workspace_job,
+        (normalized_meeting_id, job_id, selected_group_id, pending_item_id, discussion_payload),
+    )
     return _canvas_problem_job_response(job, workspace)
 
 
+@app.get("/api/canvas/problem/jobs/{job_id}")
 @app.get("/api/canvas/problem-discussion-workspace/jobs/{job_id}")
 def get_canvas_problem_discussion_workspace_job(job_id: str, meeting_id: str):
     normalized_meeting_id = _safe_text(meeting_id)
@@ -10402,6 +10771,7 @@ def get_canvas_problem_discussion_workspace_job(job_id: str, meeting_id: str):
     return _canvas_problem_job_response(job, workspace)
 
 
+@app.post("/api/canvas/problem/groups/generate")
 @app.post("/api/canvas/problem-definition")
 def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10449,8 +10819,9 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
             "generated_at": _now_ts(),
             "groups": groups,
         }
-    return _run_canvas_llm_cached_request(
+    return _run_canvas_task_cached_request(
         RT,
+        "problem.definition",
         normalized_meeting_id,
         f"problem_definition:{normalized_source_group_id}",
         signature,
@@ -10458,6 +10829,7 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
     )
 
 
+@app.post("/api/canvas/problem/groups/conclusion")
 @app.post("/api/canvas/problem-conclusion")
 def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10511,8 +10883,9 @@ def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
             "insight_lens": insight_lens,
             "conclusion": conclusion,
         }
-    return _run_canvas_llm_cached_request(
+    return _run_canvas_task_cached_request(
         RT,
+        "problem.conclusion",
         normalized_meeting_id,
         f"problem_conclusion:{group_id}",
         signature,
@@ -10520,6 +10893,7 @@ def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
     )
 
 
+@app.post("/api/canvas/meeting/goal")
 @app.post("/api/canvas/meeting-goal")
 def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10581,8 +10955,9 @@ def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
             "goal": goal,
             "goals": goals,
         }
-    return _run_canvas_llm_cached_request(
+    return _run_canvas_task_cached_request(
         RT,
+        "meeting.goal",
         normalized_meeting_id,
         "meeting_goal",
         signature,
@@ -10590,6 +10965,7 @@ def post_canvas_meeting_goal(payload: MeetingGoalGenerateInput):
     )
 
 
+@app.post("/api/canvas/solution/stage/generate")
 @app.post("/api/canvas/solution-stage")
 def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10660,8 +11036,9 @@ def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
             "generated_at": _now_ts(),
             "topics": topics,
         }
-    return _run_canvas_llm_cached_request(
+    return _run_canvas_task_cached_request(
         RT,
+        "solution.stage",
         normalized_meeting_id,
         "solution_stage",
         signature,
@@ -10669,6 +11046,7 @@ def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
     )
 
 
+@app.post("/api/canvas/ideation/suggestions/generate")
 @app.post("/api/canvas/ideation-suggestions")
 def post_canvas_ideation_suggestions(payload: IdeationSuggestionGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
@@ -10728,8 +11106,9 @@ def post_canvas_ideation_suggestions(payload: IdeationSuggestionGenerateInput):
             "suggestions": suggestions,
         }
 
-    return _run_canvas_llm_cached_request(
+    return _run_canvas_task_cached_request(
         RT,
+        "ideation.recommend",
         normalized_meeting_id,
         "ideation_suggestions",
         signature,
