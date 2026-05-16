@@ -264,35 +264,33 @@ AI가 "고객 온보딩" topic 요약을 시작했습니다.
 - 아이디어 정리 요청이 진행 중인 topic summary 작업을 잘못 반환받지 않도록 분리
 - topic summary에 `scope_key = topic_item_id` 저장
 - topic summary 입력을 hash signature로 비교
-- 같은 topic에 더 최신 입력 요청이 오면 기존 작업을 `stale` 처리
-- 늦은 topic summary 응답이 도착했을 때 child 구성/입력이 바뀌었으면 적용하지 않음
-- 대상 topic이 삭제/병합되었으면 stale 처리
+- 같은 topic에 더 최신 입력 요청이 오면 기존 작업을 `stale_superseded` 처리
+- 늦은 topic summary 응답이 도착했을 때 child 구성/입력이 바뀌었으면 `stale_rebasable` 처리
+- 대상 topic이 삭제/병합되었으면 `stale_obsolete` 처리
+- LLM 응답 실패/예외는 재시도 가능성을 남기기 위해 `error_retryable`로 구분
 
-현재 상태는 "늦은 응답이 workspace를 망가뜨리지 않게 하는 안전장치"에 가깝다.
+현재 상태는 "늦은 응답이 workspace를 망가뜨리지 않게 하면서, 이후 retry queue가 판단할 수 있는 상태값을 남기는 안전장치"에 가깝다.
 
 ## 다음 구현 순서
 
-1. Job status 세분화
-   - `stale_superseded`, `stale_obsolete`, `stale_rebasable`, `error_retryable` 도입
-
-2. Canvas operation log 추가
+1. Canvas operation log 추가
    - node merge/move/delete 기록
    - `source_node_ids`, `target_node_id`, `operation_id`
 
-3. Node lineage 추가
+2. Node lineage 추가
    - `node_aliases` 또는 `node_lineage`
    - C가 E로 병합되었는지 추적
 
-4. Retry queue 추가
+3. Retry queue 추가
    - error retryable만 지연 재시도
    - stale rebasable은 현재 상태 기준으로 새 요청
    - obsolete/superseded는 재시도하지 않음
 
-5. Patch 기반 응답 적용
+4. Patch 기반 응답 적용
    - 전체 workspace 대신 작업별 patch 적용
    - 사용자 편집 필드는 덮어쓰지 않음
 
-6. AI 진행 로그 패널 데이터화
+5. AI 진행 로그 패널 데이터화
    - 사용자별로 접어둔 상태
    - 열면 AI 작업 처리 이력 확인
 

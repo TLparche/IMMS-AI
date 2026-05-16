@@ -7210,7 +7210,9 @@ def _supersede_processing_canvas_idea_scope_jobs(
                 continue
             meeting_jobs[job_id] = {
                 **job,
-                "status": "stale",
+                "status": "stale_superseded",
+                "stale_reason": "superseded",
+                "retryable": False,
                 "detail": "더 최신 AI 정리 요청으로 대체되었습니다.",
                 "warning": "",
                 "workspace": copy.deepcopy(workspace),
@@ -7225,6 +7227,9 @@ def _finish_stale_canvas_topic_summary_job(
     job_id: str,
     topic_item_id: str,
     detail: str,
+    status: str = "stale_obsolete",
+    stale_reason: str = "obsolete",
+    retryable: bool = False,
 ) -> None:
     latest_workspace = _clone_runtime_workspace_state(
         meeting_id,
@@ -7244,7 +7249,9 @@ def _finish_stale_canvas_topic_summary_job(
     _mark_canvas_idea_job(
         meeting_id,
         job_id,
-        status="stale",
+        status=status,
+        stale_reason=stale_reason,
+        retryable=retryable,
         detail=detail,
         workspace=copy.deepcopy(latest_workspace),
         used_llm=False,
@@ -7261,6 +7268,8 @@ def _canvas_idea_job_response(job: dict[str, Any], workspace: dict[str, Any] | N
         "status": _safe_text(job.get("status"), "idle"),
         "job_type": _canvas_job_type(job),
         "scope_key": _safe_text(job.get("scope_key")),
+        "stale_reason": _safe_text(job.get("stale_reason")),
+        "retryable": bool(job.get("retryable")),
         "detail": _safe_text(job.get("detail")),
         "used_llm": bool(job.get("used_llm")),
         "warning": _safe_text(job.get("warning")),
@@ -8175,6 +8184,8 @@ def _finalize_canvas_topic_summary_workspace_job(
                 job_id,
                 topic_id,
                 "더 최신 AI topic 정리 요청으로 대체되었습니다.",
+                status="stale_superseded",
+                stale_reason="superseded",
             )
             return
 
@@ -8184,6 +8195,9 @@ def _finalize_canvas_topic_summary_workspace_job(
                 job_id,
                 topic_id,
                 "topic 하위 내용이 바뀌어 이전 AI 정리 결과를 적용하지 않았습니다.",
+                status="stale_rebasable",
+                stale_reason="input_changed",
+                retryable=True,
             )
             return
 
@@ -8222,6 +8236,8 @@ def _finalize_canvas_topic_summary_workspace_job(
                 job_id,
                 topic_id,
                 "더 최신 AI topic 정리 요청으로 대체되었습니다.",
+                status="stale_superseded",
+                stale_reason="superseded",
             )
             return
 
@@ -8231,6 +8247,9 @@ def _finalize_canvas_topic_summary_workspace_job(
                 job_id,
                 topic_id,
                 "topic 하위 내용이 바뀌어 이전 AI 정리 결과를 적용하지 않았습니다.",
+                status="stale_rebasable",
+                stale_reason="input_changed",
+                retryable=True,
             )
             return
 
@@ -8250,7 +8269,8 @@ def _finalize_canvas_topic_summary_workspace_job(
             _mark_canvas_idea_job(
                 meeting_id,
                 job_id,
-                status="error",
+                status="error_retryable",
+                retryable=True,
                 detail=warning,
                 workspace=copy.deepcopy(latest_workspace),
                 used_llm=False,
@@ -8293,6 +8313,8 @@ def _finalize_canvas_topic_summary_workspace_job(
                 job_id,
                 _safe_text(topic_item_id),
                 "더 최신 AI topic 정리 요청으로 대체되었습니다.",
+                status="stale_superseded",
+                stale_reason="superseded",
             )
             return
         latest_workspace = _clone_runtime_workspace_state(
@@ -8314,7 +8336,8 @@ def _finalize_canvas_topic_summary_workspace_job(
         _mark_canvas_idea_job(
             meeting_id,
             job_id,
-            status="error",
+            status="error_retryable",
+            retryable=True,
             detail=f"AI topic 정리 실패: {exc}",
             workspace=copy.deepcopy(latest_workspace),
             used_llm=False,
@@ -9022,7 +9045,9 @@ def post_canvas_topic_summary_workspace_start(payload: CanvasTopicSummaryWorkspa
             "meeting_id": normalized_meeting_id,
             "job_type": "topic_summary",
             "scope_key": topic_item_id,
-            "status": "stale",
+            "status": "stale_obsolete",
+            "stale_reason": "obsolete",
+            "retryable": False,
             "detail": "정리 대상 topic이 이미 이동되었거나 삭제되었습니다.",
             "pending_item_id": topic_item_id,
             "updated_at": _now_ts(),

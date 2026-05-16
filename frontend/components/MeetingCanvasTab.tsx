@@ -164,6 +164,10 @@ type CanvasIdeaAssimilationJobSnapshot = {
   pending_item_id?: string;
   target_count?: number;
   target_signature?: string;
+  job_type?: string;
+  scope_key?: string;
+  stale_reason?: string;
+  retryable?: boolean;
 };
 
 type IdeationDropPreviewState = {
@@ -194,6 +198,14 @@ type StableIdeationDragState = {
   anchor: { x: number; y: number };
 };
 
+function isCanvasJobErrorStatus(status: string) {
+  return status === "error" || status.startsWith("error_") || status === "missing";
+}
+
+function isCanvasJobStaleStatus(status: string) {
+  return status === "stale" || status.startsWith("stale_");
+}
+
 function logCanvasIdeaAssimilationJob(
   label: string,
   job: CanvasIdeaAssimilationJobSnapshot | undefined | null,
@@ -203,8 +215,7 @@ function logCanvasIdeaAssimilationJob(
   const warning = job?.warning || "";
   const detail = job?.detail || "";
   const hasError =
-    status === "error" ||
-    status === "missing" ||
+    isCanvasJobErrorStatus(status) ||
     Boolean(warning) ||
     (status === "completed" && job?.used_llm === false);
   const errorDetail =
@@ -220,6 +231,10 @@ function logCanvasIdeaAssimilationJob(
     warning,
     detail,
     jobId: job?.job_id || "",
+    jobType: job?.job_type || "",
+    scopeKey: job?.scope_key || "",
+    staleReason: job?.stale_reason || "",
+    retryable: Boolean(job?.retryable),
     pendingItemId: job?.pending_item_id || "",
     targetCount: job?.target_count || 0,
     targetSignature: job?.target_signature || "",
@@ -5231,7 +5246,7 @@ export default function MeetingCanvasTab({
 
         applyServerIdeaWorkspace(started.workspace);
         if (started.status !== "processing" || !started.job_id) {
-          if (started.status === "error") {
+          if (isCanvasJobErrorStatus(started.status)) {
             failedIdeaAssimilationRef.current = {
               signature: targetSignature,
               failedAt: Date.now(),
@@ -5250,7 +5265,7 @@ export default function MeetingCanvasTab({
         for (let attempt = 0; attempt < 90; attempt += 1) {
           await new Promise((resolve) => window.setTimeout(resolve, 900));
           finalResult = await getCanvasIdeaAssimilationWorkspaceJob(meetingId, started.job_id);
-          if (finalResult.status === "error" || finalResult.status === "missing" || finalResult.warning) {
+          if (isCanvasJobErrorStatus(finalResult.status) || isCanvasJobStaleStatus(finalResult.status) || finalResult.warning) {
             logCanvasIdeaAssimilationJob("poll error response", finalResult, {
               ...requestSnapshot,
               attempt: attempt + 1,
@@ -5268,7 +5283,7 @@ export default function MeetingCanvasTab({
           targetRows.forEach((row) => processedIds.add(row.id));
           ideaBufferStartedAtRef.current = null;
           setIdeaAssimilationStatus(finalResult.used_llm ? "AI 아이디어 정리 반영됨" : "LLM 응답 없음");
-        } else if (finalResult.status === "error") {
+        } else if (isCanvasJobErrorStatus(finalResult.status)) {
           failedIdeaAssimilationRef.current = {
             signature: targetSignature,
             failedAt: Date.now(),
@@ -6367,7 +6382,7 @@ export default function MeetingCanvasTab({
 
         applyServerProblemWorkspace(started.workspace);
         if (started.status !== "processing" || !started.job_id) {
-          if (started.status === "error") {
+          if (isCanvasJobErrorStatus(started.status)) {
             failedProblemDiscussionRef.current = {
               signature: targetSignature,
               failedAt: Date.now(),
@@ -6392,7 +6407,7 @@ export default function MeetingCanvasTab({
           failedProblemDiscussionRef.current = null;
           targetRows.forEach((row) => processedIds.add(row.id));
           setProblemDiscussionStatus(finalResult.used_llm ? "AI 문제정의 의견 반영됨" : "LLM 응답 없음");
-        } else if (finalResult.status === "error") {
+        } else if (isCanvasJobErrorStatus(finalResult.status)) {
           failedProblemDiscussionRef.current = {
             signature: targetSignature,
             failedAt: Date.now(),
