@@ -324,6 +324,16 @@ function Test-CorsPreflight {
       $lastError = "expected origin $Origin but got $allowOrigin"
     } catch {
       $lastError = $_.Exception.Message
+      if ($_.Exception.Response) {
+        try {
+          $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+          $body = $reader.ReadToEnd()
+          if ($body) {
+            $lastError = "$lastError - $body"
+          }
+        } catch {
+        }
+      }
     }
 
     Start-Sleep -Seconds 2
@@ -423,6 +433,14 @@ try {
   Start-Sleep -Seconds 2
   Wait-HttpReady -Name "backend" -Url "http://localhost:$BackendPort/api/health" -TimeoutSeconds 30
   Wait-HttpReady -Name "gateway" -Url "http://localhost:$GatewayPort/gateway/health" -TimeoutSeconds 30
+  $localGatewayCorsOk = Test-CorsPreflight `
+    -Name "local gateway" `
+    -Url "http://localhost:$GatewayPort/gateway/meetings" `
+    -Origin "https://imms-ai.vercel.app" `
+    -TimeoutSeconds 8
+  if (-not $localGatewayCorsOk) {
+    Write-Warning "local gateway CORS failed. Check gateway/main.py and gateway/.env before using the tunnel URL."
+  }
 
   $gatewayTunnelProcess = Start-TunnelWithRetry `
     -Name "gateway" `
@@ -450,10 +468,13 @@ try {
   $gatewayWsUrl = if ($gatewayTunnel) { "$($gatewayTunnel -replace '^https://', 'wss://')/gateway/ws" } else { "" }
 
   if ($gatewayTunnel) {
-    Test-CorsPreflight `
+    $gatewayCorsOk = Test-CorsPreflight `
       -Name "gateway tunnel" `
       -Url "$gatewayTunnel/gateway/meetings" `
       -Origin "https://imms-ai.vercel.app"
+    if (-not $gatewayCorsOk) {
+      Write-Warning "gateway tunnel URL was created, but Vercel-origin CORS is not ready yet."
+    }
   }
 
   Write-Host ""

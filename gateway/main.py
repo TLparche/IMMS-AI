@@ -4,7 +4,6 @@ Gateway FastAPI Application
 import re
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from gateway.config import settings
 from gateway.routers import auth, meetings, websocket, reports
@@ -14,6 +13,10 @@ app = FastAPI(title="IMMS Gateway", version="1.0.0")
 IP_WHITELIST = parse_ip_whitelist(settings.ip_whitelist)
 CORS_ORIGIN_RE = re.compile(settings.cors_origin_regex) if settings.cors_origin_regex else None
 CORS_ALLOWED_METHODS = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+CORS_BUILTIN_ALLOWED_ORIGINS = {
+    "https://imms-ai.vercel.app",
+}
+CORS_BUILTIN_ORIGIN_RE = re.compile(r"https://.*\.vercel\.app")
 
 
 def _resolve_cors_origin(origin: str | None) -> str:
@@ -24,7 +27,11 @@ def _resolve_cors_origin(origin: str | None) -> str:
         return normalized_origin
     if normalized_origin in settings.cors_origins:
         return normalized_origin
+    if normalized_origin in CORS_BUILTIN_ALLOWED_ORIGINS:
+        return normalized_origin
     if CORS_ORIGIN_RE and CORS_ORIGIN_RE.fullmatch(normalized_origin):
+        return normalized_origin
+    if CORS_BUILTIN_ORIGIN_RE.fullmatch(normalized_origin):
         return normalized_origin
     return ""
 
@@ -40,19 +47,9 @@ def _attach_cors_headers(request: Request, response: Response) -> Response:
     response.headers["Access-Control-Allow-Headers"] = (
         request.headers.get("access-control-request-headers") or "*"
     )
+    response.headers["Access-Control-Max-Age"] = "600"
     response.headers["Vary"] = "Origin"
     return response
-
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_origin_regex=settings.cors_origin_regex or None,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Routers
 app.include_router(auth.router, prefix="/gateway/auth", tags=["auth"])
@@ -79,4 +76,4 @@ async def enforce_ip_whitelist_and_cors(request: Request, call_next):
 
 @app.get("/gateway/health")
 async def health():
-    return {"status": "ok", "service": "gateway"}
+    return {"status": "ok", "service": "gateway", "cors": "manual-v2"}
