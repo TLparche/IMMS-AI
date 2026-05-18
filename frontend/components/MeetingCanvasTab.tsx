@@ -80,7 +80,6 @@ type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
 type ProblemDefinitionMode = "" | "manual" | "ai";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
-const CANVAS_ITEM_STATUSES: CanvasItemStatus[] = ["discussion", "confirmed", "closed"];
 const CANVAS_LLM_FAILURE_RETRY_DELAY_MS = 60_000;
 const CANVAS_LLM_SILENCE_FLUSH_MS = 8_000;
 const DEFAULT_LEFT_PANEL_RATIO = 0.19;
@@ -715,19 +714,6 @@ function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
 }
 
-function KeyboardDoubleArrowDownIcon({ className = "" }: { className?: string }) {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 24 24"
-      className={className}
-      fill="currentColor"
-    >
-      <path d="M5.41 5.59 12 12.17l6.59-6.58L20 7l-8 8-8-8 1.41-1.41Zm0 6L12 18.17l6.59-6.58L20 13l-8 8-8-8 1.41-1.41Z" />
-    </svg>
-  );
-}
-
 function KeyboardDoubleArrowLeftIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -1282,16 +1268,6 @@ function buildLiveFlowHint(row: MeetingTranscript | null) {
   return `${row.speaker || "참가자"}: ${clean} · ${intent}`;
 }
 
-function summarizeDecision(decision: AgendaDecisionDetail) {
-  return stripLeadingTimestamp(decision.conclusion || decision.opinions?.[0] || "결정 내용 없음");
-}
-
-function summarizeActionItem(actionItem: AgendaActionItemDetail) {
-  const owner = stripLeadingTimestamp(actionItem.owner || "");
-  const item = stripLeadingTimestamp(actionItem.item || "액션 내용 없음");
-  return owner ? `${owner} · ${item}` : item;
-}
-
 function problemGroupStatusLabel(status: ProblemGroupStatus) {
   if (status === "review") return "검토중";
   if (status === "final") return "확정";
@@ -1308,18 +1284,6 @@ function normalizeCanvasItemStatus(raw: string | undefined): CanvasItemStatus {
   if (raw === "confirmed" || raw === "final") return "confirmed";
   if (raw === "closed") return "closed";
   return "discussion";
-}
-
-function canvasItemStatusLabel(status: CanvasItemStatus) {
-  if (status === "confirmed") return "확정";
-  if (status === "closed") return "종료";
-  return "논의";
-}
-
-function canvasItemStatusTone(status: CanvasItemStatus) {
-  if (status === "confirmed") return "bg-emerald-100 text-emerald-700 border-emerald-200";
-  if (status === "closed") return "bg-zinc-900 text-white border-zinc-900";
-  return "bg-blue-100 text-blue-700 border-blue-200";
 }
 
 function normalizeSolutionAiSuggestionStatus(raw: string | undefined): SolutionAiSuggestionStatus {
@@ -1567,309 +1531,6 @@ function makeStableSignature(value: unknown) {
   return `${text.length}:${(hash >>> 0).toString(36)}`;
 }
 
-function resolveProblemDefinitionAgendaId(
-  item: CanvasItemViewModel,
-  itemById: Map<string, CanvasItemViewModel>,
-) {
-  if (item.agenda_id) {
-    return item.agenda_id;
-  }
-
-  let parentTopicId = item.parent_topic_id || "";
-  const visitedParentIds = new Set<string>();
-  while (parentTopicId && !visitedParentIds.has(parentTopicId)) {
-    visitedParentIds.add(parentTopicId);
-    const parent = itemById.get(parentTopicId);
-    if (!parent) break;
-    if (parent.agenda_id) {
-      return parent.agenda_id;
-    }
-    parentTopicId = parent.parent_topic_id || "";
-  }
-
-  return "";
-}
-
-function buildProblemDefinitionAgendaInputs(agendaModels: AgendaViewModel[]) {
-  return agendaModels.map((agenda) => ({
-    agenda_id: agenda.id,
-    title: agenda.title,
-    keywords: agenda.keywords,
-    summary_bullets: agenda.summaryBullets,
-  }));
-}
-
-function buildProblemDefinitionIdeaBody(
-  item: CanvasItemViewModel,
-  childItems: CanvasItemViewModel[],
-) {
-  const childSummaries = childItems
-    .map((child) => [child.title, child.body].filter(Boolean).join(": ").trim())
-    .filter(Boolean)
-    .slice(0, 8);
-
-  return [
-    item.body || "",
-    childSummaries.length > 0 ? `하위 아이디어: ${childSummaries.join(" / ")}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function orderProblemDefinitionChildren(
-  parent: CanvasItemViewModel,
-  childItemsByParentId: Map<string, CanvasItemViewModel[]>,
-) {
-  const children = childItemsByParentId.get(parent.id) || [];
-  const orderById = new Map((parent.child_item_ids || []).map((id, index) => [id, index]));
-
-  return [...children].sort((left, right) => {
-    const leftOrder = orderById.get(left.id) ?? Number.MAX_SAFE_INTEGER;
-    const rightOrder = orderById.get(right.id) ?? Number.MAX_SAFE_INTEGER;
-    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-    return left.id.localeCompare(right.id);
-  });
-}
-
-function collectProblemDefinitionDescendants(
-  item: CanvasItemViewModel,
-  childItemsByParentId: Map<string, CanvasItemViewModel[]>,
-  limit = 24,
-) {
-  const descendants: CanvasItemViewModel[] = [];
-  const visitedIds = new Set<string>();
-  const visit = (parent: CanvasItemViewModel) => {
-    if (descendants.length >= limit) return;
-    orderProblemDefinitionChildren(parent, childItemsByParentId).forEach((child) => {
-      if (descendants.length >= limit || visitedIds.has(child.id)) return;
-      visitedIds.add(child.id);
-      descendants.push(child);
-      visit(child);
-    });
-  };
-
-  visit(item);
-  return descendants;
-}
-
-function buildProblemDefinitionIdeaInputs(
-  canvasItems: CanvasItemViewModel[],
-  personalNotes: PersonalNote[],
-) {
-  const itemById = new Map(canvasItems.map((item) => [item.id, item]));
-  const childItemsByParentId = new Map<string, CanvasItemViewModel[]>();
-  canvasItems.forEach((item) => {
-    if (!item.parent_topic_id) return;
-    const children = childItemsByParentId.get(item.parent_topic_id) || [];
-    children.push(item);
-    childItemsByParentId.set(item.parent_topic_id, children);
-  });
-
-  const canvasIdeas = canvasItems
-    .filter((item) => !item.parent_topic_id)
-    .map((item) => ({
-      id: item.id,
-      agenda_id: resolveProblemDefinitionAgendaId(item, itemById),
-      kind: item.kind || "note",
-      title: item.title || "",
-      body: buildProblemDefinitionIdeaBody(
-        item,
-        collectProblemDefinitionDescendants(item, childItemsByParentId),
-      ),
-      ai_pending: Boolean(item.ai_pending),
-    }))
-    .filter((item) => (
-      item.agenda_id &&
-      !item.ai_pending &&
-      Boolean(item.title.trim() || item.body.trim())
-    ))
-    .map((item) => ({
-      id: item.id,
-      agenda_id: item.agenda_id,
-      kind: item.kind,
-      title: item.title,
-      body: item.body,
-    }));
-
-  const personalIdeas = personalNotes
-    .map((note) => ({
-      id: note.id,
-      agenda_id: note.agendaId,
-      kind: note.kind,
-      title: note.title,
-      body: note.body,
-    }))
-    .filter((item) => item.agenda_id && Boolean(item.title.trim() || item.body.trim()));
-
-  return [...canvasIdeas, ...personalIdeas];
-}
-
-function buildProblemDefinitionIdeaSourceSignatures(
-  canvasItems: CanvasItemViewModel[],
-  personalNotes: PersonalNote[],
-) {
-  const signatures: Record<string, string> = {};
-  const itemById = new Map(canvasItems.map((item) => [item.id, item]));
-  const childItemsByParentId = new Map<string, CanvasItemViewModel[]>();
-
-  canvasItems.forEach((item) => {
-    if (!item.parent_topic_id) return;
-    const children = childItemsByParentId.get(item.parent_topic_id) || [];
-    children.push(item);
-    childItemsByParentId.set(item.parent_topic_id, children);
-  });
-
-  canvasItems
-    .filter((item) => !item.parent_topic_id && !item.ai_pending)
-    .forEach((item) => {
-      const descendants = collectProblemDefinitionDescendants(item, childItemsByParentId);
-      signatures[item.id] = makeStableSignature({
-        root: {
-          id: item.id,
-          agenda_id: resolveProblemDefinitionAgendaId(item, itemById),
-          kind: item.kind || "note",
-          title: item.title || "",
-          body: item.body || "",
-          keywords: item.keywords || [],
-          child_item_ids: item.child_item_ids || [],
-        },
-        descendants: descendants.map((child) => ({
-          id: child.id,
-          parent_topic_id: child.parent_topic_id || "",
-          kind: child.kind || "note",
-          title: child.title || "",
-          body: child.body || "",
-          keywords: child.keywords || [],
-          child_item_ids: child.child_item_ids || [],
-          compacted_from_ids: child.compacted_from_ids || [],
-          evidence_utterance_ids: child.evidence_utterance_ids || [],
-          ignored_utterance_ids: child.ignored_utterance_ids || [],
-        })),
-      });
-    });
-
-  personalNotes.forEach((note) => {
-    signatures[note.id] = makeStableSignature({
-      id: note.id,
-      agenda_id: note.agendaId,
-      kind: note.kind,
-      title: note.title,
-      body: note.body,
-      linked_canvas_item_id: note.linkedCanvasItemId || "",
-    });
-  });
-
-  return signatures;
-}
-
-function buildProblemDefinitionAgendaSignatures(
-  agendaModels: AgendaViewModel[],
-) {
-  const signatures: Record<string, string> = {};
-
-  agendaModels.forEach((agenda) => {
-    signatures[agenda.id] = makeStableSignature({
-      agenda: {
-        id: agenda.id,
-        title: agenda.title,
-        keywords: agenda.keywords || [],
-        summary_bullets: agenda.summaryBullets || [],
-      },
-    });
-  });
-
-  return signatures;
-}
-
-function stampProblemGroupSource(
-  group: ProblemGroupViewModel,
-  agendaSignatures: Record<string, string>,
-  ideaSignatures: Record<string, string>,
-): ProblemGroupViewModel {
-  const sourceAgendaSignatures = Object.fromEntries(
-    (group.agenda_ids || [])
-      .map((agendaId) => [agendaId, agendaSignatures[agendaId] || ""] as const)
-      .filter(([, signature]) => Boolean(signature)),
-  );
-  const sourceIdeaSignatures = Object.fromEntries(
-    (group.ideas || [])
-      .map((idea) => [idea.id, ideaSignatures[idea.id] || ""] as const)
-      .filter(([, signature]) => Boolean(signature)),
-  );
-
-  return {
-    ...group,
-    source_agenda_signatures: sourceAgendaSignatures,
-    source_idea_signatures: sourceIdeaSignatures,
-    source_signature: makeStableSignature({
-      agendas: sourceAgendaSignatures,
-      ideas: sourceIdeaSignatures,
-    }),
-  };
-}
-
-function getProblemGroupSourceIdeaIds(
-  group: ProblemGroupViewModel,
-  currentIdeaIds: Set<string>,
-) {
-  const savedIdeaIds = Object.keys(group.source_idea_signatures || {}).filter((id) => currentIdeaIds.has(id));
-  if (savedIdeaIds.length > 0) return savedIdeaIds;
-
-  return (group.ideas || [])
-    .map((idea) => idea.id)
-    .filter((id) => currentIdeaIds.has(id));
-}
-
-function makeUniqueProblemGroupId(baseId: string, usedIds: Set<string>) {
-  const normalizedBase = baseId.trim() || "problem-group";
-  if (!usedIds.has(normalizedBase)) {
-    usedIds.add(normalizedBase);
-    return normalizedBase;
-  }
-
-  let suffix = 2;
-  while (usedIds.has(`${normalizedBase}-${suffix}`)) {
-    suffix += 1;
-  }
-  const nextId = `${normalizedBase}-${suffix}`;
-  usedIds.add(nextId);
-  return nextId;
-}
-
-function shouldRefreshProblemGroup(
-  group: ProblemGroupViewModel,
-  agendaSignatures: Record<string, string>,
-  agendaIdSet: Set<string>,
-  ideaSignatures: Record<string, string>,
-) {
-  const currentAgendaIds = (group.agenda_ids || []).filter((agendaId) => agendaIdSet.has(agendaId));
-  if (currentAgendaIds.length === 0) return false;
-
-  const savedIdeaSignatures = group.source_idea_signatures || {};
-  const savedIdeaIds = Object.keys(savedIdeaSignatures);
-  if (savedIdeaIds.length > 0) {
-    const hasChangedIdea = savedIdeaIds.some(
-      (ideaId) => savedIdeaSignatures[ideaId] !== ideaSignatures[ideaId],
-    );
-    if (hasChangedIdea) return true;
-  }
-
-  const savedSignatures = group.source_agenda_signatures || {};
-  if (!group.source_signature || Object.keys(savedSignatures).length === 0) return true;
-
-  return currentAgendaIds.some((agendaId) => savedSignatures[agendaId] !== agendaSignatures[agendaId]);
-}
-
-function safeDownload(filename: string, content: string, mime: string) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 function normalizeTranscriptRows(rows: MeetingTranscript[] | TranscriptUtterance[]) {
   return rows.map((row, index) => ({
     id: "id" in row ? row.id : `${row.timestamp || "turn"}-${index}`,
@@ -1948,38 +1609,6 @@ function buildAgendaModels(
   ];
 }
 
-function makeNodeLabel(badge: string, title: string, body: string | string[], meta: string[], accent: string) {
-  return (
-    <div className="min-w-0">
-      <div className="flex items-center justify-between gap-2">
-        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${accent}`}>{badge}</span>
-        {meta[0] ? <span className="text-xs text-slate-400">{meta[0]}</span> : null}
-      </div>
-      <strong className="mt-3 block text-base text-slate-900">{title}</strong>
-      {Array.isArray(body) ? (
-        <div className="mt-3 space-y-2">
-          {body.filter(Boolean).slice(0, 3).map((line, index) => (
-            <div key={`${title}-line-${index}`} className="rounded-xl bg-white/75 px-3 py-2 text-sm leading-6 text-slate-600">
-              {line}
-            </div>
-          ))}
-        </div>
-      ) : body ? (
-        <p className="mt-2 text-sm leading-6 text-slate-600">{body}</p>
-      ) : null}
-      {meta.length > 1 ? (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {meta.slice(1, 4).map((item) => (
-            <span key={`${title}-${item}`} className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-500">
-              {item}
-            </span>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function makeAgendaNodeLabel(title: string, summary: string, status: string, keywords: string[]) {
   return (
     <div className="min-w-0 p-1">
@@ -2042,15 +1671,6 @@ const CANVAS_TOPIC_CHILD_GAP_X = 24;
 const CANVAS_TOPIC_CHILD_GAP_Y = 14;
 const CANVAS_TOPIC_CHILDS_PER_ROW = 999;
 const CANVAS_IDEATION_DROP_ZONE_VERTICAL_PADDING = 28;
-const CANVAS_IDEATION_LEFT_X = 0;
-const CANVAS_IDEATION_RIGHT_X = 0;
-const CANVAS_IDEATION_FRAME_Y = 0;
-const CANVAS_IDEATION_LEFT_WIDTH = 360;
-const CANVAS_IDEATION_RIGHT_WIDTH = 820;
-const CANVAS_IDEATION_HEADER_HEIGHT = 92;
-const CANVAS_IDEATION_GROUP_GAP_Y = 18;
-const CANVAS_IDEATION_DETAIL_GAP_X = 28;
-const CANVAS_IDEATION_DETAIL_GAP_Y = 24;
 const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
@@ -2237,17 +1857,6 @@ function isTopicCanvasItem(item: CanvasItemViewModel) {
   return item.kind === "topic";
 }
 
-function isCountableIdeationChildNode(item: CanvasItemViewModel) {
-  if (isTopicCanvasItem(item)) return true;
-  return !item.ai_pending && Boolean(item.title.trim() || item.body.trim());
-}
-
-function getCanvasIdeaCreateStackFallback(items: CanvasItemViewModel[]) {
-  return items
-    .filter((item) => item.ai_generated && !item.ai_pending && Boolean(item.title.trim() || item.body.trim()))
-    .reduce((sum, item) => sum + getCanvasItemMergedSourceCount(item), 0);
-}
-
 function getTopicChildCount(item: CanvasItemViewModel) {
   return (item.child_item_ids || []).filter(Boolean).length;
 }
@@ -2354,26 +1963,6 @@ function getCanvasItemDescendantIds(
 
   visit(itemId);
   return descendantIds;
-}
-
-function getCanvasItemDepth(
-  items: CanvasItemViewModel[],
-  itemId: string,
-) {
-  const itemById = new Map(items.map((item) => [item.id, item]));
-  let current = itemById.get(itemId) || null;
-  let depth = 0;
-  const visited = new Set<string>();
-
-  while (current?.parent_topic_id && !visited.has(current.id)) {
-    visited.add(current.id);
-    const parent = itemById.get(current.parent_topic_id);
-    if (!parent) break;
-    depth += 1;
-    current = parent;
-  }
-
-  return depth;
 }
 
 function buildUserMergedTopicTitle(
@@ -2547,90 +2136,6 @@ function makeCanvasItemNodeLabel(
             연결 노드: {item.point_id}
           </p>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-function makeIdeationFrameLabel(title: string, subtitle: string, countLabel: string) {
-  return (
-    <div className="h-full min-h-full rounded-[28px] border border-black/10 bg-white/70 p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#1b59f8]">{title}</p>
-          <p className="mt-1 text-sm leading-6 text-[#4d4d4d]">{subtitle}</p>
-        </div>
-        <span className="shrink-0 rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">
-          {countLabel}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function makeIdeationGroupNodeLabel(
-  item: CanvasItemViewModel,
-  selected: boolean,
-  childItems: CanvasItemViewModel[],
-  descendantCount: number,
-  highlighted = false,
-  dropTarget = false,
-  dropTargetLabel = "여기로 이동",
-  dropTargetHint = "",
-) {
-  const tone = canvasItemTone((item.kind as ComposerTool) || "topic");
-  const title = item.ai_pending ? "AI 정리 중" : item.title || "그룹";
-  const body = item.ai_pending ? "하위 내용을 정리하는 중" : cleanCanvasNodeBodyText(item.body);
-  const childPreview = childItems.slice(0, 3);
-  const status = normalizeCanvasItemStatus(item.status);
-  const borderClass = dropTarget
-    ? "border-[#1b59f8] shadow-[0_0_0_4px_rgba(27,89,248,0.14),0_14px_30px_rgba(15,23,42,0.16)]"
-    : selected
-      ? "border-black shadow-[0_14px_30px_rgba(15,23,42,0.16)]"
-      : "border-black/10";
-  const backgroundClass = highlighted ? "bg-[linear-gradient(128deg,#fef1ee_0%,#ffffff_100%)]" : tone.shell;
-
-  return (
-    <div className="min-w-0">
-      <div className={`nopan imms-canvas-node-drag-handle cursor-grab rounded-[20px] border px-4 py-4 font-['Inter','Noto_Sans_KR',sans-serif] transition active:cursor-grabbing ${backgroundClass} ${borderClass}`}>
-        <div className="flex items-center justify-between gap-2">
-          <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold ${canvasItemStatusTone(status)}`}>
-            {dropTarget ? dropTargetLabel : canvasItemStatusLabel(status)}
-          </span>
-          <span className="rounded-full bg-black/5 px-2.5 py-1 text-[11px] font-semibold text-[#4d4d4d]">
-            하위 {descendantCount}
-          </span>
-        </div>
-        {dropTarget && dropTargetHint ? (
-          <p className="mt-3 rounded-xl border border-[#1b59f8]/20 bg-white/85 px-3 py-2 text-xs font-semibold leading-5 text-[#1b59f8]">
-            {dropTargetHint}
-          </p>
-        ) : null}
-        <strong className="mt-3 block line-clamp-2 text-[17px] font-semibold leading-6 text-black">
-          {title}
-        </strong>
-        {body ? (
-          <p className="mt-2 line-clamp-2 text-sm leading-6 text-[#4d4d4d]">
-            {body}
-          </p>
-        ) : null}
-        {childPreview.length > 0 ? (
-          <div className="mt-4 space-y-1.5 border-l border-black/15 pl-3">
-            {childPreview.map((child) => (
-              <div key={`${item.id}-child-preview-${child.id}`} className="flex items-center gap-2 text-xs text-[#4d4d4d]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#1b59f8]/60" />
-                <span className="truncate">{child.title || toolLabel((child.kind as ComposerTool) || "note")}</span>
-              </div>
-            ))}
-            {descendantCount > childPreview.length ? (
-              <p className="text-xs font-medium text-[#1b59f8]">+{descendantCount - childPreview.length}개 더 있음</p>
-            ) : null}
-          </div>
-        ) : (
-          <p className="mt-4 rounded-xl border border-dashed border-black/10 bg-white/60 px-3 py-2 text-xs leading-5 text-[#777]">
-            아직 오른쪽 캔버스에 하위 내용이 없습니다.
-          </p>
-        )}
       </div>
     </div>
   );
@@ -2985,13 +2490,6 @@ function estimateAgendaNodeHeight(title: string, summary: string, keywordCount: 
   const summaryLines = estimateWrappedLines(summary, 24);
   const keywordRows = keywordCount > 0 ? Math.ceil(Math.min(keywordCount, 3) / 2) : 0;
   return 122 + titleLines * 28 + summaryLines * 24 + keywordRows * 30;
-}
-
-function estimateStandardNodeHeight(title: string, body: string, metaCount: number, bodyCharsPerLine: number) {
-  const titleLines = estimateWrappedLines(title, 18);
-  const bodyLines = estimateWrappedLines(body, bodyCharsPerLine);
-  const metaRows = metaCount > 1 ? Math.ceil(Math.min(metaCount - 1, 3) / 2) : 0;
-  return 118 + titleLines * 24 + bodyLines * 22 + metaRows * 28;
 }
 
 function estimateProblemDiscussionNodeHeight(item: ProblemDiscussionViewModel) {
@@ -3859,12 +3357,9 @@ export default function MeetingCanvasTab({
   transcripts,
   agendas,
   analysisState,
-  onSyncFromMeeting,
   incomingSharedCanvasSync,
   onSharedCanvasSync,
   incomingCanvasStateRequestId,
-  syncStatusText,
-  autoSyncing,
   liveSpeechPreview,
   sttFlowSummaries = [],
   onImportAudioFile,
@@ -3940,8 +3435,8 @@ export default function MeetingCanvasTab({
   const [meetingGoalEditorDraft, setMeetingGoalEditorDraft] = useState(meetingGoal);
   const [meetingGoalContextEditorDraft, setMeetingGoalContextEditorDraft] = useState(meetingGoalContext);
   const [meetingGoalSaving, setMeetingGoalSaving] = useState(false);
-  const [conclusionRefreshingGroupId, setConclusionRefreshingGroupId] = useState("");
-  const [conclusionBatchBusy, setConclusionBatchBusy] = useState(false);
+  const [, setConclusionRefreshingGroupId] = useState("");
+  const conclusionBatchBusy = false;
   const [problemDefinitionStagePending, setProblemDefinitionStagePending] = useState(false);
   const [problemChildGenerationPendingId, setProblemChildGenerationPendingId] = useState("");
   const [solutionStagePending, setSolutionStagePending] = useState(false);
@@ -3950,7 +3445,7 @@ export default function MeetingCanvasTab({
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
-  const [ideaCreateStack, setIdeaCreateStack] = useState(0);
+  const [, setIdeaCreateStack] = useState(0);
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
   const [rightDrawerContentVisible, setRightDrawerContentVisible] = useState(false);
   const [rightDrawerDetailCollapsed, setRightDrawerDetailCollapsed] = useState(false);
@@ -3959,11 +3454,11 @@ export default function MeetingCanvasTab({
   const [importOverrideActive, setImportOverrideActive] = useState(false);
   const [nodePositions, setNodePositions] = useState<CanvasNodePositionsByStage>({});
   const [nodes, setNodes] = useState<Node[]>([]);
-  const [edges, setEdges] = useState<Edge[]>([]);
+  const [, setEdges] = useState<Edge[]>([]);
   const [selectedEdgeId, setSelectedEdgeId] = useState("");
   const [agendaDragPreview, setAgendaDragPreview] = useState<AgendaDragPreviewState | null>(null);
   const [ideationDropPreview, setIdeationDropPreview] = useState<IdeationDropPreviewState | null>(null);
-  const [ideationNodeDragActive, setIdeationNodeDragActive] = useState(false);
+  const [, setIdeationNodeDragActive] = useState(false);
   const [ideationDragGhost, setIdeationDragGhost] = useState<{
     itemId: string;
     x: number;
@@ -4130,22 +3625,6 @@ export default function MeetingCanvasTab({
 
     return [...hydratedBaseModels, ...customAgendaModels];
   }, [effectiveState, agendas, transcripts, agendaOverrides, customGroups]);
-  const ideationNodeCountSummary = useMemo(() => {
-    const agendaIdSet = new Set(agendaModels.map((agenda) => agenda.id));
-    const directChildCount = canvasItems.filter(
-      (item) =>
-        agendaIdSet.has(item.agenda_id) &&
-        !item.parent_topic_id &&
-        isCountableIdeationChildNode(item),
-    ).length;
-    const fallbackStack = getCanvasIdeaCreateStackFallback(canvasItems);
-    const stack = ideaCreateStack > 0 ? ideaCreateStack : fallbackStack;
-
-    return {
-      directChildCount,
-      target: 3 + Math.floor(stack / 4),
-    };
-  }, [agendaModels, canvasItems, ideaCreateStack]);
   const activeMeetingGoal = meetingGoalDraft.trim();
   const meetingTopicForAi = activeMeetingGoal || meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim() || "회의 주제";
   const transcriptStripItems = useMemo(() => {
@@ -4522,7 +4001,7 @@ export default function MeetingCanvasTab({
         setImportedState(nextImportedState);
         analysisSignatureAtImportRef.current = nextImportedState
           ? buildMeetingStateSignature(nextImportedState)
-          : analysisStateSignature;
+          : "";
         setImportOverrideActive(nextImportOverrideActive);
         setStage(nextStage);
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
@@ -4575,7 +4054,6 @@ export default function MeetingCanvasTab({
             Object.keys(saved.node_positions || {}).length === 0 &&
             Boolean(cachedNodePositions && Object.keys(cachedNodePositions).length > 0),
           nodePositions: summarizeNodePositionsForDebug(nextNodePositions),
-          renderedNodes: summarizeRenderedNodesForDebug(nodes),
         });
       })
       .catch(() => {
@@ -4632,7 +4110,7 @@ export default function MeetingCanvasTab({
     return () => {
       cancelled = true;
     };
-  }, [meetingId, userId]);
+  }, [meetingId, onMeetingGoalChange, onMeetingGoalContextChange, userId]);
 
   useEffect(() => {
     if (audioImportRevision <= 0) {
@@ -5151,74 +4629,6 @@ export default function MeetingCanvasTab({
       setProblemGroupsLoading,
       sharedSyncEnabled,
     ],
-  );
-
-  const handleGenerateAllProblemGroupConclusions = useCallback(
-    async (groups: ProblemGroupViewModel[], targetGroupIds?: string[]) => {
-      if (groups.length === 0) return;
-
-      const targetGroupIdSet = targetGroupIds?.length ? new Set(targetGroupIds) : null;
-      const targetGroups = groups.filter(
-        (group) =>
-          (!targetGroupIdSet || targetGroupIdSet.has(group.group_id)) &&
-          !(group.insight_user_edited && group.conclusion_user_edited),
-      );
-      if (targetGroups.length === 0) {
-        setActivityMessage("모든 문제 정의 그룹의 Insight와 결론이 수동 수정 상태라 AI 재생성을 건너뜁니다.");
-        return;
-      }
-
-      setConclusionBatchBusy(true);
-      setProblemGroupsLoading(targetGroups.map((group) => group.group_id), true);
-      try {
-        let lastWarning = "";
-        let firstError = "";
-        let workingGroups = groups;
-
-        for (const group of targetGroups) {
-          try {
-            const result = await generateProblemGroupConclusion(buildProblemConclusionPayload(group));
-            workingGroups = workingGroups.map((item) =>
-              item.group_id === group.group_id
-                ? {
-                    ...item,
-                    conclusion: item.conclusion_user_edited
-                      ? item.conclusion
-                      : result.conclusion || item.conclusion,
-                    insight_lens: item.insight_user_edited
-                      ? item.insight_lens
-                      : (result.used_llm ? result.insight_lens : "") || item.insight_lens,
-                  }
-                : item,
-            );
-            setProblemGroups(workingGroups);
-            if (!sharedSyncEnabled) {
-              forceBroadcastSharedCanvas({
-                stage: "problem-definition",
-                problemGroups: workingGroups,
-              });
-            }
-            if (result.warning && !lastWarning) {
-              lastWarning = result.warning;
-            }
-          } catch (error) {
-            if (!firstError) {
-              firstError = error instanceof Error ? error.message : String(error);
-            }
-          } finally {
-            setProblemGroupsLoading([group.group_id], false);
-          }
-        }
-        setActivityMessage(
-          firstError
-            ? `전체 결론 생성 중 일부 실패: ${firstError}`
-            : lastWarning || `문제 정의 그룹 ${targetGroups.length}개의 결론을 생성했습니다.`,
-        );
-      } finally {
-        setConclusionBatchBusy(false);
-      }
-    },
-    [buildProblemConclusionPayload, forceBroadcastSharedCanvas, setProblemGroupsLoading, sharedSyncEnabled],
   );
 
   const handleAttachPersonalNoteToProblemGroup = useCallback((groupId: string, noteId: string) => {
@@ -6558,7 +5968,6 @@ export default function MeetingCanvasTab({
           stage: latestSharedWorkspaceRef.current.stage,
           canvasItems: latestSharedWorkspaceRef.current.canvasItems.length,
           nodePositions: summarizeNodePositionsForDebug(latestSharedWorkspaceRef.current.nodePositions),
-          renderedNodes: summarizeRenderedNodesForDebug(nodes),
         });
         flushCanvasWorkspacePatch(
           buildFullWorkspacePatchPayload({
@@ -8414,7 +7823,6 @@ export default function MeetingCanvasTab({
     problemGroups,
     problemIdeaDrag,
     problemIdeaDropPreview,
-    selectedAgendaId,
     selectedCanvasItemId,
     selectedNodeId,
     selectedProblemGroupId,
@@ -8514,7 +7922,6 @@ export default function MeetingCanvasTab({
     };
   }, []);
 
-  const selectedNode = useMemo(() => nodes.find((item) => item.id === selectedNodeId) || null, [nodes, selectedNodeId]);
   const selectedAgenda = useMemo(
     () => agendaModels.find((agenda) => agenda.id === selectedAgendaId) || agendaModels[0] || null,
     [agendaModels, selectedAgendaId],
@@ -8527,9 +7934,6 @@ export default function MeetingCanvasTab({
     () => personalNotes.filter((note) => !note.projectId || note.projectId === meetingId),
     [meetingId, personalNotes],
   );
-  const autoLinkEdges = useMemo<Edge[]>(() => {
-    return [];
-  }, []);
   const displayEdges = useMemo<Edge[]>(() => {
     return [];
   }, []);
@@ -8871,7 +8275,7 @@ export default function MeetingCanvasTab({
       ],
       organizeTitle: "맥락",
     };
-  }, [agendaModels, canvasItems, problemGroups, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
+  }, [agendaModels, canvasItems, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
 
   const handleGenerateProblemDefinition = useCallback(async () => {
     setProblemDefinitionStagePending(true);
@@ -8964,7 +8368,7 @@ export default function MeetingCanvasTab({
     transcripts,
   ]);
 
-  const handleGenerateSolutionStage = async () => {
+  const handleGenerateSolutionStage = useCallback(async () => {
     const finalizedGroups = problemGroups.filter((group) => group.status === "final");
     setStage("solution");
     setLeftPanelTab("detail");
@@ -9009,7 +8413,14 @@ export default function MeetingCanvasTab({
       setSolutionStagePending(false);
       setBusy(false);
     }
-  };
+  }, [
+    forceBroadcastSharedCanvas,
+    meetingId,
+    meetingTopicForAi,
+    problemGroups,
+    sharedSyncEnabled,
+    solutionTopics,
+  ]);
 
   const handleStageSelect = useCallback(
     async (nextStage: CanvasStage) => {
@@ -11186,50 +10597,6 @@ export default function MeetingCanvasTab({
           canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
         }).catch((error) => {
           console.error("Failed to save shared canvas items:", error);
-        });
-      }
-    }
-  };
-
-  const handleSetCanvasItemStatus = (
-    status: CanvasItemStatus,
-    targetItemId = selectedCanvasItem?.id || "",
-    selectAfterChange = true,
-  ) => {
-    const targetItem = canvasItems.find((item) => item.id === targetItemId) || null;
-    if (!targetItem || targetItem.parent_topic_id) return;
-
-    const nextStatus = normalizeCanvasItemStatus(status);
-    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
-      item.id === targetItem.id
-        ? {
-            ...item,
-            status: nextStatus,
-            user_edited: true,
-          }
-        : item,
-    );
-
-    setCanvasItems(nextCanvasItemsSnapshot);
-    if (selectAfterChange) {
-      setSelectedCanvasItemId(targetItem.id);
-      setSelectedNodeId(`canvas-item-${targetItem.id}`);
-    }
-    setActivityMessage(`공용 canvas 아이템 상태를 "${canvasItemStatusLabel(nextStatus)}"로 변경했습니다.`);
-
-    if (sharedSyncEnabled) {
-      latestSharedWorkspaceRef.current = {
-        ...latestSharedWorkspaceRef.current,
-        canvasItems: nextCanvasItemsSnapshot,
-        importedState: persistedSharedImportedState,
-      };
-      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
-      if (meetingId) {
-        void saveCanvasWorkspacePatch({
-          meeting_id: meetingId,
-          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-        }).catch((error) => {
-          console.error("Failed to save shared canvas item status:", error);
         });
       }
     }

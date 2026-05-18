@@ -437,7 +437,7 @@ function HomeContent() {
     };
 
     void loadMeeting();
-  }, [user, meetingId, stopAudioImportPolling]);
+  }, [applyMeetingStateToUi, user, meetingId, stopAudioImportPolling]);
 
   useEffect(() => {
     if (!user || !meetingId) return;
