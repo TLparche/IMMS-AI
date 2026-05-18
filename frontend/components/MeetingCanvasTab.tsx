@@ -4,7 +4,6 @@ import "@xyflow/react/dist/style.css";
 import {
   Background,
   BackgroundVariant,
-  Controls,
   MiniMap,
   MarkerType,
   Position,
@@ -34,7 +33,6 @@ import {
   generateCanvasSummaryDocument,
   flushCanvasPersonalNotes,
   flushCanvasWorkspacePatch,
-  importAgendaSnapshot,
   saveCanvasPersonalNotes,
   saveCanvasWorkspacePatch,
   startCanvasProblemDiscussionWorkspace,
@@ -62,6 +60,7 @@ import type {
   TranscriptUtterance,
 } from "@/lib/types";
 import type { LiveSpeechPreview, SttFlowSummaryItem } from "@/app/page";
+import { useRouter } from "next/navigation";
 
 export type MeetingTranscript = {
   id: string;
@@ -882,8 +881,8 @@ function stageLabel(stage: CanvasStage) {
   return "요약";
 }
 
-function syncModeLabel(enabled: boolean) {
-  return enabled ? "공유 ON" : "공유 OFF";
+function shouldHideCanvasStatusMessage(message: string) {
+  return /websocket|웹소켓|연결\s*안\s*됨|연결되지|오류|에러|실패/i.test(message);
 }
 
 function KeyboardDoubleArrowLeftIcon({ className = "" }: { className?: string }) {
@@ -1343,11 +1342,6 @@ function toolPreviewTone(tool: CanvasTool, stage?: CanvasStage) {
   if (tool === "topic") return "border-fuchsia-200 bg-fuchsia-50/92 text-fuchsia-700";
   if (tool === "comment") return "border-sky-200 bg-sky-50/92 text-sky-700";
   return "border-amber-200 bg-amber-50/92 text-amber-700";
-}
-
-function isAudioImportFile(file: File) {
-  const suffix = file.name.split(".").pop()?.toLowerCase() || "";
-  return ["wav", "mp3", "m4a", "webm"].includes(suffix);
 }
 
 function extractAgendaIdFromNodeId(nodeId: string) {
@@ -2718,7 +2712,8 @@ function buildIdeationKeywordBubbles(transcripts: MeetingTranscript[], limit = 1
 
 function getIdeationKeywordBubbleSize(bubble: IdeationKeywordBubble, maxCount: number) {
   const countRatio = maxCount <= 1 ? 1 : bubble.count / maxCount;
-  return Math.round(74 + countRatio * 88);
+  const emphasizedRatio = Math.pow(countRatio, 0.72);
+  return Math.round(58 + emphasizedRatio * 130);
 }
 
 function getIdeationKeywordBubbleFontSize(text: string, size: number) {
@@ -2905,7 +2900,6 @@ function buildIdeationKeywordBubblePlacements(bubbles: IdeationKeywordBubble[]):
 
 function makeIdeationKeywordBubbleNodeLabel(bubble: IdeationKeywordBubble, size: number) {
   const fontSize = getIdeationKeywordBubbleFontSize(bubble.text, size);
-  const countFontSize = clampNumber(Math.round(fontSize * 0.56), 9, 12);
   return (
     <div className="flex h-full w-full flex-col items-center justify-center rounded-full border border-[#1b59f8]/10 bg-white/90 px-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_18px_44px_rgba(27,89,248,0.14)] backdrop-blur">
       <strong
@@ -2919,9 +2913,6 @@ function makeIdeationKeywordBubbleNodeLabel(bubble: IdeationKeywordBubble, size:
       >
         {bubble.text}
       </strong>
-      <span className="mt-1 font-semibold text-[#4d4d4d]/70" style={{ fontSize: countFontSize }}>
-        {bubble.count}회
-      </span>
     </div>
   );
 }
@@ -4328,8 +4319,6 @@ export default function MeetingCanvasTab({
   incomingCanvasStateRequestId,
   liveSpeechPreview,
   sttFlowSummaries = [],
-  onImportAudioFile,
-  audioImportBusy,
   audioImportStatusText,
   audioImportRevision,
   isRecording = false,
@@ -4340,6 +4329,7 @@ export default function MeetingCanvasTab({
   onCanvasStageContextChange,
   recordingStatusText = "",
 }: MeetingCanvasTabProps) {
+  const router = useRouter();
   const [stage, setStage] = useState<CanvasStage>("ideation");
   const [composerTool, setComposerTool] = useState<ComposerTool>("note");
   const [armedCanvasTool, setArmedCanvasTool] = useState<CanvasTool | null>(null);
@@ -4433,7 +4423,7 @@ export default function MeetingCanvasTab({
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
   const [solutionSuggestionBusyTopicId, setSolutionSuggestionBusyTopicId] = useState("");
   const [liveFlowHint, setLiveFlowHint] = useState("");
-  const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
+  const [, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
   const [, setIdeaCreateStack] = useState(0);
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
@@ -4510,7 +4500,6 @@ export default function MeetingCanvasTab({
       return !prev;
     });
   };
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const canvasSurfaceRef = useRef<HTMLDivElement | null>(null);
   const flowRef = useRef<ReactFlowInstance<Node, Edge> | null>(null);
@@ -10554,12 +10543,12 @@ export default function MeetingCanvasTab({
     setActivityMessage("개인 메모에 저장했습니다.");
   };
 
-  const canUseCanvasToolbar = stage === "ideation" || stage === "problem-definition";
+  const canUseCanvasToolbar = stage === "problem-definition";
   const visibleCanvasTools = useMemo<CanvasTool[]>(
     () =>
       stage === "problem-definition"
         ? ["group"]
-        : ["note", "comment", "topic", "group"],
+        : [],
     [stage],
   );
   const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] =
@@ -10619,11 +10608,7 @@ export default function MeetingCanvasTab({
           ? "문제정의 그룹 도구를 선택했습니다. 보드를 클릭하면 새 문제정의 그룹이 생성됩니다."
           : stage === "problem-definition" && tool === "problem-idea"
             ? "아이디어 추가 도구를 선택했습니다. 문제정의 그룹을 클릭하면 아이디어 카드가 추가됩니다."
-          : stage === "ideation" && tool === "group"
-            ? "그룹 도구를 선택했습니다. 보드를 클릭하면 프로젝트 그룹 분류가 생성됩니다."
-            : stage === "problem-definition"
-              ? `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 문제정의 의견 노드가 생성됩니다.`
-              : `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 공용 canvas 아이템이 생성됩니다.`,
+          : `${toolLabel(tool, stage)} 도구를 선택했습니다. 보드를 클릭하면 문제정의 의견 노드가 생성됩니다.`,
     );
   };
 
@@ -10645,17 +10630,6 @@ export default function MeetingCanvasTab({
       if (!canUseCanvasToolbar || !armedCanvasTool || !visibleCanvasTools.includes(armedCanvasTool) || !canvasSurfaceRef.current) {
         setCanvasPlacementPreview(null);
         return;
-      }
-
-      if (
-        stage === "ideation" &&
-        (armedCanvasTool === "note" || armedCanvasTool === "comment")
-      ) {
-        const rightPaneRect = getReactFlowCanvasRect(ideationRightPaneRef.current);
-        if (!pointInRect(clientX, clientY, rightPaneRect)) {
-          setCanvasPlacementPreview(null);
-          return;
-        }
       }
 
       const rect = canvasSurfaceRef.current.getBoundingClientRect();
@@ -13286,7 +13260,8 @@ export default function MeetingCanvasTab({
     setAgendaDragPreview(nextPreview);
   };
 
-  const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
+  const rawCanvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
+  const canvasStatusMessage = shouldHideCanvasStatusMessage(rawCanvasStatusMessage) ? "" : rawCanvasStatusMessage;
   const activeProblemGroupingRationale = problemGroupingRationaleOpenGroupId
     ? problemGroupingRationaleById[problemGroupingRationaleOpenGroupId] || null
     : null;
@@ -13327,13 +13302,6 @@ export default function MeetingCanvasTab({
   const workspaceGridColumns = rightDrawerCollapsed
     ? "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
-  const latestDiscussionRootItem = useMemo(() => {
-    if (!latestHighlightedTopicId) return null;
-    const latestItem = canvasItems.find((item) => item.id === latestHighlightedTopicId) || null;
-    if (!latestItem) return null;
-    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, latestItem.id);
-    return canvasItems.find((item) => item.id === rootId) || latestItem;
-  }, [canvasItems, latestHighlightedTopicId]);
   const problemSplitEdges = useMemo(() => {
     if (stage !== "problem-definition" || problemDefinitionPhase === "structure") {
       return { left: [] as Edge[], right: [] as Edge[] };
@@ -13528,26 +13496,6 @@ export default function MeetingCanvasTab({
     setSelectedNodeId(`canvas-item-${item.id}`);
     setActivityMessage("개인 메모를 선택한 아이디어 노드에 연결했습니다.");
     return true;
-  };
-
-  const handleMoveToCurrentDiscussionGroup = () => {
-    if (!latestDiscussionRootItem) {
-      setActivityMessage("아직 AI가 업데이트한 논의 그룹이 없습니다.");
-      return;
-    }
-
-    setStage("ideation");
-    setSelectedAgendaId(latestDiscussionRootItem.agenda_id || selectedAgendaId || agendaModels[0]?.id || "");
-    setSelectedCanvasItemId(latestDiscussionRootItem.id);
-    setSelectedNodeId(`canvas-item-${latestDiscussionRootItem.id}`);
-    setSelectedProblemGroupId("");
-    setSelectedProblemSourceNodeId("");
-    setSelectedSolutionTopicId("");
-    setSelectedEdgeId("");
-    setFocusedCanvasItemId(latestDiscussionRootItem.id);
-    setLatestHighlightedTopicId(latestDiscussionRootItem.id);
-    setLeftPanelTab("detail");
-    setActivityMessage("현재 논의 중인 그룹으로 이동했습니다.");
   };
 
   const handleCreateProblemGroupLink = (sourceGroupId: string, targetGroupId: string) => {
@@ -14757,43 +14705,11 @@ export default function MeetingCanvasTab({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setSharedSyncEnabled((prev) => {
-                    const next = !prev;
-                    setActivityMessage(
-                      next
-                        ? "이제 내 canvas 변경사항이 다른 참가자들과 공유됩니다."
-                        : "이제 내 canvas 변경사항은 로컬에서만 유지되고, 다른 참가자의 변경만 받아옵니다.",
-                    );
-                    return next;
-                  });
-                }}
+                onClick={() => router.push("/dashboard")}
                 className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee]"
               >
-                {syncModeLabel(sharedSyncEnabled)}
+                메인화면으로 돌아가기
               </button>
-              <button
-                type="button"
-                onClick={handleMoveToCurrentDiscussionGroup}
-                className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
-                  latestDiscussionRootItem
-                    ? "bg-[#eef4ff] text-[#1b59f8] hover:bg-[#e0ebff]"
-                    : "bg-[#eff0f6] text-[#8b8f9a]"
-                }`}
-              >
-                논의 그룹
-              </button>
-              <button
-                type="button"
-                disabled={audioImportBusy}
-                onClick={() => fileInputRef.current?.click()}
-                className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] bg-[#eff0f6] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] hover:bg-[#e3e5ee] disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                불러오기
-              </button>
-              <span className="inline-flex h-[30px] items-center rounded-full border border-black/10 bg-[#f9f9f9] px-3 text-[11px] font-semibold leading-none text-[#6f6f6f]">
-                STT {transcripts.length}개
-              </span>
             </div>
 
             <div className="relative min-w-0 justify-self-center text-center">
@@ -14911,79 +14827,6 @@ export default function MeetingCanvasTab({
               </div>
             </div>
           </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                accept="application/json,.wav,.mp3,.m4a,.webm,audio/wav,audio/mpeg,audio/mp4,audio/webm"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    if (isAudioImportFile(file)) {
-                      void onImportAudioFile(file).then(() => {
-                        setActivityMessage(`오디오 파일 불러오기를 시작했습니다: ${file.name}`);
-                      });
-                    } else {
-                      void importAgendaSnapshot({ file, reset_state: true }).then((result) => {
-                        setImportedState(result.state);
-                        analysisSignatureAtImportRef.current = analysisStateSignature;
-                        setImportOverrideActive(true);
-                        setCanvasItems([]);
-                        setIdeaCreateStack(0);
-                        setCustomGroups([]);
-                        setProblemGroups([]);
-                        setSolutionTopics([]);
-                        setFinalSummaryDocument(createEmptyFinalSolutionSummary());
-                        setSummaryDocumentEditMode(false);
-                        setSummaryEvidenceOpenGroupIds(new Set());
-                        setNodePositions({});
-                        setStage("ideation");
-                        setProblemDefinitionMode("");
-                        setProblemDefinitionPhase("explore");
-                        setProblemStructureSetupOpen(false);
-                        setProblemStructureNodes([]);
-                        setProblemStructureGroups([]);
-                        setProblemStructurePending(false);
-                        setSelectedProblemGroupId("");
-                        setSelectedSolutionTopicId("");
-                        setSelectedNodeId("");
-                        setEditingProblemGroupId("");
-                        setEditingSolutionTopicId("");
-                        setActivityMessage(`스냅샷을 불러왔습니다: ${result.import_debug.filename}`);
-                        analysisSignatureAtImportRef.current = buildMeetingStateSignature(result.state);
-                        if (sharedSyncEnabled) {
-                          forceBroadcastSharedCanvas({
-                            stage: "ideation",
-                            agendaOverrides: {},
-                            canvasItems: [],
-                            customGroups: [],
-                            problemGroups: [],
-                            solutionTopics: [],
-                            finalSolutionSummary: createEmptyFinalSolutionSummary(),
-                            nodePositions: {},
-                            importedState: result.state,
-                          });
-                          void saveCanvasWorkspacePatch({
-                            meeting_id: meetingId,
-                            stage: "ideation",
-                            agenda_overrides: {},
-                            canvas_items: [],
-                            custom_groups: [],
-                            problem_groups: [],
-                            solution_topics: [],
-                            final_solution_summary: buildFinalSolutionSummaryPayload([], createEmptyFinalSolutionSummary()),
-                            node_positions: {},
-                            imported_state: result.state,
-                          }).catch((error) => {
-                            console.error("Failed to save imported canvas snapshot:", error);
-                          });
-                        }
-                      });
-                    }
-                  }
-                  event.currentTarget.value = "";
-                }}
-              />
             </div>
 
         <div
@@ -14991,80 +14834,42 @@ export default function MeetingCanvasTab({
           style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
           <section ref={canvasSurfaceRef} className="relative order-1 flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:col-start-1 xl:row-span-2 xl:row-start-1 xl:h-full xl:min-h-0 xl:border-b-0">
-            <div className={canvasHeaderGridClassName}>
-              <div className={`${canvasHeaderCellClassName} flex items-center border-b border-black/10 xl:border-b-0 xl:border-r`}>
-                <div className="flex w-full min-w-0 items-start justify-between gap-[clamp(12px,1.5vw,20px)]">
-                  <div className="min-w-0">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]/80">
-                      {stage === "solution" ? "Summary" : stage === "problem-definition" ? "Problem" : "Idea"}
-                    </p>
-                    <h3 className="mt-1 truncate text-[clamp(15px,1.15vw,18px)] font-semibold leading-[24.811px] text-black">
-                      {canvasHeaderLeftTitle}
-                    </h3>
-                    <p className="mt-1 line-clamp-2 max-w-[min(30rem,100%)] text-[clamp(12px,0.9vw,15px)] font-normal leading-[1.55] text-[#4d4d4d]">
-                      {canvasHeaderLeftSummary}
-                    </p>
+            {stage !== "ideation" ? (
+              <div className={canvasHeaderGridClassName}>
+                <div className={`${canvasHeaderCellClassName} flex items-center border-b border-black/10 xl:border-b-0 xl:border-r`}>
+                  <div className="flex w-full min-w-0 items-start justify-between gap-[clamp(12px,1.5vw,20px)]">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]/80">
+                        {stage === "solution" ? "Summary" : "Problem"}
+                      </p>
+                      <h3 className="mt-1 truncate text-[clamp(15px,1.15vw,18px)] font-semibold leading-[24.811px] text-black">
+                        {canvasHeaderLeftTitle}
+                      </h3>
+                      <p className="mt-1 line-clamp-2 max-w-[min(30rem,100%)] text-[clamp(12px,0.9vw,15px)] font-normal leading-[1.55] text-[#4d4d4d]">
+                        {canvasHeaderLeftSummary}
+                      </p>
+                    </div>
                   </div>
-                  <div className="mt-1 flex shrink-0 items-center gap-2">
-                    {stage === "ideation" && selectedAgenda ? (
-                      <>
-                        {isEditingSelectedAgenda ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={handleCancelAgendaEdit}
-                              className="rounded-[8px] bg-[#eff0f6] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
-                            >
-                              취소
-                            </button>
-                            <button
-                              type="button"
-                              onClick={handleSaveAgendaEdit}
-                              className="rounded-[8px] bg-[#1b59f8] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#164be0]"
-                            >
-                              저장
-                            </button>
-                          </>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              openRightDrawer();
-                              handleStartAgendaEdit();
-                            }}
-                            className="rounded-[8px] bg-[#e9efff] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#dfe8ff]"
-                          >
-                            수정
-                          </button>
-                        )}
-                      </>
+                </div>
+                <div className={`${canvasHeaderCellClassName} relative flex flex-col items-center justify-center text-center`}>
+                  <div className="pointer-events-none absolute right-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap justify-end gap-2">
+                    {problemDiscussionStatus ? (
+                      <span className="rounded-full border border-violet-100 bg-violet-50/95 px-2.5 py-1 text-[11px] font-medium text-violet-700">
+                        {problemDiscussionStatus}
+                      </span>
                     ) : null}
                   </div>
+                  <div className="w-full max-w-[min(46rem,92%)] pt-[clamp(0.35rem,0.8vh,0.7rem)]">
+                    <p className="line-clamp-1 text-[clamp(12px,0.9vw,15px)] font-normal leading-[24.811px] text-[#4d4d4d]">
+                      {canvasHeaderSpeechRows[0]?.text || "이전 발언 요약 대기 중"}
+                    </p>
+                    <p className="mt-1 line-clamp-1 text-[clamp(14px,1.02vw,16px)] font-normal leading-[24.811px] text-black">
+                      {canvasHeaderSpeechRows[1]?.text || sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중"}
+                    </p>
+                  </div>
                 </div>
               </div>
-              <div className={`${canvasHeaderCellClassName} relative flex flex-col items-center justify-center text-center`}>
-                <div className="pointer-events-none absolute right-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap justify-end gap-2">
-                  {ideaAssimilationStatus ? (
-                    <span className="rounded-full border border-black/10 bg-[#f9f9f9]/95 px-2.5 py-1 text-[11px] font-medium text-[#777]">
-                      {ideaAssimilationStatus}
-                    </span>
-                  ) : null}
-                  {problemDiscussionStatus ? (
-                    <span className="rounded-full border border-violet-100 bg-violet-50/95 px-2.5 py-1 text-[11px] font-medium text-violet-700">
-                      {problemDiscussionStatus}
-                    </span>
-                  ) : null}
-                </div>
-                <div className="w-full max-w-[min(46rem,92%)] pt-[clamp(0.35rem,0.8vh,0.7rem)]">
-                  <p className="line-clamp-1 text-[clamp(12px,0.9vw,15px)] font-normal leading-[24.811px] text-[#4d4d4d]">
-                    {canvasHeaderSpeechRows[0]?.text || "이전 발언 요약 대기 중"}
-                  </p>
-                  <p className="mt-1 line-clamp-1 text-[clamp(14px,1.02vw,16px)] font-normal leading-[24.811px] text-black">
-                    {canvasHeaderSpeechRows[1]?.text || sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중"}
-                  </p>
-                </div>
-              </div>
-            </div>
+            ) : null}
             <div
               className="relative min-h-0 w-full flex-1"
               onMouseMove={(event) => {
@@ -15116,7 +14921,6 @@ export default function MeetingCanvasTab({
                     maskColor="rgba(15, 23, 42, 0.08)"
                     nodeColor={stage === "problem-definition" ? "#1b59f8" : "#0f766e"}
                   />
-                  <Controls />
                 </ReactFlow>
               ) : stage === "solution" ? (
                 <div className="grid h-full min-h-0 grid-cols-1 bg-[#f5f6f8] xl:grid-cols-[minmax(18rem,32%)_minmax(0,1fr)]">
@@ -15309,7 +15113,6 @@ export default function MeetingCanvasTab({
                     maskColor="rgba(15, 23, 42, 0.08)"
                     nodeColor="#0f766e"
                   />
-                  <Controls />
                 </ReactFlow>
               )}
             </div>
@@ -15699,67 +15502,40 @@ export default function MeetingCanvasTab({
             ) : null}
 
             {stage === "problem-definition" ? (
-              <>
-                <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
-                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(860px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
-                    {problemCanvasToolbarActions.map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => handleProblemToolbarAction(item)}
-                        disabled={
-                          !canUseCanvasToolbar ||
-                          problemDefinitionStagePending ||
-                          ((item === "debug-regenerate" || item === "debug-refresh-chunks") && busy) ||
-                          (item === "structure-start" && problemGroups.length === 0) ||
-                          (item === "structure-ai-group" &&
-                            (problemStructurePending || (problemStructureNodes.length === 0 && problemGroups.length === 0))) ||
-                          ((item === "structure-add-group" || item === "structure-refresh") && problemDefinitionPhase !== "structure") ||
-                          (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)
-                        }
-                        className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(110px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
-                          isProblemToolbarActionActive(item)
-                            ? "bg-[#1b59f8]/10 text-[#1b59f8]"
-                            : "text-[#4d4d4d] hover:bg-black/5"
-                        } disabled:cursor-not-allowed disabled:opacity-45`}
-                      >
-                        <span>{problemToolbarActionLabel(item)}</span>
-                      </button>
-                    ))}
-                    {armedCanvasTool || pendingProblemGroupLinkId ? (
-                      <span className="hidden shrink-0 rounded-full bg-[#eff0f6] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] sm:inline-flex">
-                        클릭 대기
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-              </>
-            ) : (
               <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
-                <div className="pointer-events-auto flex min-h-[clamp(52px,7vh,60px)] w-auto max-w-[min(720px,calc(100%-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
-                  {visibleCanvasTools.map((item) => (
+                <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(860px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
+                  {problemCanvasToolbarActions.map((item) => (
                     <button
                       key={item}
                       type="button"
-                      onClick={() => armCanvasTool(item)}
-                      disabled={!canUseCanvasToolbar}
-                      className={`flex h-[clamp(36px,4.4vh,40px)] min-w-[clamp(74px,7vw,92px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(12px,1.2vw,16px)] text-[clamp(13px,1vw,16px)] font-medium transition-all duration-150 ease-out ${
-                        armedCanvasTool === item
+                      onClick={() => handleProblemToolbarAction(item)}
+                      disabled={
+                        !canUseCanvasToolbar ||
+                        problemDefinitionStagePending ||
+                        ((item === "debug-regenerate" || item === "debug-refresh-chunks") && busy) ||
+                        (item === "structure-start" && problemGroups.length === 0) ||
+                        (item === "structure-ai-group" &&
+                          (problemStructurePending || (problemStructureNodes.length === 0 && problemGroups.length === 0))) ||
+                        ((item === "structure-add-group" || item === "structure-refresh") && problemDefinitionPhase !== "structure") ||
+                        (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)
+                      }
+                      className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(110px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
+                        isProblemToolbarActionActive(item)
                           ? "bg-[#1b59f8]/10 text-[#1b59f8]"
                           : "text-[#4d4d4d] hover:bg-black/5"
                       } disabled:cursor-not-allowed disabled:opacity-45`}
                     >
-                      <span>{toolLabel(item, stage)}</span>
+                      <span>{problemToolbarActionLabel(item)}</span>
                     </button>
                   ))}
-                  {armedCanvasTool ? (
+                  {armedCanvasTool || pendingProblemGroupLinkId ? (
                     <span className="hidden shrink-0 rounded-full bg-[#eff0f6] px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] sm:inline-flex">
                       클릭 대기
                     </span>
                   ) : null}
                 </div>
               </div>
-            )}
+            ) : null}
           </section>
 
           <div className={rightDrawerWrapperClassName}>
