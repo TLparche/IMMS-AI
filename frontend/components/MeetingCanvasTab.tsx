@@ -4095,6 +4095,7 @@ export default function MeetingCanvasTab({
     setNodePositions({});
     setImportedState(null);
     setStage("ideation");
+    setProblemDefinitionMode("");
     setProblemDefinitionStagePending(false);
     setSolutionStagePending(false);
     setSelectedProblemGroupId("");
@@ -4201,6 +4202,7 @@ export default function MeetingCanvasTab({
         setSharedSyncEnabled(nextSharedSyncEnabled);
         setNodePositions(nextNodePositions);
         setImportedState(nextImportedState);
+        setProblemDefinitionMode("");
         analysisSignatureAtImportRef.current = nextImportedState
           ? buildMeetingStateSignature(nextImportedState)
           : "";
@@ -4271,6 +4273,7 @@ export default function MeetingCanvasTab({
         setNodePositions({});
         setImportedState(null);
         setStage("ideation");
+        setProblemDefinitionMode("");
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           meeting_goal: "",
           meeting_goal_context: "",
@@ -6098,6 +6101,9 @@ export default function MeetingCanvasTab({
       setImportOverrideActive(false);
     }
     setStage(incomingStage);
+    if (incomingStage === "problem-definition") {
+      setProblemDefinitionMode("");
+    }
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
       meetingGoal: incomingMeetingGoal,
       meetingGoalContext: incomingMeetingGoalContext,
@@ -8498,6 +8504,7 @@ export default function MeetingCanvasTab({
 
       const utterances = buildProblemTaxonomyUtterances(transcripts);
       if (utterances.length === 0) {
+        setProblemDefinitionMode("");
         setSelectedProblemGroupId("");
         setSelectedNodeId("");
         setActivityMessage("문제정의를 만들 STT 발화가 아직 없습니다.");
@@ -13022,6 +13029,7 @@ export default function MeetingCanvasTab({
                         setSolutionTopics([]);
                         setNodePositions({});
                         setStage("ideation");
+                        setProblemDefinitionMode("");
                         setSelectedProblemGroupId("");
                         setSelectedSolutionTopicId("");
                         setSelectedNodeId("");
@@ -13413,13 +13421,13 @@ export default function MeetingCanvasTab({
                     문제정의 단계를 준비하고 있습니다
                   </h3>
                   <p className="mt-3 text-base leading-7 text-slate-500">
-                    안건과 메모를 묶어서 문제정의 그룹을 만드는 중입니다.
+                    아이디어 단계의 STT 발화를 바탕으로 큰 분류를 만드는 중입니다.
                   </p>
                 </div>
               </div>
             ) : null}
 
-            {stage === "problem-definition" && !problemDefinitionStagePending && !problemDefinitionMode ? (
+            {stage === "problem-definition" && !problemDefinitionStagePending && !problemDefinitionMode && problemGroups.length > 0 ? (
               <div className="absolute inset-0 z-[7] flex items-center justify-center bg-white/82 px-4 backdrop-blur-[2px]">
                 <div className="w-[min(720px,94%)] rounded-[20px] border border-black/10 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.14)]">
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Problem Definition</p>
