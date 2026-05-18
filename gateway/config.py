@@ -2,7 +2,9 @@
 Gateway Configuration
 환경 변수 관리
 """
+import json
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from pathlib import Path
 from supabase import create_client, Client
 
@@ -25,8 +27,31 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     
     # CORS
-    cors_origins: list = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "https://imms-ai.vercel.app",
+    ]
+    cors_origin_regex: str = r"https://.*\.vercel\.app"
     ip_whitelist: str = ""
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    parsed = []
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        return value
     
     class Config:
         env_file = str(Path(__file__).parent / ".env")

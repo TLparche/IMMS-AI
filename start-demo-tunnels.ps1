@@ -3,7 +3,8 @@ param(
   [int]$GatewayPort = 8001,
   [int]$TunnelTimeoutSeconds = 90,
   [int]$TunnelMaxAttempts = 4,
-  [switch]$KeepExistingPortProcesses
+  [switch]$KeepExistingPortProcesses,
+  [switch]$CleanupOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,23 +50,119 @@ function Start-LoggedProcess {
   }
 }
 
+function Get-ChildProcessIds {
+  param([int]$ParentProcessId)
+
+  $ids = @()
+  try {
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ParentProcessId" -ErrorAction SilentlyContinue)
+  } catch {
+    return $ids
+  }
+
+  foreach ($child in $children) {
+    $childId = [int]$child.ProcessId
+    $ids += Get-ChildProcessIds -ParentProcessId $childId
+    $ids += $childId
+  }
+  return $ids
+}
+
+function Stop-ProcessTree {
+  param(
+    [int]$ProcessId,
+    [string]$Label = ""
+  )
+
+  if ($ProcessId -le 0 -or $ProcessId -eq $PID) {
+    return
+  }
+
+  $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+  if (-not $process) {
+    return
+  }
+
+  $displayName = if ($Label) { $Label } else { "$($process.ProcessName) (PID $ProcessId)" }
+  $ids = @(Get-ChildProcessIds -ParentProcessId $ProcessId)
+  $ids += $ProcessId
+  $ids = @($ids | Where-Object { $_ -and $_ -ne $PID } | Select-Object -Unique)
+
+  foreach ($id in $ids) {
+    try {
+      $target = Get-Process -Id $id -ErrorAction Stop
+      Stop-Process -Id $id -Force -ErrorAction Stop
+      Write-Host "Stopped $($target.ProcessName) (PID $id) for $displayName"
+    } catch {
+      Write-Warning "Failed to stop PID $id for $displayName with Stop-Process: $($_.Exception.Message)"
+    }
+  }
+
+  Start-Sleep -Milliseconds 300
+  $remaining = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+  if ($remaining.Count -eq 0) {
+    return
+  }
+
+  $taskkill = Get-Command taskkill.exe -ErrorAction SilentlyContinue
+  if ($taskkill) {
+    foreach ($id in $remaining) {
+      try {
+        & $taskkill.Source /PID $id /T /F | Out-Null
+        Write-Host "Stopped PID $id with taskkill for $displayName"
+      } catch {
+        Write-Warning "taskkill failed for PID $id in ${displayName}: $($_.Exception.Message)"
+      }
+    }
+
+    Start-Sleep -Milliseconds 300
+    $remaining = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remaining.Count -eq 0) {
+      return
+    }
+  }
+
+  Write-Warning "Some processes for $displayName are still running. PowerShell may need administrator permission."
+}
+
 function Stop-PortListeners {
   param([int[]]$Ports)
 
-  $listeners = Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue
+  $listeners = @(Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue)
+  if ($listeners.Count -eq 0) {
+    Write-Host "Ports are already free: $($Ports -join ', ')"
+    return
+  }
+
   foreach ($listener in $listeners) {
     $ownerProcessId = [int]$listener.OwningProcess
     if ($ownerProcessId -le 0 -or $ownerProcessId -eq $PID) {
       continue
     }
 
+    $process = Get-Process -Id $ownerProcessId -ErrorAction SilentlyContinue
+    if (-not $process) {
+      Write-Host "Port $($listener.LocalPort) listener already stopped (PID $ownerProcessId no longer exists)"
+      continue
+    }
+
     try {
-      $process = Get-Process -Id $ownerProcessId -ErrorAction Stop
       Write-Host "Stopping existing listener on port $($listener.LocalPort): $($process.ProcessName) (PID $ownerProcessId)"
-      Stop-Process -Id $ownerProcessId -Force -ErrorAction Stop
+      Stop-ProcessTree -ProcessId $ownerProcessId -Label "port $($listener.LocalPort)"
     } catch {
       Write-Warning "Failed to stop process on port $($listener.LocalPort) (PID $ownerProcessId): $($_.Exception.Message)"
     }
+  }
+
+  Start-Sleep -Milliseconds 300
+  $remaining = @(Get-NetTCPConnection -LocalPort $Ports -State Listen -ErrorAction SilentlyContinue)
+  if ($remaining.Count -eq 0) {
+    Write-Host "Ports are free: $($Ports -join ', ')"
+    return
+  }
+
+  foreach ($listener in $remaining) {
+    Write-Warning "Port $($listener.LocalPort) is still in use by PID $($listener.OwningProcess)."
   }
 }
 
@@ -172,16 +269,113 @@ function Start-TunnelWithRetry {
   throw "$Name tunnel 생성에 실패했습니다. Cloudflare quick tunnel이 일시적으로 500을 반환했을 수 있습니다."
 }
 
+function Wait-HttpReady {
+  param(
+    [string]$Name,
+    [string]$Url,
+    [int]$TimeoutSeconds = 30
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+      if ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 500) {
+        Write-Host "$Name is ready: $Url"
+        return
+      }
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+
+  throw "$Name health check failed: $Url"
+}
+
+function Test-CorsPreflight {
+  param(
+    [string]$Name,
+    [string]$Url,
+    [string]$Origin,
+    [int]$TimeoutSeconds = 60
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $lastError = ""
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $response = Invoke-WebRequest `
+        -Uri $Url `
+        -Method Options `
+        -Headers @{
+          "Origin" = $Origin
+          "Access-Control-Request-Method" = "GET"
+          "Access-Control-Request-Headers" = "authorization"
+        } `
+        -UseBasicParsing `
+        -TimeoutSec 10
+
+      $allowOrigin = $response.Headers["Access-Control-Allow-Origin"]
+      if ($allowOrigin -eq $Origin) {
+        Write-Host "$Name CORS preflight OK: $allowOrigin"
+        return $true
+      }
+
+      $lastError = "expected origin $Origin but got $allowOrigin"
+    } catch {
+      $lastError = $_.Exception.Message
+      if ($_.Exception.Response) {
+        try {
+          $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+          $body = $reader.ReadToEnd()
+          if ($body) {
+            $lastError = "$lastError - $body"
+          }
+        } catch {
+        }
+      }
+    }
+
+    Start-Sleep -Seconds 2
+  }
+
+  Write-Warning "$Name CORS preflight failed after ${TimeoutSeconds}s: $lastError"
+  return $false
+}
+
 function Stop-StartedProcesses {
   param([object[]]$Started)
 
-  foreach ($item in ($Started | Where-Object { $_ -and $_.Process -and -not $_.Process.HasExited })) {
+  $items = @($Started | Where-Object { $_ -and $_.Process })
+  [array]::Reverse($items)
+
+  foreach ($item in $items) {
     try {
-      Stop-Process -Id $item.Process.Id -Force -ErrorAction Stop
-      Write-Host "Stopped $($item.Name) (PID $($item.Process.Id))"
+      Stop-ProcessTree -ProcessId $item.Process.Id -Label "$($item.Name) (PID $($item.Process.Id))"
     } catch {
       Write-Warning "Failed to stop $($item.Name): $($_.Exception.Message)"
     }
+  }
+}
+
+function Invoke-DemoCleanup {
+  param(
+    [object[]]$Started,
+    [int[]]$Ports,
+    [switch]$ForcePorts
+  )
+
+  if ($script:CleanupStarted) {
+    return
+  }
+  $script:CleanupStarted = $true
+
+  Write-Host ""
+  Write-Host "Cleaning up demo processes..."
+  Stop-StartedProcesses -Started $Started
+
+  if ($ForcePorts) {
+    Stop-PortListeners -Ports $Ports
   }
 }
 
@@ -189,11 +383,6 @@ $projectRoot = Resolve-ProjectRoot
 Set-Location -LiteralPath $projectRoot
 
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
-$cloudflaredCommand = Get-Command cloudflared -ErrorAction SilentlyContinue
-if (-not $cloudflaredCommand) {
-  throw "cloudflared를 찾을 수 없습니다. cloudflared 설치 후 PATH에 추가해 주세요."
-}
-
 $logDir = Join-Path $projectRoot ".codex-temp\demo-tunnels"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $script:DemoTunnelRunId = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -203,7 +392,24 @@ if (-not $KeepExistingPortProcesses) {
   Start-Sleep -Milliseconds 500
 }
 
+if ($CleanupOnly) {
+  Write-Host "Cleanup only mode completed."
+  exit 0
+}
+
+$cloudflaredCommand = Get-Command cloudflared -ErrorAction SilentlyContinue
+if (-not $cloudflaredCommand) {
+  throw "cloudflared를 찾을 수 없습니다. cloudflared 설치 후 PATH에 추가해 주세요."
+}
+
 $started = @()
+$script:CleanupStarted = $false
+
+trap {
+  Write-Warning "중단 요청을 받아 demo 프로세스를 정리합니다."
+  Invoke-DemoCleanup -Started $started -Ports @($BackendPort, $GatewayPort) -ForcePorts:(-not $KeepExistingPortProcesses)
+  break
+}
 
 try {
   Write-Host "Starting backend on http://localhost:$BackendPort ..."
@@ -225,6 +431,16 @@ try {
   $started += $gatewayProcess
 
   Start-Sleep -Seconds 2
+  Wait-HttpReady -Name "backend" -Url "http://localhost:$BackendPort/api/health" -TimeoutSeconds 30
+  Wait-HttpReady -Name "gateway" -Url "http://localhost:$GatewayPort/gateway/health" -TimeoutSeconds 30
+  $localGatewayCorsOk = Test-CorsPreflight `
+    -Name "local gateway" `
+    -Url "http://localhost:$GatewayPort/gateway/meetings" `
+    -Origin "https://imms-ai.vercel.app" `
+    -TimeoutSeconds 8
+  if (-not $localGatewayCorsOk) {
+    Write-Warning "local gateway CORS failed. Check gateway/main.py and gateway/.env before using the tunnel URL."
+  }
 
   $gatewayTunnelProcess = Start-TunnelWithRetry `
     -Name "gateway" `
@@ -248,6 +464,18 @@ try {
 
   $gatewayTunnel = $gatewayTunnelProcess.Url
   $backendTunnel = $backendTunnelProcess.Url
+  $gatewayBaseUrl = if ($gatewayTunnel) { "$gatewayTunnel/gateway" } else { "" }
+  $gatewayWsUrl = if ($gatewayTunnel) { "$($gatewayTunnel -replace '^https://', 'wss://')/gateway/ws" } else { "" }
+
+  if ($gatewayTunnel) {
+    $gatewayCorsOk = Test-CorsPreflight `
+      -Name "gateway tunnel" `
+      -Url "$gatewayTunnel/gateway/meetings" `
+      -Origin "https://imms-ai.vercel.app"
+    if (-not $gatewayCorsOk) {
+      Write-Warning "gateway tunnel URL was created, but Vercel-origin CORS is not ready yet."
+    }
+  }
 
   Write-Host ""
   Write-Host "==== Demo Tunnel URLs ===="
@@ -255,12 +483,8 @@ try {
   Write-Host "BACKEND_TUNNEL_URL=$backendTunnel"
   Write-Host ""
   Write-Host "Vercel 환경변수에 넣을 때는 보통:"
-  Write-Host "NEXT_PUBLIC_GATEWAY_URL=$gatewayTunnel"
-  if ($gatewayTunnel) {
-    Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL=$($gatewayTunnel -replace '^https://', 'wss://')/gateway/ws"
-  } else {
-    Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL="
-  }
+  Write-Host "NEXT_PUBLIC_GATEWAY_URL=$gatewayBaseUrl"
+  Write-Host "NEXT_PUBLIC_GATEWAY_WS_URL=$gatewayWsUrl"
   Write-Host "NEXT_PUBLIC_API_BASE_URL=$backendTunnel"
   Write-Host ""
   Write-Host "backend/gateway는 --reload로 실행 중입니다. Python 코드 변경은 이 창을 끄지 않으면 자동 반영됩니다."
@@ -268,7 +492,7 @@ try {
   Write-Host ""
   Write-Host "Logs: $logDir"
   Write-Host ""
-  Read-Host "종료하려면 Enter를 누르세요. 이 스크립트가 띄운 backend/gateway/tunnel 프로세스를 정리합니다"
+  Read-Host "종료하려면 Enter를 누르세요. Ctrl+C를 눌러도 backend/gateway/tunnel 프로세스를 정리합니다"
 } finally {
-  Stop-StartedProcesses -Started $started
+  Invoke-DemoCleanup -Started $started -Ports @($BackendPort, $GatewayPort) -ForcePorts:(-not $KeepExistingPortProcesses)
 }

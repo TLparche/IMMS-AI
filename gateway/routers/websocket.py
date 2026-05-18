@@ -924,14 +924,31 @@ async def websocket_endpoint(
                         .order('timestamp', desc=False) \
                         .execute()
                     
-                    transcripts = transcripts_response.data
+                    transcripts = transcripts_response.data or []
                     
                     if len(transcripts) >= 4:  # 최소 4개 발화 이상
-                        # AI 백엔드로 분석 요청
+                        workspace = latest_canvas_workspace_by_meeting.get(meeting_id) or {}
+                        normalized_transcripts = [
+                            {
+                                "speaker": str(item.get("speaker") or "화자"),
+                                "text": str(item.get("text") or ""),
+                                "timestamp": str(item.get("timestamp") or item.get("created_at") or ""),
+                            }
+                            for item in transcripts
+                            if str(item.get("text") or "").strip()
+                        ]
+
+                        # AI 백엔드에 현재 회의 전사를 동기화하고 분석 요청
                         async with httpx.AsyncClient(timeout=120.0) as client:
                             response = await client.post(
-                                f"{AI_BACKEND_URL}/api/tick-analysis",
-                                json={'transcripts': transcripts}
+                                f"{AI_BACKEND_URL}/api/transcript/sync",
+                                json={
+                                    "meeting_goal": str(workspace.get("meeting_goal") or ""),
+                                    "window_size": 12,
+                                    "reset_state": True,
+                                    "auto_analyze": True,
+                                    "transcript": normalized_transcripts,
+                                }
                             )
                             
                             if response.status_code == 200:
