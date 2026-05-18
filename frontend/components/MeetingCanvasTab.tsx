@@ -2305,11 +2305,11 @@ const CANVAS_KEYWORD_TOKEN_PATTERN = /[A-Za-z0-9가-힣][A-Za-z0-9가-힣+#._-]{
 const CANVAS_IDEATION_BUBBLE_MIN_PHRASE_CHARS = 5;
 const CANVAS_IDEATION_BUBBLE_MAX_PHRASE_CHARS = 18;
 const CANVAS_IDEATION_BUBBLE_PHRASE_GAP_PATTERN = /^[ \t·ㆍ-]+$/u;
-const CANVAS_IDEATION_BUBBLE_PLANE_WIDTH = 1280;
-const CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT = 820;
-const CANVAS_IDEATION_BUBBLE_ORGANIC_GAP = 8;
-const CANVAS_IDEATION_BUBBLE_CLUSTER_GAP = 52;
-const CANVAS_IDEATION_BUBBLE_CLUSTER_MAX_ITEMS = 5;
+const CANVAS_IDEATION_BUBBLE_PLANE_WIDTH = 1580;
+const CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT = 940;
+const CANVAS_IDEATION_BUBBLE_ORGANIC_GAP = 1;
+const CANVAS_IDEATION_BUBBLE_CLUSTER_GAP = 145;
+const CANVAS_IDEATION_BUBBLE_CLUSTER_MAX_ITEMS = 6;
 
 function stripKoreanKeywordSuffixes(token: string) {
   let normalized = token;
@@ -2664,16 +2664,22 @@ function buildIdeationKeywordBubbleClusterBox(
       return;
     }
 
+    const relatedAnchor =
+      placements.find(
+        (placement) =>
+          item.bubble.related.includes(placement.bubble.text) ||
+          placement.bubble.related.includes(item.bubble.text),
+      ) || placements[0];
     const seedOffset = ideationBubbleSeedRatio(item.bubble.text, 7) * Math.PI * 2;
     let chosen: IdeationKeywordBubbleClusterBox["placements"][number] | null = null;
-    for (let attempt = 0; attempt < 48; attempt += 1) {
-      const ring = Math.floor(attempt / 10) + 1;
+    for (let attempt = 0; attempt < 84; attempt += 1) {
+      const ring = Math.floor(attempt / 18);
       const angle = seedOffset + (attempt + index * 2) * goldenAngle;
-      const radius = 44 + ring * 22 + Math.sqrt(index) * 28;
+      const radius = relatedAnchor.size / 2 + item.size / 2 + CANVAS_IDEATION_BUBBLE_ORGANIC_GAP + ring * 12;
       const candidate = {
         bubble: item.bubble,
-        x: Math.cos(angle) * radius,
-        y: Math.sin(angle) * radius * 0.82,
+        x: relatedAnchor.x + relatedAnchor.size / 2 + Math.cos(angle) * radius - item.size / 2,
+        y: relatedAnchor.y + relatedAnchor.size / 2 + Math.sin(angle) * radius - item.size / 2,
         size: item.size,
       };
       if (!placements.some((placement) => ideationBubbleCirclesOverlap(candidate, placement, CANVAS_IDEATION_BUBBLE_ORGANIC_GAP))) {
@@ -2721,12 +2727,16 @@ function buildIdeationKeywordBubblePlacements(bubbles: IdeationKeywordBubble[]):
       y: centerY - box.height / 2,
     };
 
-    for (let attempt = 0; attempt < 96; attempt += 1) {
-      const radius = index === 0 ? 0 : 72 + Math.sqrt(attempt + index * 5) * 56;
-      const angle = attempt * goldenAngle + index * 0.78;
-      const candidate = {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      const radius = index === 0 ? 0 : 130 + Math.sqrt(attempt + index * 8) * 82;
+      const angle = attempt * goldenAngle + index * 1.15;
+      const rawCandidate = {
         x: centerX + Math.cos(angle) * radius - box.width / 2,
         y: centerY + Math.sin(angle) * radius * 0.72 - box.height / 2,
+      };
+      const candidate = {
+        x: clampNumber(rawCandidate.x, 70, CANVAS_IDEATION_BUBBLE_PLANE_WIDTH - box.width - 70),
+        y: clampNumber(rawCandidate.y, 80, CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT - box.height - 70),
       };
       const separated = placedBoxes.every((placed) => (
         candidate.x + box.width + CANVAS_IDEATION_BUBBLE_CLUSTER_GAP < placed.x ||
@@ -2741,8 +2751,8 @@ function buildIdeationKeywordBubblePlacements(bubbles: IdeationKeywordBubble[]):
     }
 
     const clampedBox = {
-      x: clampNumber(chosen.x, 70, CANVAS_IDEATION_BUBBLE_PLANE_WIDTH - box.width - 70),
-      y: clampNumber(chosen.y, 80, CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT - box.height - 70),
+      x: chosen.x,
+      y: chosen.y,
       width: box.width,
       height: box.height,
     };
