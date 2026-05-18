@@ -187,7 +187,7 @@ function formatDashboardDateTime(value?: string) {
 
 function getMeetingStatusBadgeClass(status: string) {
   if (isCompletedMeeting(status)) return "bg-[#111827] text-white";
-  if (status === "active" || status === "in_progress") return "bg-[#e9efff] text-[#1b59f8]";
+  if (status === "active" || status === "in_progress") return "bg-[#f4e8fb] text-[#a13ab8]";
   return "bg-[#eff0f6] text-[#4d4d4d]";
 }
 
@@ -411,7 +411,7 @@ export default function DashboardPage() {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#f9f9f9]">
         <div className="rounded-2xl border border-black/10 bg-white px-8 py-7 text-center">
-          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-[3px] border-[#e9efff] border-t-[#1b59f8]" />
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-[3px] border-[#f4e8fb] border-t-[#a13ab8]" />
           <p className="mt-4 text-sm font-medium text-[#4d4d4d]">로딩 중...</p>
         </div>
       </div>
@@ -471,7 +471,7 @@ export default function DashboardPage() {
         <div className="mb-[27px] flex items-center gap-3">
           <button
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#1b59f8] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-white transition hover:bg-[#164be0]"
+            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#a13ab8] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-white transition hover:bg-[#8d2fa3]"
           >
             <svg aria-hidden="true" className="h-6 w-6 shrink-0" viewBox="0 0 24 24" fill="none">
               <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
@@ -481,7 +481,7 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={() => alert("불러오기 기능은 추후 회의 파일/스냅샷 선택과 연결할 수 있습니다.")}
-            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#e9efff] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-[#1b59f8] transition hover:bg-[#dfe8ff]"
+            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#f4e8fb] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-[#a13ab8] transition hover:bg-[#ecd9f7]"
           >
             <svg aria-hidden="true" className="h-6 w-6 shrink-0" viewBox="0 0 24 24" fill="none">
               <path d="M12 19V5M6.5 10.5 12 5l5.5 5.5M5 19h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
@@ -497,7 +497,7 @@ export default function DashboardPage() {
 
           {loading ? (
             <div className="p-12 text-center">
-              <div className="mx-auto h-9 w-9 animate-spin rounded-full border-[3px] border-[#e9efff] border-t-[#1b59f8]" />
+              <div className="mx-auto h-9 w-9 animate-spin rounded-full border-[3px] border-[#f4e8fb] border-t-[#a13ab8]" />
               <p className="mt-4 text-sm font-medium text-[#4d4d4d]">회의 목록을 불러오는 중...</p>
             </div>
           ) : meetings.length === 0 ? (
@@ -541,7 +541,7 @@ export default function DashboardPage() {
                             e.stopPropagation();
                             void handleOpenMeetingResult(meeting);
                           }}
-                          className="inline-flex h-[41px] items-center justify-center rounded-[16px] bg-[#1b59f8] px-5 text-[16px] font-semibold leading-normal tracking-[-0.1737px] text-white transition hover:bg-[#164be0]"
+                          className="inline-flex h-[41px] items-center justify-center rounded-[16px] bg-[#a13ab8] px-5 text-[16px] font-semibold leading-normal tracking-[-0.1737px] text-white transition hover:bg-[#8d2fa3]"
                         >
                           결과 보기
                         </button>
@@ -555,7 +555,7 @@ export default function DashboardPage() {
                         className={`inline-flex h-[41px] items-center justify-center rounded-[16px] px-5 text-[16px] font-medium leading-normal tracking-[-0.1737px] transition ${
                           isCompletedMeeting(meeting.status)
                             ? "bg-[#eff0f6] text-[#4d4d4d] hover:bg-[#e3e5ee]"
-                            : "min-w-[87px] bg-[#e9efff] text-[#1b59f8] hover:bg-[#dfe8ff]"
+                            : "min-w-[87px] bg-[#f4e8fb] text-[#a13ab8] hover:bg-[#ecd9f7]"
                         }`}
                       >
                         {getMeetingActionLabel(meeting.status)}
@@ -579,7 +579,7 @@ export default function DashboardPage() {
               value={newMeetingTitle}
               onChange={(e) => setNewMeetingTitle(e.target.value)}
               placeholder="회의 이름"
-              className="mt-8 w-full rounded-[12px] border border-black/10 px-4 py-3 text-base text-black outline-none focus:border-[#1b59f8]"
+              className="mt-8 w-full rounded-[12px] border border-black/10 px-4 py-3 text-base text-black outline-none focus:border-[#a13ab8]"
               onKeyDown={(e) => {
                 if (e.key === "Enter") void handleCreateMeeting();
               }}
@@ -597,7 +597,7 @@ export default function DashboardPage() {
               <button
                 onClick={() => void handleCreateMeeting()}
                 disabled={!newMeetingTitle.trim()}
-                className="min-w-[164px] rounded-[8px] bg-[#1b59f8] px-8 py-3 text-base font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
+                className="min-w-[164px] rounded-[8px] bg-[#a13ab8] px-8 py-3 text-base font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 시작
               </button>
@@ -616,7 +616,7 @@ export default function DashboardPage() {
                     <span className="rounded-full bg-white/12 px-3 py-1 text-xs font-semibold tracking-[0.12em] text-white/80">
                       FINAL REPORT
                     </span>
-                    <span className="rounded-full bg-[#1b59f8] px-3 py-1 text-xs font-semibold text-white">
+                    <span className="rounded-full bg-[#a13ab8] px-3 py-1 text-xs font-semibold text-white">
                       {getMeetingStatusLabel(selectedResultMeeting.status)}
                     </span>
                   </div>
@@ -675,7 +675,7 @@ export default function DashboardPage() {
               {selectedResultLoading ? (
                 <div className="rounded-[20px] border border-black/10 bg-white p-8">
                   <div className="flex items-center gap-4">
-                    <div className="h-11 w-11 animate-spin rounded-full border-[3px] border-[#e9efff] border-t-[#1b59f8]" />
+                    <div className="h-11 w-11 animate-spin rounded-full border-[3px] border-[#f4e8fb] border-t-[#a13ab8]" />
                     <div>
                       <p className="text-base font-semibold text-black">최종 결과를 불러오는 중입니다.</p>
                       <p className="mt-1 text-sm text-[#4d4d4d]">회의 종료 시 저장된 워크스페이스 결과를 확인하고 있습니다.</p>
@@ -695,7 +695,7 @@ export default function DashboardPage() {
                     <button
                       type="button"
                       onClick={() => void handleOpenMeetingResult(selectedResultMeeting)}
-                      className="inline-flex h-10 items-center rounded-[12px] bg-[#1b59f8] px-4 text-sm font-semibold text-white transition hover:bg-[#164be0]"
+                      className="inline-flex h-10 items-center rounded-[12px] bg-[#a13ab8] px-4 text-sm font-semibold text-white transition hover:bg-[#8d2fa3]"
                     >
                       다시 불러오기
                     </button>
@@ -711,7 +711,7 @@ export default function DashboardPage() {
                 </div>
               ) : selectedResultTopics.length === 0 ? (
                 <div className="rounded-[20px] border border-dashed border-black/15 bg-white px-6 py-12 text-center">
-                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#e9efff] text-2xl font-semibold text-[#1b59f8]">
+                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-[#f4e8fb] text-2xl font-semibold text-[#a13ab8]">
                     !
                   </div>
                   <h3 className="mt-5 text-xl font-semibold text-black">저장된 최종 결과가 없습니다.</h3>
@@ -719,7 +719,7 @@ export default function DashboardPage() {
                     해결책 단계에서 최종 결과로 남길 항목을 선택한 뒤 회의를 종료하면 이곳에 보고서 형태로 표시됩니다.
                   </p>
                   {selectedResultRebuildMessage ? (
-                    <p className="mx-auto mt-5 max-w-[520px] rounded-[14px] bg-[#f6f8ff] px-4 py-3 text-sm font-semibold leading-6 text-[#1b59f8]">
+                    <p className="mx-auto mt-5 max-w-[520px] rounded-[14px] bg-[#fbf4fd] px-4 py-3 text-sm font-semibold leading-6 text-[#a13ab8]">
                       {selectedResultRebuildMessage}
                     </p>
                   ) : null}
@@ -735,7 +735,7 @@ export default function DashboardPage() {
                     <button
                       type="button"
                       onClick={() => handleJoinMeeting(selectedResultMeeting.id)}
-                      className="inline-flex h-11 items-center rounded-[14px] bg-[#1b59f8] px-5 text-sm font-semibold text-white transition hover:bg-[#164be0]"
+                      className="inline-flex h-11 items-center rounded-[14px] bg-[#a13ab8] px-5 text-sm font-semibold text-white transition hover:bg-[#8d2fa3]"
                     >
                       회의 화면으로 이동
                     </button>
@@ -744,7 +744,7 @@ export default function DashboardPage() {
               ) : (
                 <div className="space-y-5">
                   {selectedResultRebuildMessage ? (
-                    <div className="rounded-[16px] border border-[#cfdcff] bg-[#f6f8ff] px-5 py-4 text-sm font-semibold text-[#1b59f8]">
+                    <div className="rounded-[16px] border border-[#ead0f2] bg-[#fbf4fd] px-5 py-4 text-sm font-semibold text-[#a13ab8]">
                       {selectedResultRebuildMessage}
                     </div>
                   ) : null}
@@ -752,7 +752,7 @@ export default function DashboardPage() {
                     <section key={topic.topic_id} className="overflow-hidden rounded-[20px] border border-black/10 bg-white shadow-[0_8px_26px_rgba(15,23,42,0.05)]">
                       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-black/10 bg-[#fbfcff] px-6 py-5">
                         <div className="min-w-0">
-                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#1b59f8]">Solution {topic.topic_no}</p>
+                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#a13ab8]">Solution {topic.topic_no}</p>
                           <h3 className="mt-2 text-[clamp(18px,2vw,24px)] font-semibold leading-tight text-black">
                             {topic.topic_title || topic.problem_topic || `해결책 ${topic.topic_no}`}
                           </h3>
@@ -771,8 +771,8 @@ export default function DashboardPage() {
                               </div>
                             ) : null}
                             {topic.solution_conclusion ? (
-                              <div className="rounded-[16px] border border-[#cfdcff] bg-[#f6f8ff] p-4">
-                                <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[#1b59f8]">해결책 결론</p>
+                              <div className="rounded-[16px] border border-[#ead0f2] bg-[#fbf4fd] p-4">
+                                <p className="text-xs font-semibold uppercase tracking-[0.1em] text-[#a13ab8]">해결책 결론</p>
                                 <p className="mt-2 text-sm leading-6 text-black">{topic.solution_conclusion}</p>
                               </div>
                             ) : null}
@@ -781,9 +781,9 @@ export default function DashboardPage() {
                         <div className="mt-5 space-y-3">
                           <p className="text-sm font-semibold text-[#4d4d4d]">최종 선택 메모</p>
                           {(topic.final_notes || []).map((note) => (
-                            <article key={note.id} className="border-l-4 border-[#1b59f8] bg-[#f9f9f9] px-4 py-4">
+                            <article key={note.id} className="border-l-4 border-[#a13ab8] bg-[#f9f9f9] px-4 py-4">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-[#1b59f8]">
+                                <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-[#a13ab8]">
                                   {note.source === "ai" ? "AI 채택" : "사용자 메모"}
                                 </span>
                                 {(note.agenda_titles || []).length > 0 ? (

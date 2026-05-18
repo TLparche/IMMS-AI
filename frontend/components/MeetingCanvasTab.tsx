@@ -1285,7 +1285,7 @@ function problemGroupStatusLabel(status: ProblemGroupStatus) {
 }
 
 function problemGroupStatusTone(status: ProblemGroupStatus) {
-  if (status === "review") return "bg-blue-100 text-blue-700";
+  if (status === "review") return "bg-fuchsia-100 text-fuchsia-700";
   if (status === "final") return "bg-emerald-100 text-emerald-700";
   return "bg-slate-100 text-slate-600";
 }
@@ -1718,7 +1718,7 @@ function renderSummaryMarkdownInline(text: string): ReactNode[] {
     const token = match[0];
     if (token.startsWith("`")) {
       nodes.push(
-        <code key={`code-${match.index}`} className="rounded-[4px] bg-[#eef4ff] px-1.5 py-0.5 font-mono text-[0.92em] text-[#1b59f8]">
+        <code key={`code-${match.index}`} className="rounded-[4px] bg-[#f7ecfb] px-1.5 py-0.5 font-mono text-[0.92em] text-[#a13ab8]">
           {token.slice(1, -1)}
         </code>,
       );
@@ -1867,7 +1867,7 @@ function renderSummaryMarkdownPreview(markdown: string, onEdit: () => void) {
     <button
       type="button"
       onClick={onEdit}
-      className="h-full w-full overflow-y-auto border border-black/10 bg-white px-8 py-7 text-left outline-none transition hover:border-[#1b59f8]/30 focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+      className="h-full w-full overflow-y-auto border border-black/10 bg-white px-8 py-7 text-left outline-none transition hover:border-[#a13ab8]/30 focus:border-[#a13ab8]/30 focus:ring-2 focus:ring-[#a13ab8]/10"
     >
       {blocks.length > 0 ? blocks : (
         <p className="text-sm leading-7 text-[#999]">요약 문서가 아직 없습니다.</p>
@@ -2763,9 +2763,9 @@ function buildIdeationKeywordBubblePlacements(bubbles: IdeationKeywordBubble[]):
 function makeIdeationKeywordBubbleNodeLabel(bubble: IdeationKeywordBubble, size: number) {
   const fontSize = getIdeationKeywordBubbleFontSize(bubble.text, size);
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center rounded-full border border-[#1b59f8]/10 bg-white/90 px-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_18px_44px_rgba(27,89,248,0.14)] backdrop-blur">
+    <div className="flex h-full w-full flex-col items-center justify-center rounded-full border border-[#a13ab8]/10 bg-white/90 px-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_18px_44px_rgba(161,58,184,0.14)] backdrop-blur">
       <strong
-        className="max-w-full whitespace-nowrap font-semibold text-[#1b59f8]"
+        className="max-w-full whitespace-nowrap font-semibold text-[#a13ab8]"
         style={{
           fontSize,
           lineHeight: 1.08,
@@ -3085,7 +3085,7 @@ function makeIdeationDragGhostLabel(item: CanvasItemViewModel, dropLabel = "이�
   return (
     <div className={`rounded-[18px] border px-4 py-3 shadow-[0_20px_48px_rgba(15,23,42,0.22)] backdrop-blur ${tone.shell} border-black/10`}>
       <div className="flex items-center justify-between gap-2">
-        <span className="rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-semibold text-[#1b59f8]">
+        <span className="rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-semibold text-[#a13ab8]">
           {dropLabel}
         </span>
         <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-black/35">
@@ -3143,7 +3143,7 @@ function makeSolutionNodeLabel(topic: SolutionTopicViewModel, selected: boolean)
         <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700">
           AI {topic.ai_suggestions.length}
         </span>
-        <span className="rounded-full bg-blue-50 px-2.5 py-1 text-blue-700">
+        <span className="rounded-full bg-fuchsia-50 px-2.5 py-1 text-fuchsia-700">
           채택 {selectedAiCount}
         </span>
         <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-700">
@@ -3214,7 +3214,7 @@ function makeSolutionAiSuggestionNodeLabel(
 
   return (
     <article className={`nopan box-border flex h-full w-full flex-col justify-start border px-4 py-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] ${
-      selected ? "border-blue-100 bg-slate-50/90 opacity-80" : "border-black/10 bg-white"
+      selected ? "border-fuchsia-100 bg-slate-50/90 opacity-80" : "border-black/10 bg-white"
     } shadow-[0_1px_0_rgba(0,0,0,0.04)]`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -3223,7 +3223,7 @@ function makeSolutionAiSuggestionNodeLabel(
             {suggestion.text}
           </p>
           {selected ? (
-            <p className="mt-2 text-xs font-semibold text-blue-600">채택 카드로 이동됨</p>
+            <p className="mt-2 text-xs font-semibold text-fuchsia-700">채택 카드로 이동됨</p>
           ) : null}
         </div>
         <button
@@ -3256,12 +3256,12 @@ function makeSolutionNoteNodeLabel(
   const shellClass = note.is_final_candidate
     ? "border-slate-900 bg-white"
     : note.source === "ai"
-      ? "border-blue-100 bg-blue-50/70"
+      ? "border-fuchsia-100 bg-fuchsia-50/70"
       : "border-amber-100 bg-amber-50/80";
   const labelClass = note.is_final_candidate
     ? "text-slate-900"
     : note.source === "ai"
-      ? "text-blue-700"
+      ? "text-fuchsia-700"
       : "text-amber-700";
 
   return (
@@ -3458,15 +3458,15 @@ function makeProblemTopicNodeLabel(
     <div
       data-problem-group-drop-id={group.group_id}
       className={`nopan box-border min-w-0 rounded-[12px] border bg-white p-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] transition ${
-        selected ? "border-[#1b59f8] ring-2 ring-[#1b59f8]/10" : "border-black/10 hover:border-[#1b59f8]/30"
-      } ${dropTarget ? "ring-2 ring-blue-300 ring-offset-2" : ""}`}
+        selected ? "border-[#a13ab8] ring-2 ring-[#a13ab8]/10" : "border-black/10 hover:border-[#a13ab8]/30"
+      } ${dropTarget ? "ring-2 ring-fuchsia-300 ring-offset-2" : ""}`}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
       <div className="flex items-center justify-between gap-3">
-        <span className="inline-flex min-w-0 items-center gap-2 rounded-[8px] bg-[#eef4ff] px-2.5 py-1 text-[11px] font-semibold text-[#1b59f8]">
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#1b59f8]" />
+        <span className="inline-flex min-w-0 items-center gap-2 rounded-[8px] bg-[#f7ecfb] px-2.5 py-1 text-[11px] font-semibold text-[#a13ab8]">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#a13ab8]" />
           <span className="truncate">{depthLabel}</span>
         </span>
         <div className="flex shrink-0 items-center gap-1">
@@ -3474,7 +3474,7 @@ function makeProblemTopicNodeLabel(
             <button
               type="button"
               aria-label={childCollapsed ? "하위 분류 펼치기" : "하위 분류 접기"}
-              className="nodrag nopan flex h-7 w-7 items-center justify-center rounded-[8px] border border-black/10 bg-[#f9f9f9] text-sm font-semibold text-[#4d4d4d] transition hover:border-[#1b59f8]/20 hover:bg-[#eef4ff] hover:text-[#1b59f8]"
+              className="nodrag nopan flex h-7 w-7 items-center justify-center rounded-[8px] border border-black/10 bg-[#f9f9f9] text-sm font-semibold text-[#4d4d4d] transition hover:border-[#a13ab8]/20 hover:bg-[#f7ecfb] hover:text-[#a13ab8]"
               onClick={onToggleChildren}
               onPointerDown={(event) => event.stopPropagation()}
             >
@@ -3495,7 +3495,7 @@ function makeProblemTopicNodeLabel(
         </p>
       ) : null}
       <div className="mt-4 flex flex-wrap gap-1.5 text-[11px] font-semibold">
-        <span className="rounded-full bg-[#eef4ff] px-2.5 py-1 text-[#1b59f8]">근거 {sourceCount}</span>
+        <span className="rounded-full bg-[#f7ecfb] px-2.5 py-1 text-[#a13ab8]">근거 {sourceCount}</span>
         {opinionCount > 0 ? (
           <span className="rounded-full bg-violet-50 px-2.5 py-1 text-violet-700">의견 {opinionCount}</span>
         ) : null}
@@ -3508,7 +3508,7 @@ function makeProblemTopicNodeLabel(
       <div className="mt-4 flex flex-wrap gap-1.5">
         <button
           type="button"
-          className="nodrag nopan rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2.5 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:border-[#1b59f8]/20 hover:bg-[#eef4ff] hover:text-[#1b59f8] disabled:cursor-wait disabled:opacity-60"
+          className="nodrag nopan rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2.5 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:border-[#a13ab8]/20 hover:bg-[#f7ecfb] hover:text-[#a13ab8] disabled:cursor-wait disabled:opacity-60"
           disabled={criteriaLoading}
           onClick={onShowGroupingRationale}
           onPointerDown={(event) => event.stopPropagation()}
@@ -3517,7 +3517,7 @@ function makeProblemTopicNodeLabel(
         </button>
         <button
           type="button"
-          className="nodrag nopan rounded-[8px] border border-[#1b59f8]/20 bg-[#eef4ff] px-2.5 py-1.5 text-xs font-semibold text-[#1b59f8] transition hover:bg-[#e1ebff] disabled:cursor-wait disabled:opacity-60"
+          className="nodrag nopan rounded-[8px] border border-[#a13ab8]/20 bg-[#f7ecfb] px-2.5 py-1.5 text-xs font-semibold text-[#a13ab8] transition hover:bg-[#efdaf7] disabled:cursor-wait disabled:opacity-60"
           disabled={childLoading}
           onClick={onGenerateChildren}
           onPointerDown={(event) => event.stopPropagation()}
@@ -3542,7 +3542,7 @@ function makeProblemTopicNodeLabel(
         </button>
       </div>
       {dropTarget ? (
-        <p className="mt-3 rounded-xl border border-[#1b59f8]/20 bg-[#eef4ff] px-3 py-2 text-xs font-semibold leading-5 text-[#1b59f8]">
+        <p className="mt-3 rounded-xl border border-[#a13ab8]/20 bg-[#f7ecfb] px-3 py-2 text-xs font-semibold leading-5 text-[#a13ab8]">
           개인 메모를 놓으면 이 문제정의 그룹의 의견으로 추가됩니다.
         </p>
       ) : null}
@@ -8129,15 +8129,15 @@ export default function MeetingCanvasTab({
                     isUngrouped
                       ? "border-dashed border-black/20"
                       : isCardSorting
-                        ? "border-[#1b59f8]/20"
+                        ? "border-[#a13ab8]/20"
                         : "border-black/10"
-                  } ${isColumnDropTarget ? "ring-2 ring-[#1b59f8]/35 ring-offset-2" : ""}`}
+                  } ${isColumnDropTarget ? "ring-2 ring-[#a13ab8]/35 ring-offset-2" : ""}`}
                   onDragOver={(event) => handleProblemStructureGroupDragOver(event, columnDropGroupId)}
                   onDrop={(event) => handleProblemStructureGroupDrop(event, columnDropGroupId)}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
-                      <span className="inline-flex items-center rounded-[8px] bg-[#eef4ff] px-2.5 py-1 text-[11px] font-semibold text-[#1b59f8]">
+                      <span className="inline-flex items-center rounded-[8px] bg-[#f7ecfb] px-2.5 py-1 text-[11px] font-semibold text-[#a13ab8]">
                         {isUngrouped ? "Pool" : problemStructureMethodLabel(problemStructureMethod)}
                       </span>
                       {isUngrouped ? (
@@ -8149,7 +8149,7 @@ export default function MeetingCanvasTab({
                           value={column.title}
                           onChange={(event) => handleUpdateProblemStructureGroupTitle(column.id, event.target.value)}
                           onPointerDown={(event) => event.stopPropagation()}
-                          className="nodrag nopan mt-3 block w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-3 py-2 text-[17px] font-semibold leading-6 text-black outline-none transition focus:border-[#1b59f8]/40 focus:bg-white"
+                          className="nodrag nopan mt-3 block w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-3 py-2 text-[17px] font-semibold leading-6 text-black outline-none transition focus:border-[#a13ab8]/40 focus:bg-white"
                         />
                       )}
                     </div>
@@ -8178,7 +8178,7 @@ export default function MeetingCanvasTab({
                           handleUpdateProblemStructureGroupStatus(column.id, event.target.value as ProblemGroupStatus)
                         }
                         onPointerDown={(event) => event.stopPropagation()}
-                        className={`nodrag nopan w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2 py-1.5 text-xs font-semibold outline-none transition focus:border-[#1b59f8]/40 ${problemGroupStatusTone(column.status || "draft")}`}
+                        className={`nodrag nopan w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2 py-1.5 text-xs font-semibold outline-none transition focus:border-[#a13ab8]/40 ${problemGroupStatusTone(column.status || "draft")}`}
                       >
                         {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
                           <option key={`${column.id}-status-${status}`} value={status}>
@@ -8194,8 +8194,8 @@ export default function MeetingCanvasTab({
                       그룹을 만든 뒤 노드를 드래그해 넣거나, 노드끼리 겹쳐 새 그룹을 만들 수 있습니다.
                     </p>
                   ) : (
-                    <div className={`mt-3 rounded-[10px] ${isCardSorting ? "border border-[#1b59f8]/10 bg-[#eef4ff]" : "bg-[#f5f6f8]"} p-3`}>
-                      <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#1b59f8]">
+                    <div className={`mt-3 rounded-[10px] ${isCardSorting ? "border border-[#a13ab8]/10 bg-[#f7ecfb]" : "bg-[#f5f6f8]"} p-3`}>
+                      <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#a13ab8]">
                         {rationaleLabel}
                       </label>
                       <textarea
@@ -8203,7 +8203,7 @@ export default function MeetingCanvasTab({
                         onChange={(event) => handleUpdateProblemStructureGroupRationale(column.id, event.target.value)}
                         onPointerDown={(event) => event.stopPropagation()}
                         placeholder={column.createdBy === "ai" ? "AI가 왜 묶었는지 나중에 여기에 표시합니다." : "이 그룹으로 묶은 이유를 적어둘 수 있습니다."}
-                        className="nodrag nopan mt-2 min-h-[68px] w-full resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-xs leading-5 text-[#333] outline-none transition focus:border-[#1b59f8]/40"
+                        className="nodrag nopan mt-2 min-h-[68px] w-full resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-xs leading-5 text-[#333] outline-none transition focus:border-[#a13ab8]/40"
                       />
                     </div>
                   )}
@@ -8226,8 +8226,8 @@ export default function MeetingCanvasTab({
                             onDrop={(event) => handleProblemStructureNodeDrop(event, node.id)}
                             className={`nodrag nopan cursor-grab rounded-[10px] border bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(0,0,0,0.03)] transition active:cursor-grabbing ${
                               isNodeDropTarget
-                                ? "border-[#1b59f8] ring-2 ring-[#1b59f8]/20"
-                                : "border-black/10 hover:border-[#1b59f8]/25"
+                                ? "border-[#a13ab8] ring-2 ring-[#a13ab8]/20"
+                                : "border-black/10 hover:border-[#a13ab8]/25"
                               } ${isDraggingNode ? "opacity-55" : ""}`}
                           >
                           <div className="flex items-start gap-2">
@@ -8237,7 +8237,7 @@ export default function MeetingCanvasTab({
                               onPointerDown={(event) => event.stopPropagation()}
                               aria-label="구조화 노드 제목"
                               rows={2}
-                              className="nodrag nopan block min-h-[44px] flex-1 resize-none rounded-[8px] border border-transparent bg-transparent px-1 py-1 text-sm font-semibold leading-5 text-black outline-none transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/40 focus:bg-white"
+                              className="nodrag nopan block min-h-[44px] flex-1 resize-none rounded-[8px] border border-transparent bg-transparent px-1 py-1 text-sm font-semibold leading-5 text-black outline-none transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#a13ab8]/40 focus:bg-white"
                             />
                             <button
                               type="button"
@@ -9384,7 +9384,7 @@ export default function MeetingCanvasTab({
                   positionSource: "persisted" as const,
                   sourcePosition: Position.Bottom,
                   targetPosition: Position.Top,
-                  className: "imms-agenda-drag-placeholder rounded-[28px] border border-dashed border-blue-300 bg-blue-50/70 shadow-[0_18px_40px_rgba(37,99,235,0.10)]",
+                  className: "imms-agenda-drag-placeholder rounded-[28px] border border-dashed border-fuchsia-300 bg-fuchsia-50/70 shadow-[0_18px_40px_rgba(161,58,184,0.10)]",
                   style: { width: 300, minHeight: agendaHeight, borderRadius: 28, padding: 0 },
                   draggable: false,
                   selectable: false,
@@ -9399,7 +9399,7 @@ export default function MeetingCanvasTab({
                     ]),
                     label: (
                       <div className="p-5">
-                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-600">
+                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-fuchsia-700">
                           기존 위치
                         </p>
                         <p className="mt-2 text-lg font-semibold leading-7 text-slate-800">{agenda.title}</p>
@@ -9443,8 +9443,8 @@ export default function MeetingCanvasTab({
                     ideationDropPreview.position.y,
                   ]),
                   label: (
-                    <div className="flex h-full min-h-[158px] flex-col items-center justify-center rounded-[18px] border-2 border-dashed border-[#1b59f8]/55 bg-[#eef4ff]/80 px-5 py-4 text-center shadow-[inset_0_0_0_5px_rgba(27,89,248,0.08),0_16px_34px_rgba(27,89,248,0.12)]">
-                      <p className="text-[15px] font-semibold text-[#1b59f8]">{ideationDropPreview.label}</p>
+                    <div className="flex h-full min-h-[158px] flex-col items-center justify-center rounded-[18px] border-2 border-dashed border-[#a13ab8]/55 bg-[#f7ecfb]/80 px-5 py-4 text-center shadow-[inset_0_0_0_5px_rgba(161,58,184,0.08),0_16px_34px_rgba(161,58,184,0.12)]">
+                      <p className="text-[15px] font-semibold text-[#a13ab8]">{ideationDropPreview.label}</p>
                       <p className="mt-2 text-[13px] leading-5 text-[#4d4d4d]">{ideationDropPreview.hint}</p>
                     </div>
                   ),
@@ -13155,8 +13155,8 @@ export default function MeetingCanvasTab({
       : `${rightDrawerShowsDetailPanel ? "border-t-4 border-[#d5d5d5]" : ""} translate-x-0 opacity-100`
   }`;
   const quickAskLauncherClassName = rightDrawerCollapsed
-    ? "absolute bottom-5 left-1/2 z-50 flex h-[62px] w-12 -translate-x-1/2 flex-col items-center justify-center rounded-[16px] border border-black/10 bg-white text-[11px] font-semibold leading-tight text-[#1b59f8] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition hover:-translate-y-0.5 hover:bg-[#eef4ff] focus:outline-none focus:ring-4 focus:ring-[#1b59f8]/10"
-    : "absolute bottom-4 left-4 right-4 z-50 flex min-h-[48px] items-center justify-between gap-3 rounded-[14px] border border-black/10 bg-white px-4 py-2.5 text-sm font-semibold text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.10)] transition hover:-translate-y-0.5 hover:border-[#1b59f8]/20 hover:bg-[#eef4ff] focus:outline-none focus:ring-4 focus:ring-[#1b59f8]/10";
+    ? "absolute bottom-5 left-1/2 z-50 flex h-[62px] w-12 -translate-x-1/2 flex-col items-center justify-center rounded-[16px] border border-black/10 bg-white text-[11px] font-semibold leading-tight text-[#a13ab8] shadow-[0_8px_24px_rgba(0,0,0,0.12)] transition hover:-translate-y-0.5 hover:bg-[#f7ecfb] focus:outline-none focus:ring-4 focus:ring-[#a13ab8]/10"
+    : "absolute bottom-4 left-4 right-4 z-50 flex min-h-[48px] items-center justify-between gap-3 rounded-[14px] border border-black/10 bg-white px-4 py-2.5 text-sm font-semibold text-[#4d4d4d] shadow-[0_8px_24px_rgba(0,0,0,0.10)] transition hover:-translate-y-0.5 hover:border-[#a13ab8]/20 hover:bg-[#f7ecfb] focus:outline-none focus:ring-4 focus:ring-[#a13ab8]/10";
   const quickAskPanelClassName = rightDrawerCollapsed
     ? "absolute bottom-20 right-2 z-50 flex w-[min(26rem,calc(100vw-1.5rem))] max-h-[min(620px,72vh)] flex-col overflow-hidden rounded-[18px] border border-black/10 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.24)]"
     : "absolute bottom-20 right-4 z-50 flex w-[min(28rem,calc(100vw-2rem))] max-h-[min(620px,72vh)] flex-col overflow-hidden rounded-[18px] border border-black/10 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.24)]";
@@ -13226,10 +13226,10 @@ export default function MeetingCanvasTab({
           source: `problem-${group.group_id}`,
           target: `problem-${linkedGroupId}`,
           type: "smoothstep",
-          markerEnd: { type: MarkerType.ArrowClosed, color: "#1b59f8" },
+          markerEnd: { type: MarkerType.ArrowClosed, color: "#a13ab8" },
           interactionWidth: 0,
           selectable: false,
-          style: { stroke: "#1b59f8", strokeOpacity: 0.58, strokeWidth: 2, strokeDasharray: "5 5" },
+          style: { stroke: "#a13ab8", strokeOpacity: 0.58, strokeWidth: 2, strokeDasharray: "5 5" },
         })),
     );
 
@@ -14154,7 +14154,7 @@ export default function MeetingCanvasTab({
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-slate-500">AI 제안 {index + 1}</p>
-                        <p className={`mt-1 text-base leading-7 ${idea.status === "selected" ? "text-blue-600" : "text-slate-700"}`}>
+                        <p className={`mt-1 text-base leading-7 ${idea.status === "selected" ? "text-fuchsia-700" : "text-slate-700"}`}>
                           {idea.text}
                         </p>
                       </div>
@@ -14559,7 +14559,7 @@ export default function MeetingCanvasTab({
                   }
                 }}
                 className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(12px,1.2vw,16px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
-                  isRecording ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100" : "bg-[#1b59f8] text-white"
+                  isRecording ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100" : "bg-[#a13ab8] text-white"
                 }`}
               >
                 {isRecording ? "녹음 중지" : "녹음 시작"}
@@ -14581,7 +14581,7 @@ export default function MeetingCanvasTab({
               <button
                 type="button"
                 onClick={meetingGoalEditorOpen ? handleCancelMeetingGoalEdit : handleOpenMeetingGoalEditor}
-                className="mx-auto mt-2 block w-full max-w-[min(760px,100%)] rounded-xl border border-transparent px-3 py-1 text-center transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/30 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#1b59f8]/10"
+                className="mx-auto mt-2 block w-full max-w-[min(760px,100%)] rounded-xl border border-transparent px-3 py-1 text-center transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#a13ab8]/30 focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#a13ab8]/10"
               >
                 <span
                   className={`block truncate text-[clamp(20px,2.2vw,32px)] font-semibold leading-[1.2] tracking-normal ${
@@ -14625,7 +14625,7 @@ export default function MeetingCanvasTab({
                         }
                       }}
                       placeholder="예: 신규 회의 관리 시스템의 핵심 기능 우선순위 결정"
-                      className="mt-2 w-full rounded-[12px] border border-black/10 bg-[#f9f9f9] px-4 py-3 text-[16px] leading-6 text-black outline-none transition placeholder:text-black/30 focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                      className="mt-2 w-full rounded-[12px] border border-black/10 bg-[#f9f9f9] px-4 py-3 text-[16px] leading-6 text-black outline-none transition placeholder:text-black/30 focus:border-[#a13ab8]/30 focus:bg-white focus:ring-2 focus:ring-[#a13ab8]/10"
                     />
                   </label>
                   <label className="mt-3 block">
@@ -14642,7 +14642,7 @@ export default function MeetingCanvasTab({
                         }
                       }}
                       placeholder="회의에서 자주 나올 제품명, 고유명사, 참가자 역할, 논의 범위 등을 입력해 주세요."
-                      className="mt-2 min-h-[92px] w-full resize-none rounded-[12px] border border-black/10 bg-[#f9f9f9] px-4 py-3 text-[15px] leading-6 text-[#4d4d4d] outline-none transition placeholder:text-black/30 focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                      className="mt-2 min-h-[92px] w-full resize-none rounded-[12px] border border-black/10 bg-[#f9f9f9] px-4 py-3 text-[15px] leading-6 text-[#4d4d4d] outline-none transition placeholder:text-black/30 focus:border-[#a13ab8]/30 focus:bg-white focus:ring-2 focus:ring-[#a13ab8]/10"
                     />
                   </label>
                   <div className="mt-4 flex items-center justify-end gap-2">
@@ -14658,7 +14658,7 @@ export default function MeetingCanvasTab({
                       type="button"
                       onClick={() => void handleSaveMeetingGoalEdit()}
                       disabled={meetingGoalSaving}
-                      className="rounded-[8px] bg-[#1b59f8] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-[8px] bg-[#a13ab8] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {meetingGoalSaving ? "저장 중" : "저장"}
                     </button>
@@ -14676,8 +14676,8 @@ export default function MeetingCanvasTab({
                       onClick={() => void handleStageSelect(item)}
                       className={`rounded-[8px] border px-[clamp(12px,1.2vw,16px)] py-[clamp(7px,0.9vh,8px)] text-[clamp(14px,1.2vw,20px)] font-semibold leading-[1.25] transition ${
                         stage === item
-                          ? "border-[#1b59f8]/20 bg-[rgba(27,89,248,0.1)] text-[#1b59f8]"
-                          : "border-black/10 bg-white text-black/50 hover:border-[#1b59f8]/20 hover:bg-[rgba(27,89,248,0.1)] hover:text-[#1b59f8]"
+                          ? "border-[#a13ab8]/20 bg-[rgba(161,58,184,0.1)] text-[#a13ab8]"
+                          : "border-black/10 bg-white text-black/50 hover:border-[#a13ab8]/20 hover:bg-[rgba(161,58,184,0.1)] hover:text-[#a13ab8]"
                       }`}
                     >
                       {stageLabel(item)}
@@ -14700,7 +14700,7 @@ export default function MeetingCanvasTab({
                 <div className={`${canvasHeaderCellClassName} flex items-center border-b border-black/10 xl:border-b-0 xl:border-r`}>
                   <div className="flex w-full min-w-0 items-start justify-between gap-[clamp(12px,1.5vw,20px)]">
                     <div className="min-w-0">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]/80">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]/80">
                         {stage === "solution" ? "Summary" : "Problem"}
                       </p>
                       <h3 className="mt-1 truncate text-[clamp(15px,1.15vw,18px)] font-semibold leading-[24.811px] text-black">
@@ -14780,14 +14780,14 @@ export default function MeetingCanvasTab({
                     zoomable
                     pannable
                     maskColor="rgba(15, 23, 42, 0.08)"
-                    nodeColor={stage === "problem-definition" ? "#1b59f8" : "#0f766e"}
+                    nodeColor={stage === "problem-definition" ? "#a13ab8" : "#0f766e"}
                   />
                 </ReactFlow>
               ) : stage === "solution" ? (
                 <div className="grid h-full min-h-0 grid-cols-1 bg-[#f5f6f8] xl:grid-cols-[minmax(18rem,32%)_minmax(0,1fr)]">
                   <aside className="flex min-h-[280px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
                     <div className="border-b border-black/10 px-5 py-4">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Summary Source</p>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">Summary Source</p>
                       <h4 className="mt-1 text-lg font-semibold text-black">구조화 결과</h4>
                       <p className="mt-1 text-sm leading-6 text-[#4d4d4d]">
                         검토 중/확정 그룹 {summaryEligibleStructureGroups.length}개가 요약 문서에 포함됩니다.
@@ -14834,15 +14834,15 @@ export default function MeetingCanvasTab({
                                     <button
                                       type="button"
                                       onClick={() => handleToggleSummaryEvidence(group.id)}
-                                      className="text-xs font-semibold text-[#1b59f8] transition hover:text-[#164be0]"
+                                      className="text-xs font-semibold text-[#a13ab8] transition hover:text-[#8d2fa3]"
                                     >
                                       근거 발언 {evidenceOpen ? "접기" : "보기"} ({section.evidence.length})
                                     </button>
                                     {evidenceOpen ? (
                                       <div className="mt-2 space-y-2">
                                         {section.evidence.map((item, evidenceIndex) => (
-                                          <p key={`summary-evidence-${group.id}-${item.utterance_id || evidenceIndex}`} className="bg-[#eef4ff] px-3 py-2 text-xs leading-5 text-[#334155]">
-                                            <span className="font-semibold text-[#1b59f8]">{item.speaker}</span>
+                                          <p key={`summary-evidence-${group.id}-${item.utterance_id || evidenceIndex}`} className="bg-[#f7ecfb] px-3 py-2 text-xs leading-5 text-[#334155]">
+                                            <span className="font-semibold text-[#a13ab8]">{item.speaker}</span>
                                             {item.timestamp ? <span className="ml-2 text-[#777]">{item.timestamp}</span> : null}
                                             <span className="mt-1 block">{item.text}</span>
                                           </p>
@@ -14866,12 +14866,12 @@ export default function MeetingCanvasTab({
                   <section ref={solutionRightPaneRef} className="flex min-h-[420px] flex-col overflow-hidden bg-white">
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/10 px-5 py-4">
                       <div>
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Final Document</p>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">Final Document</p>
                         <h4 className="mt-1 text-lg font-semibold text-black">최종 정리 문서</h4>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
                         {finalSummaryDocument.used_llm ? (
-                          <span className="rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">AI 초안</span>
+                          <span className="rounded-full bg-[#f7ecfb] px-3 py-1 text-xs font-semibold text-[#a13ab8]">AI 초안</span>
                         ) : null}
                         {finalSummaryDocument.document_status === "edited" ? (
                           <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">사용자 수정됨</span>
@@ -14882,7 +14882,7 @@ export default function MeetingCanvasTab({
                             onClick={() => setSummaryDocumentEditMode(false)}
                             disabled={!finalSummaryDocument.markdown.trim()}
                             className={`px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-                              !summaryDocumentEditMode ? "bg-white text-[#1b59f8]" : "text-[#4d4d4d] hover:bg-white/70"
+                              !summaryDocumentEditMode ? "bg-white text-[#a13ab8]" : "text-[#4d4d4d] hover:bg-white/70"
                             }`}
                           >
                             보기
@@ -14891,7 +14891,7 @@ export default function MeetingCanvasTab({
                             type="button"
                             onClick={() => setSummaryDocumentEditMode(true)}
                             className={`border-l border-black/10 px-3 py-1.5 text-xs font-semibold transition ${
-                              summaryDocumentEditMode ? "bg-white text-[#1b59f8]" : "text-[#4d4d4d] hover:bg-white/70"
+                              summaryDocumentEditMode ? "bg-white text-[#a13ab8]" : "text-[#4d4d4d] hover:bg-white/70"
                             }`}
                           >
                             편집
@@ -14909,7 +14909,7 @@ export default function MeetingCanvasTab({
                           type="button"
                           onClick={() => void handleCopyFinalSolutionMarkdown()}
                           disabled={!finalSummaryDocument.markdown.trim()}
-                          className="rounded-[8px] bg-[#1b59f8] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
+                          className="rounded-[8px] bg-[#a13ab8] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           복사
                         </button>
@@ -14930,7 +14930,7 @@ export default function MeetingCanvasTab({
                               ? "AI가 요약 문서를 생성하는 중입니다."
                               : "요약 단계로 들어오면 구조화 그룹을 기준으로 문서 초안이 자동 생성됩니다."
                           }
-                          className="h-full min-h-[360px] w-full resize-none border border-black/10 bg-white px-6 py-5 font-mono text-sm leading-7 text-[#1f2937] outline-none transition placeholder:font-sans placeholder:text-[#999] focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+                          className="h-full min-h-[360px] w-full resize-none border border-black/10 bg-white px-6 py-5 font-mono text-sm leading-7 text-[#1f2937] outline-none transition placeholder:font-sans placeholder:text-[#999] focus:border-[#a13ab8]/30 focus:ring-2 focus:ring-[#a13ab8]/10"
                         />
                       ) : (
                         renderSummaryMarkdownPreview(finalSummaryDocument.markdown, () => setSummaryDocumentEditMode(true))
@@ -15087,7 +15087,7 @@ export default function MeetingCanvasTab({
             {stage === "solution" && !finalSummaryDocument.markdown.trim() && !solutionStagePending ? (
               <div className="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center bg-white/70 backdrop-blur-[1px]">
                 <div className="rounded-2xl border border-slate-200 bg-white px-6 py-5 text-center shadow-lg shadow-slate-200/70">
-                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Summary Stage</p>
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">Summary Stage</p>
                   <p className="mt-2 text-base text-slate-700">
                     {summaryEligibleStructureGroups.length > 0
                       ? "요약 문서를 준비하는 중입니다."
@@ -15121,13 +15121,13 @@ export default function MeetingCanvasTab({
                 <div className="w-[min(820px,94%)] rounded-[20px] border border-black/10 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.14)]">
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Problem Structure</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">Problem Structure</p>
                       <h3 className="mt-2 text-2xl font-semibold text-black">정의 2단계 시작 설정</h3>
                     </div>
                     <button
                       type="button"
                       onClick={() => setProblemStructureSetupOpen(false)}
-                      className="shrink-0 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-3 py-2 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#eef4ff] hover:text-[#1b59f8]"
+                      className="shrink-0 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-3 py-2 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f7ecfb] hover:text-[#a13ab8]"
                     >
                       닫기
                     </button>
@@ -15146,8 +15146,8 @@ export default function MeetingCanvasTab({
                               onClick={() => setProblemStructureDraftMethod(method)}
                               className={`rounded-[14px] border px-5 py-4 text-left transition ${
                                 active
-                                  ? "border-[#1b59f8]/30 bg-[#eef4ff] text-[#1b59f8]"
-                                  : "border-black/10 bg-[#f9f9f9] text-[#333] hover:border-[#1b59f8]/30 hover:bg-[#eef4ff]"
+                                  ? "border-[#a13ab8]/30 bg-[#f7ecfb] text-[#a13ab8]"
+                                  : "border-black/10 bg-[#f9f9f9] text-[#333] hover:border-[#a13ab8]/30 hover:bg-[#f7ecfb]"
                               }`}
                             >
                               <span className="text-base font-semibold">{problemStructureMethodLabel(method)}</span>
@@ -15174,8 +15174,8 @@ export default function MeetingCanvasTab({
                               onClick={() => setProblemStructureDraftMode(mode)}
                               className={`rounded-[14px] border px-5 py-4 text-left transition ${
                                 active
-                                  ? "border-[#1b59f8]/30 bg-[#eef4ff] text-[#1b59f8]"
-                                  : "border-black/10 bg-[#f9f9f9] text-[#333] hover:border-[#1b59f8]/30 hover:bg-[#eef4ff]"
+                                  ? "border-[#a13ab8]/30 bg-[#f7ecfb] text-[#a13ab8]"
+                                  : "border-black/10 bg-[#f9f9f9] text-[#333] hover:border-[#a13ab8]/30 hover:bg-[#f7ecfb]"
                               }`}
                             >
                               <span className="text-base font-semibold">
@@ -15201,7 +15201,7 @@ export default function MeetingCanvasTab({
                       type="button"
                       onClick={handleStartProblemStructure}
                       disabled={problemStructurePending}
-                      className="rounded-[10px] bg-[#1b59f8] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-[10px] bg-[#a13ab8] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {problemStructurePending ? "AI 묶는 중" : "정의 2단계로 이동"}
                     </button>
@@ -15215,14 +15215,14 @@ export default function MeetingCanvasTab({
                 <div className="pointer-events-auto rounded-[16px] border border-black/10 bg-white/95 p-3 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur">
                   <div className="flex flex-wrap items-center gap-3">
                     <div className="min-w-[12rem] flex-1">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">
                         정의 2단계
                       </p>
                       <p className="mt-1 text-sm font-semibold text-black">
                         {problemStructureMethodLabel(problemStructureMethod)} · {problemDefinitionModeLabel(problemDefinitionMode)}
                       </p>
                       {problemStructurePending ? (
-                        <p className="mt-1 text-xs font-medium text-[#1b59f8]">AI가 구조화 그룹을 생성하는 중입니다.</p>
+                        <p className="mt-1 text-xs font-medium text-[#a13ab8]">AI가 구조화 그룹을 생성하는 중입니다.</p>
                       ) : null}
                     </div>
                     <div className="flex flex-wrap gap-1.5">
@@ -15238,7 +15238,7 @@ export default function MeetingCanvasTab({
                               setActivityMessage(`${problemStructureMethodLabel(method)} 방식으로 시각 표현을 바꿨습니다. 기존 그룹은 유지됩니다.`);
                             }}
                             className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
-                              active ? "bg-[#1b59f8] text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-[#eef4ff] hover:text-[#1b59f8]"
+                              active ? "bg-[#a13ab8] text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-[#f7ecfb] hover:text-[#a13ab8]"
                             } disabled:cursor-not-allowed disabled:opacity-50`}
                           >
                             {problemStructureMethodLabel(method)}
@@ -15282,7 +15282,7 @@ export default function MeetingCanvasTab({
               <div className="absolute right-4 top-4 z-[8] w-[min(26rem,calc(100%-2rem))] rounded-[16px] border border-black/10 bg-white/95 p-4 text-left shadow-[0_18px_46px_rgba(15,23,42,0.14)] backdrop-blur">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Grouping Rationale</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">Grouping Rationale</p>
                     <h4 className="mt-1 line-clamp-2 text-[17px] font-semibold leading-6 text-black">
                       {activeProblemGroupingRationaleGroup.topic || "문제정의 그룹"}
                     </h4>
@@ -15290,7 +15290,7 @@ export default function MeetingCanvasTab({
                   <button
                     type="button"
                     onClick={() => setProblemGroupingRationaleOpenGroupId("")}
-                    className="shrink-0 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2.5 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#eef4ff] hover:text-[#1b59f8]"
+                    className="shrink-0 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2.5 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f7ecfb] hover:text-[#a13ab8]"
                   >
                     닫기
                   </button>
@@ -15308,7 +15308,7 @@ export default function MeetingCanvasTab({
                   </div>
                 ) : null}
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-medium text-[#777]">
-                  <span className="rounded-full bg-[#eef4ff] px-2.5 py-1 text-[#1b59f8]">
+                  <span className="rounded-full bg-[#f7ecfb] px-2.5 py-1 text-[#a13ab8]">
                     {activeProblemGroupingRationale.usedLlm ? "AI 추정" : "로컬 추정"}
                   </span>
                   {activeProblemGroupingRationale.warning ? (
@@ -15382,7 +15382,7 @@ export default function MeetingCanvasTab({
                       }
                       className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(110px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
                         isProblemToolbarActionActive(item)
-                          ? "bg-[#1b59f8]/10 text-[#1b59f8]"
+                          ? "bg-[#a13ab8]/10 text-[#a13ab8]"
                           : "text-[#4d4d4d] hover:bg-black/5"
                       } disabled:cursor-not-allowed disabled:opacity-45`}
                     >
@@ -15496,7 +15496,7 @@ export default function MeetingCanvasTab({
               <div className={quickAskPanelClassName}>
                 <div className="flex items-start justify-between gap-4 border-b border-black/10 px-4 py-3.5">
                   <div className="min-w-0">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">LLM Search</p>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">LLM Search</p>
                     <h4 className="mt-1 text-base font-semibold leading-tight text-black">LLM 및 검색</h4>
                   </div>
                   <button
@@ -15522,7 +15522,7 @@ export default function MeetingCanvasTab({
                         <div
                           className={`max-w-[86%] rounded-[14px] px-3.5 py-3 text-sm leading-6 shadow-sm ${
                             message.role === "user"
-                              ? "bg-[#1b59f8] text-white"
+                              ? "bg-[#a13ab8] text-white"
                               : message.status === "error"
                               ? "border border-red-100 bg-red-50 text-red-700"
                               : "border border-black/10 bg-white text-[#2f3440]"
@@ -15559,7 +15559,7 @@ export default function MeetingCanvasTab({
                       }
                     }}
                     placeholder="질문 입력"
-                    className="min-h-[78px] w-full resize-none rounded-[12px] border border-black/10 bg-[#f9f9f9] px-3.5 py-3 text-sm leading-6 text-black outline-none transition placeholder:text-black/30 focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                    className="min-h-[78px] w-full resize-none rounded-[12px] border border-black/10 bg-[#f9f9f9] px-3.5 py-3 text-sm leading-6 text-black outline-none transition placeholder:text-black/30 focus:border-[#a13ab8]/30 focus:bg-white focus:ring-2 focus:ring-[#a13ab8]/10"
                   />
                   <div className="mt-2 flex items-center justify-between gap-3">
                     <span className="text-[11px] font-medium text-[#8b8f9a]">
@@ -15568,7 +15568,7 @@ export default function MeetingCanvasTab({
                     <button
                       type="submit"
                       disabled={!quickAskDraft.trim()}
-                      className="rounded-[10px] bg-[#1b59f8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-45"
+                      className="rounded-[10px] bg-[#a13ab8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-45"
                     >
                       보내기
                     </button>
@@ -15587,16 +15587,16 @@ export default function MeetingCanvasTab({
                   <span className="block">LLM</span>
                   <span className="block text-[10px] font-medium leading-tight text-[#777]">검색</span>
                   {quickAskUnreadCount > 0 || quickAskPendingCount > 0 ? (
-                    <span className="absolute -right-2.5 -top-2.5 h-3 w-3 rounded-full border-2 border-white bg-[#1b59f8]" />
+                    <span className="absolute -right-2.5 -top-2.5 h-3 w-3 rounded-full border-2 border-white bg-[#a13ab8]" />
                   ) : null}
                 </span>
               ) : (
                 <>
                   <span className="flex flex-col leading-tight">
-                    <span className="text-[#1b59f8]">LLM 및 검색</span>
+                    <span className="text-[#a13ab8]">LLM 및 검색</span>
                     <span className="mt-0.5 text-[11px] font-medium text-[#777]">바로 질문하고 응답 확인</span>
                   </span>
-                  <span className="rounded-full bg-[#e9efff] px-2.5 py-1 text-[11px] font-semibold text-[#1b59f8]">
+                  <span className="rounded-full bg-[#f4e8fb] px-2.5 py-1 text-[11px] font-semibold text-[#a13ab8]">
                     {quickAskPendingCount > 0
                       ? `${quickAskPendingCount}개 처리 중`
                       : quickAskUnreadCount > 0
