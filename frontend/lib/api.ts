@@ -9,6 +9,7 @@ import type {
   CanvasIdeaAssimilationIdea,
   CanvasIdeaAssimilationResponse,
   CanvasIdeaAssimilationUtterance,
+  CanvasIdeationKeywordResponse,
   CanvasIdeationSuggestionResponse,
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
@@ -347,6 +348,24 @@ export async function askCanvasQuickQuestion(payload: {
   context?: Record<string, unknown>;
 }): Promise<CanvasQuickAskResponse> {
   return requestJson<CanvasQuickAskResponse>("/api/canvas/quick-ask", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function extractCanvasIdeationKeywords(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  utterances: Array<{
+    id: string;
+    speaker: string;
+    text: string;
+    timestamp?: string;
+  }>;
+  max_keywords?: number;
+}): Promise<CanvasIdeationKeywordResponse> {
+  return requestJson<CanvasIdeationKeywordResponse>("/api/canvas/ideation-keywords", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),

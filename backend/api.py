@@ -2205,6 +2205,13 @@ class CanvasQuickAskInput(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
+class IdeationKeywordExtractInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, max_length=180)
+    max_keywords: int = Field(default=18, ge=4, le=30)
+
+
 class IdeationSuggestionTopicInput(BaseModel):
     id: str = ""
     title: str = ""
@@ -5028,6 +5035,165 @@ def _build_canvas_quick_ask_local_answer(question: str, rows: list[dict[str, str
         ]
         return "\n".join(lines)
     return "LLM 연결이 없어 지금은 답변을 생성하지 못했습니다. 회의 기록 검색에 쓸 만한 관련 발언도 찾지 못했습니다."
+
+
+_IDEATION_KEYWORD_NON_NOUN_PATTERNS = [
+    re.compile(r"(하다|했다|한다|했던|하고|하며|하면|해서|해야|하기|하자|하죠|하게|하려|하려고|하려면|하던|할까|할지|해도|해요)$"),
+    re.compile(r"(되다|된다|됐다|되고|되면|되어|되는|되죠|돼요|됩니다)$"),
+    re.compile(r"(입니다|있는|있다|있고|있어|없다|없고|없어|같다|같은|같아요|싶다|싶은)$"),
+    re.compile(r"(좋다|좋은|나쁘다|나쁜|어렵다|어려운|쉽다|쉬운|많다|많은|적다|적은|크다|큰|작다|작은)$"),
+    re.compile(r"(아요|어요|워요|네요|군요|죠|지요|고요|습니다|습니까|면서|지만|거나|니까|어서|아서|려고|다고)$"),
+]
+
+
+def _normalize_ideation_keyword_text(raw: Any) -> str:
+    text = re.sub(r"\s+", " ", _safe_text(raw)).strip()
+    text = re.sub(r"^[^\w가-힣]+|[^\w가-힣]+$", "", text)
+    if not text or len(text) < 2 or len(text) > 28:
+        return ""
+    if re.fullmatch(r"\d+", text):
+        return ""
+    lowered = text.lower()
+    if lowered in STOPWORDS or lowered in TITLE_NOISE_TOKENS:
+        return ""
+    if any(pattern.search(lowered) for pattern in _IDEATION_KEYWORD_NON_NOUN_PATTERNS):
+        return ""
+    if re.search(r"[가-힣][a-z0-9+#._-]+", text, flags=re.IGNORECASE):
+        return ""
+    return lowered if re.fullmatch(r"[A-Za-z0-9+#._ -]+", text) else text
+
+
+def _ideation_keyword_rows(payload: IdeationKeywordExtractInput) -> list[dict[str, str]]:
+    return _normalize_problem_taxonomy_utterance_rows(payload.utterances)[-180:]
+
+
+def _build_local_ideation_keywords(rows: list[dict[str, str]], max_keywords: int) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    first_seen: dict[str, int] = {}
+    cooccurrence: dict[str, Counter[str]] = {}
+    cursor = 0
+    for row in rows:
+        row_terms: list[str] = []
+        for token in _keyword_tokens(_strip_leading_timestamp(row.get("text"))):
+            keyword = _normalize_ideation_keyword_text(token)
+            if not keyword:
+                continue
+            row_terms.append(keyword)
+        unique_terms = _dedup_preserve(row_terms, limit=14)
+        for keyword in unique_terms:
+            counts[keyword] += 1
+            if keyword not in first_seen:
+                first_seen[keyword] = cursor
+                cursor += 1
+        for left in unique_terms:
+            related = cooccurrence.setdefault(left, Counter())
+            for right in unique_terms:
+                if left != right:
+                    related[right] += 1
+
+    minimum_count = 2 if len(rows) >= 8 else 1
+    sorted_items = [
+        keyword
+        for keyword, count in counts.items()
+        if count >= minimum_count
+    ]
+    sorted_items.sort(key=lambda keyword: (-counts[keyword], first_seen.get(keyword, 0)))
+    if not sorted_items:
+        sorted_items = sorted(counts, key=lambda keyword: (-counts[keyword], first_seen.get(keyword, 0)))
+
+    selected = sorted_items[:max_keywords]
+    selected_set = set(selected)
+    return [
+        {
+            "text": keyword,
+            "count": int(counts[keyword]),
+            "related": [
+                related_keyword
+                for related_keyword, _score in cooccurrence.get(keyword, Counter()).most_common(5)
+                if related_keyword in selected_set
+            ],
+        }
+        for keyword in selected
+    ]
+
+
+def _build_ideation_keyword_extract_prompt(payload: IdeationKeywordExtractInput, rows: list[dict[str, str]]) -> str:
+    input_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "max_keywords": int(payload.max_keywords or 18),
+        "utterances": [
+            {
+                "id": _safe_text(row.get("id")),
+                "speaker": _safe_text(row.get("speaker"), "참가자"),
+                "text": _truncate_text(_strip_leading_timestamp(row.get("text")), 420),
+                "timestamp": _safe_text(row.get("timestamp")),
+            }
+            for row in rows[-120:]
+        ],
+    }
+    return (
+        "너는 아이디어 회의의 STT 전사에서 캔버스 버블로 보여줄 명사만 추출하는 AI다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 사람들이 지금 어떤 주제들을 말하고 있는지 보여줄 명사/고유명사/짧은 명사구를 추출한다.\n"
+        "- 반드시 실제 전사에 나온 내용에서만 뽑는다. 새 개념을 만들지 않는다.\n"
+        "- 동사, 형용사, 서술어, filler, 접속사, '생각', '부분', '관련', '회의', '아이디어' 같은 범용어는 제외한다.\n"
+        "- 같은 문장이나 가까운 발화에서 함께 나온 명사는 related에 서로 연결한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(input_payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "keywords": [\n'
+        '    {"text": "경복궁", "count": 3, "related": ["교통", "역사"]},\n'
+        '    {"text": "국립중앙박물관", "count": 2, "related": ["역사"]}\n'
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        f"- keywords는 최대 {int(payload.max_keywords or 18)}개.\n"
+        "- text는 2~18자 정도의 명사 또는 짧은 명사구. 불필요하게 긴 문장은 금지한다.\n"
+        "- count는 해당 명사/동의 표현이 등장한 발화 수에 가깝게 추정한다. 최소 1 이상.\n"
+        "- related에는 keywords 안에 있는 text만 넣는다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _normalize_ideation_keyword_items(parsed: Any, fallback: list[dict[str, Any]], max_keywords: int) -> list[dict[str, Any]]:
+    raw_items = parsed.get("keywords") if isinstance(parsed, dict) else None
+    if not isinstance(raw_items, list):
+        return fallback
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, dict):
+            text = _normalize_ideation_keyword_text(item.get("text") or item.get("keyword") or item.get("noun"))
+            raw_count = item.get("count")
+            raw_related = item.get("related")
+        else:
+            text = _normalize_ideation_keyword_text(item)
+            raw_count = 1
+            raw_related = []
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        count = _safe_nonnegative_int(raw_count, 1) or 1
+        related = [
+            _normalize_ideation_keyword_text(value)
+            for value in (raw_related if isinstance(raw_related, list) else [])
+        ]
+        candidates.append(
+            {
+                "text": text,
+                "count": max(1, count),
+                "related": _dedup_preserve([value for value in related if value], limit=5),
+            }
+        )
+        if len(candidates) >= max_keywords:
+            break
+
+    selected_texts = {item["text"] for item in candidates}
+    for item in candidates:
+        item["related"] = [value for value in item.get("related", []) if value in selected_texts and value != item["text"]]
+    return candidates or fallback
 
 
 def _summary_document_status_label(status: str) -> str:
@@ -11818,6 +11984,82 @@ def post_canvas_quick_ask(payload: CanvasQuickAskInput):
         "generated_at": _now_ts(),
         "answer": answer,
     }
+
+
+@app.post("/api/canvas/ideation-keywords")
+def post_canvas_ideation_keywords(payload: IdeationKeywordExtractInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    rows = _ideation_keyword_rows(payload)
+    max_keywords = int(payload.max_keywords or 18)
+    signature = _canvas_llm_signature(
+        {
+            "version": 1,
+            "meeting_topic": _safe_text(payload.meeting_topic),
+            "max_keywords": max_keywords,
+            "rows": rows,
+        }
+    )
+
+    def _compute() -> dict[str, Any]:
+        fallback_keywords = _build_local_ideation_keywords(rows, max_keywords)
+        used_llm = False
+        warning = ""
+        keywords = fallback_keywords
+
+        if not rows:
+            return {
+                "ok": True,
+                "used_llm": False,
+                "warning": "명사 버블을 추출할 아이디어 단계 발화가 없습니다.",
+                "generated_at": _now_ts(),
+                "source_signature": signature,
+                "keywords": [],
+            }
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready and client is not None:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_ideation_keyword_extract_prompt(payload, rows),
+                    stage="canvas_ideation_keyword_extract",
+                    temperature=0.08,
+                    max_tokens=1400,
+                )
+                normalized_keywords = _normalize_ideation_keyword_items(parsed, fallback_keywords, max_keywords)
+                if normalized_keywords:
+                    keywords = normalized_keywords
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_ideation_keyword_extract",
+                        "source_signature": signature,
+                        "keywords": copy.deepcopy(keywords),
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM 명사 추출 결과가 비어 있어 로컬 버블을 사용했습니다."
+            except Exception as exc:
+                warning = f"아이디어 명사 추출 LLM 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 명사 버블을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "source_signature": signature,
+            "keywords": keywords,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "ideation_keywords",
+        signature,
+        _compute,
+    )
 
 
 @app.post("/api/canvas/ideation-suggestions")

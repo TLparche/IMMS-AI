@@ -40,6 +40,7 @@ import {
   startCanvasProblemDiscussionWorkspace,
   startCanvasTopicSummaryWorkspace,
   askCanvasQuickQuestion,
+  extractCanvasIdeationKeywords,
 } from "@/lib/api";
 import type {
   AgendaActionItemDetail,
@@ -783,6 +784,24 @@ type IdeationKeywordBubble = {
   count: number;
   weight: number;
   related: string[];
+};
+
+type IdeationKeywordBubblePlacement = {
+  bubble: IdeationKeywordBubble;
+  x: number;
+  y: number;
+  size: number;
+};
+
+type IdeationKeywordBubbleClusterBox = {
+  width: number;
+  height: number;
+  placements: Array<{
+    bubble: IdeationKeywordBubble;
+    x: number;
+    y: number;
+    size: number;
+  }>;
 };
 
 type AgendaDragPreviewState = {
@@ -2086,6 +2105,39 @@ function buildProblemTaxonomyUtterances(transcripts: MeetingTranscript[]) {
     }));
 }
 
+function buildIdeationKeywordUtterances(transcripts: MeetingTranscript[]) {
+  return normalizeTranscriptRows(transcripts)
+    .filter((row) => (!row.canvas_stage || row.canvas_stage === "ideation") && stripLeadingTimestamp(row.text).trim())
+    .slice(-180)
+    .map((row) => ({
+      id: row.id,
+      speaker: row.speaker || "참가자",
+      text: stripLeadingTimestamp(row.text),
+      timestamp: row.timestamp || "",
+    }));
+}
+
+function normalizeIdeationKeywordBubblesFromResponse(
+  keywords: Array<{ text?: string; count?: number; related?: string[] }>,
+): IdeationKeywordBubble[] {
+  const normalized = keywords
+    .map((keyword) => ({
+      text: String(keyword.text || "").trim(),
+      count: Math.max(1, Number(keyword.count || 1)),
+      related: (keyword.related || []).map((item) => String(item || "").trim()).filter(Boolean),
+    }))
+    .filter((keyword) => keyword.text.length >= 2);
+  const maxCount = Math.max(1, ...normalized.map((keyword) => keyword.count));
+  const selectedTexts = new Set(normalized.map((keyword) => keyword.text));
+  return normalized.map((keyword) => ({
+    id: `ideation-keyword-${encodeURIComponent(keyword.text)}`,
+    text: keyword.text,
+    count: keyword.count,
+    weight: keyword.count / maxCount,
+    related: keyword.related.filter((item) => selectedTexts.has(item) && item !== keyword.text).slice(0, 5),
+  }));
+}
+
 function buildAgendaModels(
   analysisState: MeetingState | null,
   agendas: MeetingAgenda[],
@@ -2357,11 +2409,25 @@ const CANVAS_ITEM_KEYWORD_SUFFIXES = [
 ];
 
 const CANVAS_IDEATION_BUBBLE_NON_NOUN_PATTERNS = [
-  /(하다|했다|하고|하며|하면|해서|해야|하기|됩니다|되다|된다|됐다|되고|되면|되어|되는)$/u,
-  /(입니다|있다|있고|있어|없다|없고|없어|같다|같은|같아요|싶다|싶은)$/u,
+  /(하다|했다|한다|했던|하고|하며|하면|해서|해야|하기|하자|하죠|하게|하려|하려고|하려면|하던|할까|할지|해도|해요)$/u,
+  /(되다|된다|됐다|되고|되면|되어|되는|되죠|돼요|됩니다)$/u,
+  /(입니다|있는|있다|있고|있어|없다|없고|없어|같다|같은|같아요|싶다|싶은)$/u,
   /(좋다|좋은|나쁘다|나쁜|어렵다|어려운|쉽다|쉬운|많다|많은|적다|적은|크다|큰|작다|작은)$/u,
-  /(아요|어요|워요|네요|군요|죠|지요|고요|습니다|습니까|네요)$/u,
-  /(면서|지만|거나|니까|어서|아서|려고|다고|네요)$/u,
+  /(아요|어요|워요|네요|군요|죠|지요|고요|습니다|습니까|면서|지만|거나|니까|어서|아서|려고|다고)$/u,
+  /(하기도|되기도|한다면|한다고|한다는|한다면|해가지고|해보자|해보면|해봤|해줘|해줄|하는)$/u,
+];
+const CANVAS_IDEATION_BUBBLE_KOREAN_NON_NOUN_ENDINGS = [
+  "했다",
+  "한다",
+  "하면",
+  "해서",
+  "해야",
+  "하기",
+  "되고",
+  "되면",
+  "되는",
+  "있는",
+  "없는",
 ];
 
 const CANVAS_IDEATION_BUBBLE_ENGLISH_STOPWORDS = new Set([
@@ -2383,6 +2449,11 @@ const CANVAS_KEYWORD_TOKEN_PATTERN = /[A-Za-z0-9가-힣][A-Za-z0-9가-힣+#._-]{
 const CANVAS_IDEATION_BUBBLE_MIN_PHRASE_CHARS = 5;
 const CANVAS_IDEATION_BUBBLE_MAX_PHRASE_CHARS = 18;
 const CANVAS_IDEATION_BUBBLE_PHRASE_GAP_PATTERN = /^[ \t·ㆍ-]+$/u;
+const CANVAS_IDEATION_BUBBLE_PLANE_WIDTH = 1280;
+const CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT = 820;
+const CANVAS_IDEATION_BUBBLE_ORGANIC_GAP = 8;
+const CANVAS_IDEATION_BUBBLE_CLUSTER_GAP = 52;
+const CANVAS_IDEATION_BUBBLE_CLUSTER_MAX_ITEMS = 5;
 
 function stripKoreanKeywordSuffixes(token: string) {
   let normalized = token;
@@ -2405,7 +2476,11 @@ function isLikelyIdeationBubbleNoun(keyword: string) {
     return !CANVAS_IDEATION_BUBBLE_ENGLISH_STOPWORDS.has(keyword.toLowerCase());
   }
   if (!/[가-힣]/.test(keyword)) return false;
+  if (/[가-힣][a-z0-9+#._-]+/i.test(keyword)) return false;
   if (CANVAS_IDEATION_BUBBLE_NON_NOUN_PATTERNS.some((pattern) => pattern.test(keyword))) return false;
+  if (CANVAS_IDEATION_BUBBLE_KOREAN_NON_NOUN_ENDINGS.some((ending) => keyword.endsWith(ending))) return false;
+  if (/(게|고|서|죠|요)$/u.test(keyword) && keyword.length <= 4) return false;
+  if (/(적|화|성)$/u.test(keyword) && keyword.length < 3) return false;
   return true;
 }
 
@@ -2641,17 +2716,212 @@ function buildIdeationKeywordBubbles(transcripts: MeetingTranscript[], limit = 1
   });
 }
 
-function makeIdeationKeywordBubbleNodeLabel(bubble: IdeationKeywordBubble) {
-  const related = bubble.related.slice(0, 2).join(" · ");
+function getIdeationKeywordBubbleSize(bubble: IdeationKeywordBubble, maxCount: number) {
+  const countRatio = maxCount <= 1 ? 1 : bubble.count / maxCount;
+  return Math.round(74 + countRatio * 88);
+}
+
+function getIdeationKeywordBubbleFontSize(text: string, size: number) {
+  const weightedLength = Array.from(text).reduce((sum, char) => {
+    if (/\s/.test(char)) return sum + 0.32;
+    if (/[A-Z]/.test(char)) return sum + 0.72;
+    if (/[a-z0-9+#._-]/.test(char)) return sum + 0.6;
+    return sum + 1;
+  }, 0);
+  const availableWidth = Math.max(42, size * 0.82);
+  const fittedSize = Math.floor((availableWidth / Math.max(1, weightedLength)) * 0.95);
+  return clampNumber(fittedSize, 5, 23);
+}
+
+function hashIdeationBubbleSeed(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function ideationBubbleSeedRatio(value: string, salt: number) {
+  const hash = hashIdeationBubbleSeed(`${value}:${salt}`);
+  return (hash % 10000) / 10000;
+}
+
+function ideationBubbleCirclesOverlap(
+  left: { x: number; y: number; size: number },
+  right: { x: number; y: number; size: number },
+  gap: number,
+) {
+  const leftRadius = left.size / 2;
+  const rightRadius = right.size / 2;
+  const dx = left.x + leftRadius - (right.x + rightRadius);
+  const dy = left.y + leftRadius - (right.y + rightRadius);
+  const minDistance = leftRadius + rightRadius + gap;
+  return dx * dx + dy * dy < minDistance * minDistance;
+}
+
+function buildIdeationKeywordBubbleClusters(bubbles: IdeationKeywordBubble[]) {
+  const remaining = new Set(bubbles.map((bubble) => bubble.text));
+  const clusters: IdeationKeywordBubble[][] = [];
+
+  bubbles.forEach((seed) => {
+    if (!remaining.has(seed.text)) return;
+
+    const cluster = [seed];
+    remaining.delete(seed.text);
+    while (cluster.length < CANVAS_IDEATION_BUBBLE_CLUSTER_MAX_ITEMS) {
+      const next = bubbles.find((candidate) => {
+        if (!remaining.has(candidate.text)) return false;
+        return cluster.some(
+          (item) =>
+            item.related.includes(candidate.text) ||
+            candidate.related.includes(item.text),
+        );
+      });
+      if (!next) break;
+      cluster.push(next);
+      remaining.delete(next.text);
+    }
+    clusters.push(cluster);
+  });
+
+  return clusters;
+}
+
+function buildIdeationKeywordBubbleClusterBox(
+  cluster: IdeationKeywordBubble[],
+  maxCount: number,
+): IdeationKeywordBubbleClusterBox {
+  const sizedItems = cluster
+    .map((bubble) => ({
+      bubble,
+      size: getIdeationKeywordBubbleSize(bubble, maxCount),
+    }))
+    .sort((left, right) => right.size - left.size || right.bubble.count - left.bubble.count);
+  const placements: IdeationKeywordBubbleClusterBox["placements"] = [];
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+  sizedItems.forEach((item, index) => {
+    if (index === 0) {
+      placements.push({ bubble: item.bubble, x: 0, y: 0, size: item.size });
+      return;
+    }
+
+    const seedOffset = ideationBubbleSeedRatio(item.bubble.text, 7) * Math.PI * 2;
+    let chosen: IdeationKeywordBubbleClusterBox["placements"][number] | null = null;
+    for (let attempt = 0; attempt < 48; attempt += 1) {
+      const ring = Math.floor(attempt / 10) + 1;
+      const angle = seedOffset + (attempt + index * 2) * goldenAngle;
+      const radius = 44 + ring * 22 + Math.sqrt(index) * 28;
+      const candidate = {
+        bubble: item.bubble,
+        x: Math.cos(angle) * radius,
+        y: Math.sin(angle) * radius * 0.82,
+        size: item.size,
+      };
+      if (!placements.some((placement) => ideationBubbleCirclesOverlap(candidate, placement, CANVAS_IDEATION_BUBBLE_ORGANIC_GAP))) {
+        chosen = candidate;
+        break;
+      }
+    }
+    placements.push(chosen || {
+      bubble: item.bubble,
+      x: index * (item.size + 12),
+      y: (index % 2) * 18,
+      size: item.size,
+    });
+  });
+
+  const minX = Math.min(...placements.map((placement) => placement.x));
+  const minY = Math.min(...placements.map((placement) => placement.y));
+  const maxX = Math.max(...placements.map((placement) => placement.x + placement.size));
+  const maxY = Math.max(...placements.map((placement) => placement.y + placement.size));
+  return {
+    width: maxX - minX,
+    height: maxY - minY,
+    placements: placements.map((placement) => ({
+      ...placement,
+      x: placement.x - minX,
+      y: placement.y - minY,
+    })),
+  };
+}
+
+function buildIdeationKeywordBubblePlacements(bubbles: IdeationKeywordBubble[]): IdeationKeywordBubblePlacement[] {
+  const maxCount = Math.max(1, ...bubbles.map((bubble) => bubble.count));
+  const clusterBoxes = buildIdeationKeywordBubbleClusters(bubbles)
+    .map((cluster) => buildIdeationKeywordBubbleClusterBox(cluster, maxCount))
+    .sort((left, right) => right.width * right.height - left.width * left.height);
+  const placedBubbles: IdeationKeywordBubblePlacement[] = [];
+  const placedBoxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+  const centerX = CANVAS_IDEATION_BUBBLE_PLANE_WIDTH / 2;
+  const centerY = CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT / 2;
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+  clusterBoxes.forEach((box, index) => {
+    let chosen = {
+      x: centerX - box.width / 2,
+      y: centerY - box.height / 2,
+    };
+
+    for (let attempt = 0; attempt < 96; attempt += 1) {
+      const radius = index === 0 ? 0 : 72 + Math.sqrt(attempt + index * 5) * 56;
+      const angle = attempt * goldenAngle + index * 0.78;
+      const candidate = {
+        x: centerX + Math.cos(angle) * radius - box.width / 2,
+        y: centerY + Math.sin(angle) * radius * 0.72 - box.height / 2,
+      };
+      const separated = placedBoxes.every((placed) => (
+        candidate.x + box.width + CANVAS_IDEATION_BUBBLE_CLUSTER_GAP < placed.x ||
+        placed.x + placed.width + CANVAS_IDEATION_BUBBLE_CLUSTER_GAP < candidate.x ||
+        candidate.y + box.height + CANVAS_IDEATION_BUBBLE_CLUSTER_GAP < placed.y ||
+        placed.y + placed.height + CANVAS_IDEATION_BUBBLE_CLUSTER_GAP < candidate.y
+      ));
+      if (separated) {
+        chosen = candidate;
+        break;
+      }
+    }
+
+    const clampedBox = {
+      x: clampNumber(chosen.x, 70, CANVAS_IDEATION_BUBBLE_PLANE_WIDTH - box.width - 70),
+      y: clampNumber(chosen.y, 80, CANVAS_IDEATION_BUBBLE_PLANE_HEIGHT - box.height - 70),
+      width: box.width,
+      height: box.height,
+    };
+    placedBoxes.push(clampedBox);
+    box.placements.forEach((placement) => {
+      placedBubbles.push({
+        bubble: placement.bubble,
+        x: clampedBox.x + placement.x,
+        y: clampedBox.y + placement.y,
+        size: placement.size,
+      });
+    });
+  });
+
+  return placedBubbles;
+}
+
+function makeIdeationKeywordBubbleNodeLabel(bubble: IdeationKeywordBubble, size: number) {
+  const fontSize = getIdeationKeywordBubbleFontSize(bubble.text, size);
+  const countFontSize = clampNumber(Math.round(fontSize * 0.56), 9, 12);
   return (
     <div className="flex h-full w-full flex-col items-center justify-center rounded-full border border-[#1b59f8]/10 bg-white/90 px-4 text-center font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_18px_44px_rgba(27,89,248,0.14)] backdrop-blur">
-      <strong className="max-w-full truncate text-[clamp(15px,1.2vw,21px)] font-semibold leading-tight text-[#1b59f8]">
+      <strong
+        className="max-w-full whitespace-nowrap font-semibold text-[#1b59f8]"
+        style={{
+          fontSize,
+          lineHeight: 1.08,
+          maxWidth: Math.max(44, Math.round(size * 0.82)),
+          wordBreak: "keep-all",
+        }}
+      >
         {bubble.text}
       </strong>
-      <span className="mt-1 text-[11px] font-semibold text-[#4d4d4d]/70">{bubble.count}회</span>
-      {related ? (
-        <span className="mt-1 max-w-full truncate text-[10px] font-medium text-[#4d4d4d]/55">{related}</span>
-      ) : null}
+      <span className="mt-1 font-semibold text-[#4d4d4d]/70" style={{ fontSize: countFontSize }}>
+        {bubble.count}회
+      </span>
     </div>
   );
 }
@@ -4122,6 +4392,8 @@ export default function MeetingCanvasTab({
   const [quickAskDraft, setQuickAskDraft] = useState("");
   const [quickAskMessages, setQuickAskMessages] = useState<CanvasQuickAskMessage[]>([]);
   const [quickAskUnreadCount, setQuickAskUnreadCount] = useState(0);
+  const [llmIdeationKeywordBubbles, setLlmIdeationKeywordBubbles] = useState<IdeationKeywordBubble[]>([]);
+  const [llmIdeationKeywordSignature, setLlmIdeationKeywordSignature] = useState("");
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
   const [editingSolutionTopicId, setEditingSolutionTopicId] = useState("");
   const [solutionTopicDraftTitle, setSolutionTopicDraftTitle] = useState("");
@@ -4295,6 +4567,7 @@ export default function MeetingCanvasTab({
   const problemDiscussionFlushTimerRef = useRef<number | null>(null);
   const problemDiscussionInFlightRef = useRef(false);
   const problemStructureRequestSeqRef = useRef(0);
+  const ideationKeywordRequestSeqRef = useRef(0);
   const latestSharedWorkspaceRef = useRef<{
     meetingGoal: string;
     meetingGoalContext: string;
@@ -4367,6 +4640,33 @@ export default function MeetingCanvasTab({
   }, [effectiveState, agendas, transcripts, agendaOverrides, customGroups]);
   const activeMeetingGoal = meetingGoalDraft.trim();
   const meetingTopicForAi = activeMeetingGoal || meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim() || "회의 주제";
+  const ideationKeywordUtterances = useMemo(() => buildIdeationKeywordUtterances(transcripts), [transcripts]);
+  const localIdeationKeywordBubbles = useMemo(() => buildIdeationKeywordBubbles(transcripts), [transcripts]);
+  const ideationKeywordSourceSignature = useMemo(
+    () =>
+      makeStableSignature({
+        version: 1,
+        utterances: ideationKeywordUtterances.map((row) => ({
+          id: row.id,
+          text: row.text,
+        })),
+      }),
+    [ideationKeywordUtterances],
+  );
+  const activeIdeationKeywordBubbles = useMemo(() => {
+    if (
+      llmIdeationKeywordSignature === ideationKeywordSourceSignature &&
+      llmIdeationKeywordBubbles.length > 0
+    ) {
+      return llmIdeationKeywordBubbles;
+    }
+    return localIdeationKeywordBubbles;
+  }, [
+    ideationKeywordSourceSignature,
+    llmIdeationKeywordBubbles,
+    llmIdeationKeywordSignature,
+    localIdeationKeywordBubbles,
+  ]);
   const problemStructureStatePayload = useMemo(
     () =>
       buildProblemStructureStatePayload({
@@ -4554,6 +4854,45 @@ export default function MeetingCanvasTab({
     },
     [buildQuickAskContext, meetingId, meetingTopicForAi, quickAskDraft, stage],
   );
+  useEffect(() => {
+    if (stage !== "ideation") return;
+    if (!meetingId || ideationKeywordUtterances.length === 0) {
+      setLlmIdeationKeywordBubbles([]);
+      setLlmIdeationKeywordSignature("");
+      return;
+    }
+    if (llmIdeationKeywordSignature === ideationKeywordSourceSignature) return;
+
+    const requestSeq = ideationKeywordRequestSeqRef.current + 1;
+    ideationKeywordRequestSeqRef.current = requestSeq;
+    const timer = window.setTimeout(() => {
+      void extractCanvasIdeationKeywords({
+        meeting_id: meetingId,
+        meeting_topic: meetingTopicForAi,
+        utterances: ideationKeywordUtterances,
+        max_keywords: 18,
+      })
+        .then((result) => {
+          if (ideationKeywordRequestSeqRef.current !== requestSeq) return;
+          const nextBubbles = normalizeIdeationKeywordBubblesFromResponse(result.keywords || []);
+          setLlmIdeationKeywordBubbles(nextBubbles);
+          setLlmIdeationKeywordSignature(ideationKeywordSourceSignature);
+        })
+        .catch((error) => {
+          if (ideationKeywordRequestSeqRef.current !== requestSeq) return;
+          console.error("Failed to extract ideation keyword bubbles:", error);
+        });
+    }, 6500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    ideationKeywordSourceSignature,
+    ideationKeywordUtterances,
+    llmIdeationKeywordSignature,
+    meetingId,
+    meetingTopicForAi,
+    stage,
+  ]);
   const transcriptStripItems = useMemo(() => {
     const stageSummaries = sttFlowSummaries.filter((item) => !item.stage || item.stage === stage);
     const summaryRows = stageSummaries
@@ -8931,30 +9270,15 @@ export default function MeetingCanvasTab({
     }
 
     if (stage === "ideation") {
-      const bubbles = buildIdeationKeywordBubbles(transcripts);
-      const bubbleCenters = [
-        { x: 260, y: 210 },
-        { x: 650, y: 190 },
-        { x: 470, y: 470 },
-        { x: 900, y: 430 },
-        { x: 220, y: 620 },
-        { x: 760, y: 680 },
-      ];
+      const bubbles = activeIdeationKeywordBubbles;
+      const bubblePlacements = buildIdeationKeywordBubblePlacements(bubbles);
       const bubbleDescriptors: CanvasNodeDescriptor[] = bubbles.length > 0
-        ? bubbles.map((bubble, index) => {
-            const relatedIndex = bubble.related
-              .map((keyword) => bubbles.findIndex((item) => item.text === keyword))
-              .find((itemIndex) => itemIndex >= 0 && itemIndex < index);
-            const center = bubbleCenters[(relatedIndex ?? index) % bubbleCenters.length];
-            const angle = ((index * 137.5) % 360) * (Math.PI / 180);
-            const radius = 34 + (index % 4) * 34;
-            const size = Math.round(82 + bubble.weight * 74);
-
+        ? bubblePlacements.map(({ bubble, x, y, size }) => {
             return {
               id: bubble.id,
               position: {
-                x: center.x + Math.cos(angle) * radius,
-                y: center.y + Math.sin(angle) * radius,
+                x,
+                y,
               },
               positionSource: "computed" as const,
               sourcePosition: Position.Bottom,
@@ -8971,7 +9295,7 @@ export default function MeetingCanvasTab({
                   bubble.weight,
                   ...bubble.related,
                 ]),
-                label: makeIdeationKeywordBubbleNodeLabel(bubble),
+                label: makeIdeationKeywordBubbleNodeLabel(bubble, size),
               },
             };
           })
@@ -8990,7 +9314,7 @@ export default function MeetingCanvasTab({
                 contentSignature: "ideation-keyword-empty",
                 label: (
                   <div className="flex min-h-[180px] items-center justify-center rounded-[18px] border border-dashed border-black/10 bg-white/80 px-6 text-center text-sm leading-6 text-[#777]">
-                    발화가 들어오면 자주 나온 단어가 버블로 표시됩니다.
+                    발화가 들어오면 자주 나온 명사가 버블로 표시됩니다.
                   </div>
                 ),
               },
@@ -9346,6 +9670,7 @@ export default function MeetingCanvasTab({
     };
   }, [
     stage,
+    activeIdeationKeywordBubbles,
     agendaModels,
     agendaDragPreview,
     canvasItems,
@@ -9403,7 +9728,6 @@ export default function MeetingCanvasTab({
     solutionRightPaneWidth,
     solutionSuggestionBusyTopicId,
     solutionTopics,
-    transcripts,
     isDesktopLayout,
   ]);
 

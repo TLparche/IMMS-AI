@@ -640,6 +640,19 @@ export interface CanvasQuickAskResponse {
   answer: string;
 }
 
+export interface CanvasIdeationKeywordResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  source_signature: string;
+  keywords: Array<{
+    text: string;
+    count: number;
+    related?: string[];
+  }>;
+}
+
 export interface MeetingGoalSuggestionResponse {
   ok: boolean;
   used_llm: boolean;
