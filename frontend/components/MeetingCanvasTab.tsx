@@ -1861,6 +1861,216 @@ function renderSummaryMarkdownPreview(markdown: string, onEdit: () => void) {
   );
 }
 
+function escapeSummaryHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderSummaryMarkdownInlineHtml(value: string) {
+  return escapeSummaryHtml(value)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
+function summaryMarkdownToPrintableHtml(markdown: string) {
+  const lines = markdown.split(/\r?\n/);
+  const blocks: string[] = [];
+  let index = 0;
+  let listItems: string[] = [];
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    blocks.push(`<ul>${listItems.map((item) => `<li>${renderSummaryMarkdownInlineHtml(item)}</li>`).join("")}</ul>`);
+    listItems = [];
+  };
+
+  while (index < lines.length) {
+    const rawLine = lines[index] || "";
+    const line = rawLine.trim();
+
+    if (!line) {
+      flushList();
+      index += 1;
+      continue;
+    }
+
+    if (line.includes("|") && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1] || "")) {
+      flushList();
+      const headers = parseMarkdownTableRow(line);
+      index += 2;
+      const rows: string[][] = [];
+      while (index < lines.length && (lines[index] || "").includes("|") && (lines[index] || "").trim()) {
+        rows.push(parseMarkdownTableRow(lines[index] || ""));
+        index += 1;
+      }
+      blocks.push(`
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>${headers.map((header) => `<th>${renderSummaryMarkdownInlineHtml(header)}</th>`).join("")}</tr>
+            </thead>
+            <tbody>
+              ${rows
+                .map((row) => `<tr>${headers.map((_, cellIndex) => `<td>${renderSummaryMarkdownInlineHtml(row[cellIndex] || "")}</td>`).join("")}</tr>`)
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      `);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushList();
+      const level = Math.min(heading[1].length, 4);
+      blocks.push(`<h${level}>${renderSummaryMarkdownInlineHtml(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    const listMatch = line.match(/^[-*]\s+(.+)$/) || line.match(/^\d+[.)]\s+(.+)$/);
+    if (listMatch) {
+      listItems.push(listMatch[1]);
+      index += 1;
+      continue;
+    }
+
+    flushList();
+    blocks.push(`<p>${renderSummaryMarkdownInlineHtml(line)}</p>`);
+    index += 1;
+  }
+
+  flushList();
+  return blocks.join("\n") || "<p class=\"empty\">요약 문서가 아직 없습니다.</p>";
+}
+
+function buildPrintableSummaryDocumentHtml(markdown: string) {
+  return `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>최종 정리 문서</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f5f6f8;
+      color: #111;
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
+      line-height: 1.65;
+    }
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid rgba(0,0,0,0.1);
+      background: rgba(255,255,255,0.94);
+      padding: 14px 24px;
+      backdrop-filter: blur(12px);
+    }
+    .toolbar p { margin: 0; color: #4d4d4d; font-size: 13px; }
+    .toolbar button {
+      border: 1px solid #ead0f2;
+      border-radius: 10px;
+      background: #f4e8fb;
+      color: #6f2b7d;
+      padding: 9px 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .document {
+      width: min(860px, calc(100% - 40px));
+      margin: 32px auto;
+      border: 1px solid rgba(0,0,0,0.1);
+      background: #fff;
+      padding: 44px 50px;
+      box-shadow: 0 20px 70px rgba(15,23,42,0.09);
+    }
+    .document-title {
+      margin: 0 0 28px;
+      color: #000;
+      font-size: 32px;
+      font-weight: 750;
+      letter-spacing: 0;
+      line-height: 1.25;
+    }
+    h1 { margin: 26px 0 18px; color: #000; font-size: 30px; line-height: 1.25; }
+    h2 { margin: 34px 0 14px; border-top: 1px solid rgba(0,0,0,0.1); padding-top: 22px; color: #000; font-size: 22px; line-height: 1.45; }
+    h3 { margin: 24px 0 10px; color: #1f2937; font-size: 17px; line-height: 1.55; }
+    h4 { margin: 18px 0 8px; color: #1f2937; font-size: 15px; line-height: 1.55; }
+    p { margin: 12px 0; color: #334155; font-size: 15px; line-height: 1.85; }
+    ul { margin: 12px 0; padding-left: 24px; color: #334155; font-size: 15px; line-height: 1.8; }
+    li { margin: 5px 0; }
+    strong { font-weight: 750; color: #111827; }
+    em { font-style: italic; }
+    code { border-radius: 5px; background: #f5f6f8; padding: 1px 5px; color: #6f2b7d; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    .table-wrap { margin: 18px 0; overflow-x: auto; border: 1px solid rgba(0,0,0,0.1); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { border-bottom: 1px solid rgba(0,0,0,0.1); background: #f5f6f8; padding: 10px 12px; text-align: left; color: #000; }
+    td { border-bottom: 1px solid rgba(0,0,0,0.05); padding: 10px 12px; vertical-align: top; color: #334155; }
+    tr:last-child td { border-bottom: 0; }
+    .empty { color: #999; }
+    @media print {
+      body { background: #fff; }
+      .toolbar { display: none; }
+      .document { width: auto; margin: 0; border: 0; padding: 0; box-shadow: none; }
+      h2 { break-after: avoid; }
+      h1, h2, h3, h4, p, li, tr { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <p>인쇄 대화상자에서 PDF로 저장하면 현재 보이는 문서 형식 그대로 저장됩니다.</p>
+    <button type="button" onclick="window.print()">PDF로 저장</button>
+  </div>
+  <main class="document">
+    <h1 class="document-title">최종 정리 문서</h1>
+    ${summaryMarkdownToPrintableHtml(markdown)}
+  </main>
+  <script>
+    window.setTimeout(function () {
+      window.focus();
+      window.print();
+    }, 400);
+  </script>
+</body>
+</html>`;
+}
+
+function showSummaryPdfPreparingWindow(previewWindow: Window | null) {
+  if (!previewWindow) return;
+  previewWindow.document.write(
+    "<!doctype html><html><head><title>PDF 준비 중</title></head><body style=\"font-family:sans-serif;padding:32px;color:#333\"><h1 style=\"font-size:20px\">최종 정리 문서를 준비하고 있습니다.</h1><p>잠시 후 PDF 저장 화면이 열립니다.</p></body></html>",
+  );
+  previewWindow.document.close();
+}
+
+function openPrintableSummaryDocumentPdf(input: {
+  markdown: string;
+  previewWindow?: Window | null;
+}) {
+  const targetWindow = input.previewWindow && !input.previewWindow.closed ? input.previewWindow : window.open("", "_blank");
+  if (!targetWindow) {
+    throw new Error("PDF 미리보기 창을 열 수 없습니다.");
+  }
+  targetWindow.document.open();
+  targetWindow.document.write(buildPrintableSummaryDocumentHtml(input.markdown));
+  targetWindow.document.close();
+}
+
 function hydrateProblemGroups(
   groups: Array<CanvasProblemDefinitionGroup & { status?: string }>,
   previousGroups: ProblemGroupViewModel[] = [],
@@ -12990,13 +13200,21 @@ export default function MeetingCanvasTab({
       ? latestSharedWorkspaceRef.current.solutionTopics
       : solutionTopics;
 
+  const getEndingFinalSummaryDocumentSnapshot = () => {
+    const latestSummary = normalizeFinalSolutionSummaryPayload(latestSharedWorkspaceRef.current.finalSolutionSummary);
+    if (latestSummary.markdown.trim() || (latestSummary.sections || []).length > 0 || latestSummary.final_count > 0) {
+      return latestSummary;
+    }
+    return finalSummaryDocument;
+  };
+
   const handleEndMeetingClick = async () => {
     await flushProblemDiscussionBuffer("stage-change");
 
     const endingSolutionTopics = getEndingSolutionTopicsSnapshot();
     const finalSolutionSummary = buildFinalSolutionSummaryPayload(
       endingSolutionTopics,
-      latestSharedWorkspaceRef.current.finalSolutionSummary || finalSummaryDocument,
+      getEndingFinalSummaryDocumentSnapshot(),
     );
     setEndMeetingPreview({
       finalCount: finalSolutionSummary.final_count,
@@ -13014,6 +13232,16 @@ export default function MeetingCanvasTab({
 
   const handleConfirmEndMeeting = async () => {
     if (endMeetingSaving) return;
+    const finalSummarySnapshot = getEndingFinalSummaryDocumentSnapshot();
+    const shouldOfferSummaryPdf = Boolean(finalSummarySnapshot.markdown.trim());
+    const shouldDownloadSummaryPdf = shouldOfferSummaryPdf
+      ? window.confirm("최종 정리 문서를 PDF로 저장하고 바로 보시겠습니까?")
+      : false;
+    const summaryPdfPreviewWindow = shouldDownloadSummaryPdf ? window.open("", "_blank") : null;
+    if (summaryPdfPreviewWindow) {
+      summaryPdfPreviewWindow.opener = null;
+      showSummaryPdfPreparingWindow(summaryPdfPreviewWindow);
+    }
     setEndMeetingSaving(true);
 
     let endingSolutionTopics = endMeetingPreview?.solutionTopics || getEndingSolutionTopicsSnapshot();
@@ -13023,7 +13251,7 @@ export default function MeetingCanvasTab({
     if (meetingId) {
       const finalSolutionSummary = buildFinalSolutionSummaryPayload(
         endingSolutionTopics,
-        latestSharedWorkspaceRef.current.finalSolutionSummary || finalSummaryDocument,
+        finalSummarySnapshot,
       );
       try {
         await saveCanvasWorkspacePatch({
@@ -13035,12 +13263,25 @@ export default function MeetingCanvasTab({
       } catch (error) {
         console.error("Failed to save final solution summary before ending meeting:", error);
         alert("최종 결과 저장에 실패했습니다. 결과 확인에 표시되지 않을 수 있어 회의 종료를 중단했습니다.");
+        summaryPdfPreviewWindow?.close();
         setEndMeetingSaving(false);
         return;
       }
     }
 
     try {
+      if (shouldDownloadSummaryPdf) {
+        try {
+          openPrintableSummaryDocumentPdf({
+            markdown: finalSummarySnapshot.markdown,
+            previewWindow: summaryPdfPreviewWindow,
+          });
+        } catch (error) {
+          console.error("Failed to export final summary PDF:", error);
+          alert("PDF 생성에 실패했습니다. 회의 종료는 계속 진행합니다.");
+          summaryPdfPreviewWindow?.close();
+        }
+      }
       await onEndMeeting?.();
       setEndMeetingConfirmOpen(false);
       setEndMeetingPreview(null);
