@@ -1703,10 +1703,22 @@ const CANVAS_ITEM_KEYWORD_STOPWORDS = new Set([
   "from",
   "this",
   "that",
+  "about",
+  "there",
+  "would",
+  "should",
+  "could",
   "메모",
   "코멘트",
   "주제",
   "내용",
+  "회의",
+  "아이디어",
+  "의견",
+  "발언",
+  "논의",
+  "얘기",
+  "이야기",
   "입력",
   "입력해",
   "작성",
@@ -1719,7 +1731,194 @@ const CANVAS_ITEM_KEYWORD_STOPWORDS = new Set([
   "공용",
   "canvas",
   "캔버스",
+  "그리고",
+  "그런데",
+  "근데",
+  "그래서",
+  "그러면",
+  "그러니까",
+  "하지만",
+  "일단",
+  "우선",
+  "약간",
+  "진짜",
+  "그냥",
+  "너무",
+  "조금",
+  "좀",
+  "저희",
+  "우리",
+  "제가",
+  "저는",
+  "나는",
+  "이거",
+  "그거",
+  "저거",
+  "여기",
+  "거기",
+  "저기",
+  "이런",
+  "그런",
+  "저런",
+  "대한",
+  "관련",
+  "부분",
+  "경우",
+  "정도",
+  "사람",
+  "사람들",
+  "생각",
+  "생각해",
+  "같아요",
+  "같은",
+  "있어",
+  "있고",
+  "있습니다",
+  "없어",
+  "없고",
+  "없습니다",
+  "하는",
+  "하고",
+  "하면",
+  "해서",
+  "해야",
+  "되는",
+  "됩니다",
+  "되면",
+  "되어",
+  "보면",
+  "말씀",
 ]);
+
+const CANVAS_ITEM_KEYWORD_SUFFIXES = [
+  "으로부터",
+  "에서부터",
+  "이라고",
+  "이라는",
+  "라고",
+  "라는",
+  "적으로",
+  "에게는",
+  "에서는",
+  "에도",
+  "에서",
+  "에게",
+  "까지",
+  "부터",
+  "처럼",
+  "보다",
+  "으로",
+  "이랑",
+  "랑",
+  "은",
+  "는",
+  "이",
+  "가",
+  "을",
+  "를",
+  "에",
+  "와",
+  "과",
+  "로",
+  "의",
+  "만",
+];
+
+const CANVAS_IDEATION_BUBBLE_NON_NOUN_PATTERNS = [
+  /(하다|했다|하고|하며|하면|해서|해야|하기|됩니다|되다|된다|됐다|되고|되면|되어|되는)$/u,
+  /(입니다|있다|있고|있어|없다|없고|없어|같다|같은|같아요|싶다|싶은)$/u,
+  /(좋다|좋은|나쁘다|나쁜|어렵다|어려운|쉽다|쉬운|많다|많은|적다|적은|크다|큰|작다|작은)$/u,
+  /(아요|어요|워요|네요|군요|죠|지요|고요|습니다|습니까|네요)$/u,
+  /(면서|지만|거나|니까|어서|아서|려고|다고|네요)$/u,
+];
+
+const CANVAS_IDEATION_BUBBLE_ENGLISH_STOPWORDS = new Set([
+  "make",
+  "made",
+  "doing",
+  "done",
+  "think",
+  "want",
+  "need",
+  "maybe",
+  "really",
+  "just",
+  "very",
+  "more",
+  "less",
+]);
+const CANVAS_KEYWORD_TOKEN_PATTERN = /[A-Za-z0-9가-힣][A-Za-z0-9가-힣+#._-]{1,}/g;
+const CANVAS_IDEATION_BUBBLE_MIN_PHRASE_CHARS = 5;
+const CANVAS_IDEATION_BUBBLE_MAX_PHRASE_CHARS = 18;
+const CANVAS_IDEATION_BUBBLE_PHRASE_GAP_PATTERN = /^[ \t·ㆍ-]+$/u;
+
+function stripKoreanKeywordSuffixes(token: string) {
+  let normalized = token;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const suffix of CANVAS_ITEM_KEYWORD_SUFFIXES) {
+      if (normalized.length <= suffix.length + 1 || !normalized.endsWith(suffix)) continue;
+      normalized = normalized.slice(0, -suffix.length);
+      changed = true;
+      break;
+    }
+  }
+  return normalized;
+}
+
+function isLikelyIdeationBubbleNoun(keyword: string) {
+  if (!keyword || CANVAS_ITEM_KEYWORD_STOPWORDS.has(keyword)) return false;
+  if (/^[a-z][a-z0-9+#._-]+$/i.test(keyword)) {
+    return !CANVAS_IDEATION_BUBBLE_ENGLISH_STOPWORDS.has(keyword.toLowerCase());
+  }
+  if (!/[가-힣]/.test(keyword)) return false;
+  if (CANVAS_IDEATION_BUBBLE_NON_NOUN_PATTERNS.some((pattern) => pattern.test(keyword))) return false;
+  return true;
+}
+
+function shouldJoinIdeationNounPhrase(left: string, right: string) {
+  const joinedLength = `${left}${right}`.length;
+  if (
+    joinedLength < CANVAS_IDEATION_BUBBLE_MIN_PHRASE_CHARS ||
+    joinedLength > CANVAS_IDEATION_BUBBLE_MAX_PHRASE_CHARS
+  ) {
+    return false;
+  }
+  if (left.length <= 2 && right.length <= 2) return false;
+  return true;
+}
+
+function extractIdeationBubbleTerms(text: string) {
+  const cleanText = stripLeadingTimestamp(text);
+  const matches = [...cleanText.matchAll(CANVAS_KEYWORD_TOKEN_PATTERN)];
+  const nounTokens = matches
+    .map((match) => {
+      const keyword = normalizeCanvasItemKeyword(match[0]);
+      if (!keyword || !isLikelyIdeationBubbleNoun(keyword)) return null;
+      const start = match.index || 0;
+      return {
+        keyword,
+        start,
+        end: start + match[0].length,
+      };
+    })
+    .filter((item): item is { keyword: string; start: number; end: number } => Boolean(item));
+  const phraseTerms = new Set<string>();
+  const tokenTerms = new Set<string>();
+
+  nounTokens.forEach((token) => tokenTerms.add(token.keyword));
+  for (let index = 0; index < nounTokens.length - 1; index += 1) {
+    const left = nounTokens[index];
+    const right = nounTokens[index + 1];
+    const gap = cleanText.slice(left.end, right.start);
+    if (!CANVAS_IDEATION_BUBBLE_PHRASE_GAP_PATTERN.test(gap)) continue;
+    if (!shouldJoinIdeationNounPhrase(left.keyword, right.keyword)) continue;
+    phraseTerms.add(`${left.keyword} ${right.keyword}`);
+  }
+
+  return [...phraseTerms, ...tokenTerms];
+}
 
 function normalizeCanvasItemKeyword(raw: string) {
   const token = raw
@@ -1730,7 +1929,7 @@ function normalizeCanvasItemKeyword(raw: string) {
 
   const normalized = /[A-Za-z]/.test(token)
     ? token.toLowerCase()
-    : token.replace(/(으로|에서|에게|까지|부터|처럼|보다|은|는|이|가|을|를|에|와|과|로|의|도|만)$/u, "");
+    : stripKoreanKeywordSuffixes(token);
   if (!normalized || normalized.length < 2) return "";
   if (CANVAS_ITEM_KEYWORD_STOPWORDS.has(normalized)) return "";
 
@@ -1742,7 +1941,7 @@ function extractCanvasItemKeywords(title: string, body: string, limit = 5) {
   let cursor = 0;
 
   const addSource = (source: string, weight: number) => {
-    const matches = source.match(/[A-Za-z0-9가-힣][A-Za-z0-9가-힣+#._-]{1,}/g) || [];
+    const matches = source.match(CANVAS_KEYWORD_TOKEN_PATTERN) || [];
     matches.forEach((match) => {
       const keyword = normalizeCanvasItemKeyword(match);
       if (!keyword) return;
@@ -1781,10 +1980,7 @@ function buildIdeationKeywordBubbles(transcripts: MeetingTranscript[], limit = 1
 
   rows.forEach((row) => {
     const rowKeywords = new Set<string>();
-    const matches = stripLeadingTimestamp(row.text).match(/[A-Za-z0-9가-힣][A-Za-z0-9가-힣+#._-]{1,}/g) || [];
-    matches.forEach((match) => {
-      const keyword = normalizeCanvasItemKeyword(match);
-      if (!keyword) return;
+    extractIdeationBubbleTerms(row.text).forEach((keyword) => {
       rowKeywords.add(keyword);
       const current = counts.get(keyword);
       if (current) {
@@ -1806,10 +2002,16 @@ function buildIdeationKeywordBubbles(transcripts: MeetingTranscript[], limit = 1
     });
   });
 
-  const sorted = [...counts.values()]
-    .filter((entry) => entry.count >= 1)
+  const minimumCount = rows.length >= 8 ? 2 : 1;
+  let sorted = [...counts.values()]
+    .filter((entry) => entry.count >= minimumCount)
     .sort((left, right) => right.count - left.count || left.firstSeen - right.firstSeen)
     .slice(0, limit);
+  if (sorted.length === 0 && counts.size > 0) {
+    sorted = [...counts.values()]
+      .sort((left, right) => right.count - left.count || left.firstSeen - right.firstSeen)
+      .slice(0, Math.min(limit, 8));
+  }
   const maxCount = Math.max(1, ...sorted.map((entry) => entry.count));
 
   return sorted.map((entry) => {
@@ -1818,7 +2020,7 @@ function buildIdeationKeywordBubbles(transcripts: MeetingTranscript[], limit = 1
       .slice(0, 4)
       .map(([keyword]) => keyword);
     return {
-      id: `ideation-keyword-${entry.text}`,
+      id: `ideation-keyword-${encodeURIComponent(entry.text)}`,
       text: entry.text,
       count: entry.count,
       weight: entry.count / maxCount,
