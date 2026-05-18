@@ -1814,6 +1814,177 @@ function buildSummaryDocumentFromResponse(input: {
   });
 }
 
+function renderSummaryMarkdownInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith("`")) {
+      nodes.push(
+        <code key={`code-${match.index}`} className="rounded-[4px] bg-[#eef4ff] px-1.5 py-0.5 font-mono text-[0.92em] text-[#1b59f8]">
+          {token.slice(1, -1)}
+        </code>,
+      );
+    } else if (token.startsWith("**")) {
+      nodes.push(
+        <strong key={`strong-${match.index}`} className="font-semibold text-black">
+          {token.slice(2, -2)}
+        </strong>,
+      );
+    }
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes.length > 0 ? nodes : [text];
+}
+
+function isMarkdownTableSeparator(line: string) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function parseMarkdownTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderSummaryMarkdownPreview(markdown: string, onEdit: () => void) {
+  const lines = markdown.split(/\r?\n/);
+  const blocks: ReactNode[] = [];
+  let index = 0;
+  let listItems: string[] = [];
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    blocks.push(
+      <ul key={`list-${blocks.length}`} className="my-3 space-y-1.5 pl-5 text-[15px] leading-7 text-[#334155]">
+        {listItems.map((item, itemIndex) => (
+          <li key={`list-${blocks.length}-${itemIndex}`} className="list-disc">
+            {renderSummaryMarkdownInline(item)}
+          </li>
+        ))}
+      </ul>,
+    );
+    listItems = [];
+  };
+
+  while (index < lines.length) {
+    const rawLine = lines[index] || "";
+    const line = rawLine.trim();
+
+    if (!line) {
+      flushList();
+      index += 1;
+      continue;
+    }
+
+    if (line.includes("|") && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1] || "")) {
+      flushList();
+      const headers = parseMarkdownTableRow(line);
+      index += 2;
+      const rows: string[][] = [];
+      while (index < lines.length && (lines[index] || "").includes("|") && (lines[index] || "").trim()) {
+        rows.push(parseMarkdownTableRow(lines[index] || ""));
+        index += 1;
+      }
+      blocks.push(
+        <div key={`table-${blocks.length}`} className="my-4 overflow-x-auto border border-black/10 bg-white">
+          <table className="min-w-full border-collapse text-left text-sm">
+            <thead className="bg-[#f5f6f8] text-black">
+              <tr>
+                {headers.map((header, headerIndex) => (
+                  <th key={`table-head-${headerIndex}`} className="border-b border-black/10 px-3 py-2 font-semibold">
+                    {renderSummaryMarkdownInline(header)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`table-row-${rowIndex}`} className="border-b border-black/5 last:border-b-0">
+                  {headers.map((_, cellIndex) => (
+                    <td key={`table-cell-${rowIndex}-${cellIndex}`} className="px-3 py-2 align-top text-[#334155]">
+                      {renderSummaryMarkdownInline(row[cellIndex] || "")}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushList();
+      const level = heading[1].length;
+      const content = heading[2];
+      const className =
+        level === 1
+          ? "mb-5 mt-1 text-3xl font-semibold leading-tight text-black"
+          : level === 2
+            ? "mb-3 mt-8 border-t border-black/10 pt-5 text-xl font-semibold leading-8 text-black first:mt-0 first:border-t-0 first:pt-0"
+            : "mb-2 mt-5 text-base font-semibold leading-7 text-[#1f2937]";
+      const headingContent = renderSummaryMarkdownInline(content);
+      if (level === 1) {
+        blocks.push(<h1 key={`heading-${index}`} className={className}>{headingContent}</h1>);
+      } else if (level === 2) {
+        blocks.push(<h2 key={`heading-${index}`} className={className}>{headingContent}</h2>);
+      } else if (level === 3) {
+        blocks.push(<h3 key={`heading-${index}`} className={className}>{headingContent}</h3>);
+      } else {
+        blocks.push(<h4 key={`heading-${index}`} className={className}>{headingContent}</h4>);
+      }
+      index += 1;
+      continue;
+    }
+
+    const listMatch = line.match(/^[-*]\s+(.+)$/) || line.match(/^\d+[.)]\s+(.+)$/);
+    if (listMatch) {
+      listItems.push(listMatch[1]);
+      index += 1;
+      continue;
+    }
+
+    flushList();
+    blocks.push(
+      <p key={`paragraph-${index}`} className="my-3 text-[15px] leading-8 text-[#334155]">
+        {renderSummaryMarkdownInline(line)}
+      </p>,
+    );
+    index += 1;
+  }
+
+  flushList();
+
+  return (
+    <button
+      type="button"
+      onClick={onEdit}
+      className="h-full w-full overflow-y-auto border border-black/10 bg-white px-8 py-7 text-left outline-none transition hover:border-[#1b59f8]/30 focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+    >
+      {blocks.length > 0 ? blocks : (
+        <p className="text-sm leading-7 text-[#999]">요약 문서가 아직 없습니다.</p>
+      )}
+    </button>
+  );
+}
+
 function hydrateProblemGroups(
   groups: Array<CanvasProblemDefinitionGroup & { status?: string }>,
   previousGroups: ProblemGroupViewModel[] = [],
@@ -3929,6 +4100,7 @@ export default function MeetingCanvasTab({
   const [finalSummaryDocument, setFinalSummaryDocument] = useState<CanvasFinalSolutionSummary>(() =>
     createEmptyFinalSolutionSummary(),
   );
+  const [summaryDocumentEditMode, setSummaryDocumentEditMode] = useState(false);
   const [summaryEvidenceOpenGroupIds, setSummaryEvidenceOpenGroupIds] = useState<Set<string>>(() => new Set());
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
   const [editingSolutionTopicId, setEditingSolutionTopicId] = useState("");
@@ -4300,6 +4472,7 @@ export default function MeetingCanvasTab({
     setSolutionNoteTextDraft("");
     setSolutionNoteFinalCommentDraft("");
     setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+    setSummaryDocumentEditMode(false);
     setSummaryEvidenceOpenGroupIds(new Set());
     setSelectedProblemSourceNodeId("");
     setArmedCanvasTool(null);
@@ -4449,6 +4622,7 @@ export default function MeetingCanvasTab({
     setProblemStructureDrag(null);
     setSolutionTopics([]);
     setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+    setSummaryDocumentEditMode(false);
     setSummaryEvidenceOpenGroupIds(new Set());
     setPersonalNotes([]);
     setAgendaOverrides({});
@@ -4575,6 +4749,7 @@ export default function MeetingCanvasTab({
         setProblemGroups(nextGroups);
         setSolutionTopics(nextSolutionTopics);
         setFinalSummaryDocument(nextFinalSummary);
+        setSummaryDocumentEditMode(false);
         setSummaryEvidenceOpenGroupIds(new Set());
         setPersonalNotes(nextPersonalNotes);
         setAgendaOverrides(nextAgendaOverrides);
@@ -4664,6 +4839,7 @@ export default function MeetingCanvasTab({
         setProblemGroups([]);
         setSolutionTopics([]);
         setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+        setSummaryDocumentEditMode(false);
         setSummaryEvidenceOpenGroupIds(new Set());
         setPersonalNotes([]);
         setAgendaOverrides({});
@@ -6529,6 +6705,7 @@ export default function MeetingCanvasTab({
     setProblemStructurePending(false);
     setSolutionTopics(nextSolutionTopics);
     setFinalSummaryDocument(nextFinalSummary);
+    setSummaryDocumentEditMode(false);
     setMeetingGoalDraft(incomingMeetingGoal);
     setMeetingGoalContextDraft(incomingMeetingGoalContext);
     setMeetingGoalEditorDraft(incomingMeetingGoal);
@@ -9732,6 +9909,7 @@ export default function MeetingCanvasTab({
       });
 
       setFinalSummaryDocument(nextFinalSummary);
+      setSummaryDocumentEditMode(false);
       setSummaryEvidenceOpenGroupIds(new Set());
       latestSharedWorkspaceRef.current = {
         ...latestSharedWorkspaceRef.current,
@@ -14250,6 +14428,7 @@ export default function MeetingCanvasTab({
                         setProblemGroups([]);
                         setSolutionTopics([]);
                         setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+                        setSummaryDocumentEditMode(false);
                         setSummaryEvidenceOpenGroupIds(new Set());
                         setNodePositions({});
                         setStage("ideation");
@@ -14526,6 +14705,27 @@ export default function MeetingCanvasTab({
                         {finalSummaryDocument.document_status === "edited" ? (
                           <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">사용자 수정됨</span>
                         ) : null}
+                        <div className="flex overflow-hidden rounded-[8px] border border-black/10 bg-[#f5f6f8]">
+                          <button
+                            type="button"
+                            onClick={() => setSummaryDocumentEditMode(false)}
+                            disabled={!finalSummaryDocument.markdown.trim()}
+                            className={`px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                              !summaryDocumentEditMode ? "bg-white text-[#1b59f8]" : "text-[#4d4d4d] hover:bg-white/70"
+                            }`}
+                          >
+                            보기
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSummaryDocumentEditMode(true)}
+                            className={`border-l border-black/10 px-3 py-1.5 text-xs font-semibold transition ${
+                              summaryDocumentEditMode ? "bg-white text-[#1b59f8]" : "text-[#4d4d4d] hover:bg-white/70"
+                            }`}
+                          >
+                            편집
+                          </button>
+                        </div>
                         <button
                           type="button"
                           onClick={() => void handleRegenerateSummaryDocument()}
@@ -14550,16 +14750,20 @@ export default function MeetingCanvasTab({
                       </div>
                     ) : null}
                     <div className="min-h-0 flex-1 overflow-hidden bg-[#f5f6f8] p-5">
-                      <textarea
-                        value={finalSummaryDocument.markdown}
-                        onChange={(event) => handleSummaryDocumentMarkdownChange(event.target.value)}
-                        placeholder={
-                          solutionStagePending
-                            ? "AI가 요약 문서를 생성하는 중입니다."
-                            : "요약 단계로 들어오면 구조화 그룹을 기준으로 문서 초안이 자동 생성됩니다."
-                        }
-                        className="h-full min-h-[360px] w-full resize-none border border-black/10 bg-white px-6 py-5 font-mono text-sm leading-7 text-[#1f2937] outline-none transition placeholder:font-sans placeholder:text-[#999] focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
-                      />
+                      {summaryDocumentEditMode || !finalSummaryDocument.markdown.trim() ? (
+                        <textarea
+                          value={finalSummaryDocument.markdown}
+                          onChange={(event) => handleSummaryDocumentMarkdownChange(event.target.value)}
+                          placeholder={
+                            solutionStagePending
+                              ? "AI가 요약 문서를 생성하는 중입니다."
+                              : "요약 단계로 들어오면 구조화 그룹을 기준으로 문서 초안이 자동 생성됩니다."
+                          }
+                          className="h-full min-h-[360px] w-full resize-none border border-black/10 bg-white px-6 py-5 font-mono text-sm leading-7 text-[#1f2937] outline-none transition placeholder:font-sans placeholder:text-[#999] focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+                        />
+                      ) : (
+                        renderSummaryMarkdownPreview(finalSummaryDocument.markdown, () => setSummaryDocumentEditMode(true))
+                      )}
                     </div>
                   </section>
                 </div>
