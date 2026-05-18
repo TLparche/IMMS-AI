@@ -26,14 +26,12 @@ import {
   getCanvasProblemDiscussionWorkspaceJob,
   generateProblemGroupConclusion,
   generateCanvasProblemTaxonomy,
-  generateCanvasIdeationSuggestions,
   generateCanvasSolutionStage,
   flushCanvasPersonalNotes,
   flushCanvasWorkspacePatch,
   importAgendaSnapshot,
   saveCanvasPersonalNotes,
   saveCanvasWorkspacePatch,
-  startCanvasIdeaAssimilationWorkspace,
   startCanvasProblemDiscussionWorkspace,
   startCanvasTopicSummaryWorkspace,
 } from "@/lib/api";
@@ -47,7 +45,6 @@ import type {
   CanvasProblemDefinitionGroup,
   CanvasRealtimeSyncPayload,
   CanvasRefinedUtterance,
-  CanvasIdeationSuggestion,
   CanvasProblemDiscussionItem,
   CanvasSolutionTopicResponse,
   CanvasWorkspaceStateResponse,
@@ -84,9 +81,8 @@ type SolutionNoteSource = "ai" | "user";
 type ProblemDefinitionMode = "" | "manual" | "ai";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
 const CANVAS_ITEM_STATUSES: CanvasItemStatus[] = ["discussion", "confirmed", "closed"];
-const IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS = 60_000;
-const IDEA_ASSIMILATION_AUTO_FLUSH_MS = 30_000;
-const IDEA_ASSIMILATION_SILENCE_FLUSH_MS = 8_000;
+const CANVAS_LLM_FAILURE_RETRY_DELAY_MS = 60_000;
+const CANVAS_LLM_SILENCE_FLUSH_MS = 8_000;
 const DEFAULT_LEFT_PANEL_RATIO = 0.19;
 const DEFAULT_RIGHT_PANEL_RATIO = 0.2;
 const MIN_LEFT_PANEL_RATIO = 0.13;
@@ -155,19 +151,6 @@ type WorkspaceFieldSignatures = {
   imported_state: string;
 };
 
-type CanvasIdeaAssimilationJobSnapshot = {
-  ok?: boolean;
-  job_id?: string;
-  meeting_id?: string;
-  status?: string;
-  detail?: string;
-  used_llm?: boolean;
-  warning?: string;
-  pending_item_id?: string;
-  target_count?: number;
-  target_signature?: string;
-};
-
 type IdeationDropPreviewState = {
   draggedItemId: string;
   targetId: string;
@@ -182,47 +165,6 @@ type StableIdeationDragState = {
   nodeId: string;
   anchor: { x: number; y: number };
 };
-
-function logCanvasIdeaAssimilationJob(
-  label: string,
-  job: CanvasIdeaAssimilationJobSnapshot | undefined | null,
-  extra: Record<string, unknown> = {},
-) {
-  const status = job?.status || "";
-  const warning = job?.warning || "";
-  const detail = job?.detail || "";
-  const hasError =
-    status === "error" ||
-    status === "missing" ||
-    Boolean(warning) ||
-    (status === "completed" && job?.used_llm === false);
-  const errorDetail =
-    status === "missing"
-      ? detail || "작업 정보를 찾을 수 없습니다."
-      : warning || (hasError ? detail : "");
-  const payload = {
-    label,
-    hasError,
-    errorDetail,
-    status,
-    usedLlm: Boolean(job?.used_llm),
-    warning,
-    detail,
-    jobId: job?.job_id || "",
-    pendingItemId: job?.pending_item_id || "",
-    targetCount: job?.target_count || 0,
-    targetSignature: job?.target_signature || "",
-    ok: Boolean(job?.ok),
-    ...extra,
-  };
-
-  if (hasError) {
-    console.error("[canvas idea assimilation]", payload);
-    return;
-  }
-
-  console.info("[canvas idea assimilation]", payload);
-}
 
 function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
   return {
@@ -649,7 +591,6 @@ function serializeAgendaOverrides(overrides: Record<string, AgendaOverride>) {
 
 type SolutionAiSuggestionViewModel = SolutionTopicViewModel["ai_suggestions"][number];
 type SolutionNoteViewModel = SolutionTopicViewModel["notes"][number];
-type IdeationSuggestionViewModel = CanvasIdeationSuggestion;
 
 type AgendaViewModel = {
   id: string;
@@ -4010,8 +3951,6 @@ export default function MeetingCanvasTab({
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
   const [ideaCreateStack, setIdeaCreateStack] = useState(0);
-  const [ideationSuggestionBusyRootId, setIdeationSuggestionBusyRootId] = useState("");
-  const [ideationSuggestionCollapsedByRootId, setIdeationSuggestionCollapsedByRootId] = useState<Record<string, boolean>>({});
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
   const [rightDrawerContentVisible, setRightDrawerContentVisible] = useState(false);
   const [rightDrawerDetailCollapsed, setRightDrawerDetailCollapsed] = useState(false);
@@ -4121,15 +4060,9 @@ export default function MeetingCanvasTab({
   const analysisSignatureAtImportRef = useRef("");
   const placementFeedbackTimerRef = useRef<number | null>(null);
   const initialLayoutLogDoneRef = useRef(false);
-  const processedIdeaUtteranceIdsRef = useRef<Set<string>>(new Set());
   const processedProblemUtteranceIdsRef = useRef<Set<string>>(new Set());
-  const failedIdeaAssimilationRef = useRef<{ signature: string; failedAt: number; detail: string } | null>(null);
   const failedProblemDiscussionRef = useRef<{ signature: string; failedAt: number; detail: string } | null>(null);
-  const ideaBufferStartedAtRef = useRef<number | null>(null);
-  const ideaFlushTimerRef = useRef<number | null>(null);
-  const ideaSilenceTimerRef = useRef<number | null>(null);
   const problemDiscussionFlushTimerRef = useRef<number | null>(null);
-  const ideaAssimilationInFlightRef = useRef(false);
   const problemDiscussionInFlightRef = useRef(false);
   const latestSharedWorkspaceRef = useRef<{
     meetingGoal: string;
@@ -4297,12 +4230,8 @@ export default function MeetingCanvasTab({
     workspaceHydratingRef.current = false;
     analysisSignatureAtImportRef.current = "";
     initialLayoutLogDoneRef.current = false;
-    processedIdeaUtteranceIdsRef.current = new Set();
     processedProblemUtteranceIdsRef.current = new Set();
-    failedIdeaAssimilationRef.current = null;
     failedProblemDiscussionRef.current = null;
-    ideaBufferStartedAtRef.current = null;
-    ideaAssimilationInFlightRef.current = false;
     problemDiscussionInFlightRef.current = false;
     latestSharedWorkspaceRef.current = {
       meetingGoal: "",
@@ -4348,9 +4277,7 @@ export default function MeetingCanvasTab({
     setLiveFlowHint("");
     setIdeaAssimilationStatus("");
     setProblemDiscussionStatus("");
-    setIdeationSuggestionBusyRootId("");
     setSolutionSuggestionBusyTopicId("");
-    setIdeationSuggestionCollapsedByRootId({});
     agendaDragPreviewRef.current = null;
     setAgendaDragPreview(null);
     problemIdeaDragRef.current = null;
@@ -4374,14 +4301,6 @@ export default function MeetingCanvasTab({
     if (placementFeedbackTimerRef.current) {
       window.clearTimeout(placementFeedbackTimerRef.current);
       placementFeedbackTimerRef.current = null;
-    }
-    if (ideaFlushTimerRef.current) {
-      window.clearTimeout(ideaFlushTimerRef.current);
-      ideaFlushTimerRef.current = null;
-    }
-    if (ideaSilenceTimerRef.current) {
-      window.clearTimeout(ideaSilenceTimerRef.current);
-      ideaSilenceTimerRef.current = null;
     }
     if (problemDiscussionFlushTimerRef.current) {
       window.clearTimeout(problemDiscussionFlushTimerRef.current);
@@ -4953,9 +4872,6 @@ export default function MeetingCanvasTab({
       const nextMeetingGoal = typeof workspace.meeting_goal === "string" ? workspace.meeting_goal : meetingGoalDraft;
       const nextMeetingGoalContext =
         typeof workspace.meeting_goal_context === "string" ? workspace.meeting_goal_context : meetingGoalContextDraft;
-      (workspace.idea_processed_utterance_ids || []).forEach((id) => {
-        if (id) processedIdeaUtteranceIdsRef.current.add(id);
-      });
 
       setCanvasItems(nextCanvasItems);
       setMeetingGoalDraft(nextMeetingGoal);
@@ -5138,24 +5054,6 @@ export default function MeetingCanvasTab({
     [applyServerIdeaWorkspace, meetingId, meetingTopicForAi],
   );
 
-  const flushIdeaAssimilationBuffer = useCallback(
-    async (reason: "timer" | "silence" | "stage-change" | "manual") => {
-      if (reason !== "stage-change") {
-        setIdeaAssimilationStatus("STT 키워드 버블을 갱신하고 있습니다.");
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    const evidenceIds = new Set<string>();
-    canvasItems.forEach((item) => {
-      (item.evidence_utterance_ids || []).forEach((id) => evidenceIds.add(id));
-      (item.ignored_utterance_ids || []).forEach((id) => evidenceIds.add(id));
-    });
-    evidenceIds.forEach((id) => processedIdeaUtteranceIdsRef.current.add(id));
-  }, [canvasItems]);
-
   useEffect(() => {
     const evidenceIds = new Set<string>();
     problemGroups.forEach((group) => {
@@ -5171,64 +5069,10 @@ export default function MeetingCanvasTab({
     const normalizedRows = normalizeTranscriptRows(transcripts);
     const latestRow = normalizedRows.at(-1) || null;
     setLiveFlowHint(buildLiveFlowHint(latestRow));
-
-    if (stage !== "ideation" || !latestRow) {
-      return;
-    }
-
-    const hasUnprocessedRows = normalizedRows.some(
-      (row) =>
-        row.canvas_stage === "ideation" &&
-        row.id &&
-        row.text.trim() &&
-        !processedIdeaUtteranceIdsRef.current.has(row.id),
-    );
-    if (!hasUnprocessedRows) {
-      return;
-    }
-
-    const now = Date.now();
-    if (!ideaBufferStartedAtRef.current) {
-      ideaBufferStartedAtRef.current = now;
-    }
-
-    if (ideaFlushTimerRef.current) {
-      window.clearTimeout(ideaFlushTimerRef.current);
-    }
-    const elapsed = now - ideaBufferStartedAtRef.current;
-    ideaFlushTimerRef.current = window.setTimeout(
-      () => void flushIdeaAssimilationBuffer("timer"),
-      Math.max(0, IDEA_ASSIMILATION_AUTO_FLUSH_MS - elapsed),
-    );
-
-    if (ideaSilenceTimerRef.current) {
-      window.clearTimeout(ideaSilenceTimerRef.current);
-    }
-    ideaSilenceTimerRef.current = window.setTimeout(
-      () => void flushIdeaAssimilationBuffer("silence"),
-      IDEA_ASSIMILATION_SILENCE_FLUSH_MS,
-    );
-
-    return () => {
-      if (ideaFlushTimerRef.current) {
-        window.clearTimeout(ideaFlushTimerRef.current);
-        ideaFlushTimerRef.current = null;
-      }
-      if (ideaSilenceTimerRef.current) {
-        window.clearTimeout(ideaSilenceTimerRef.current);
-        ideaSilenceTimerRef.current = null;
-      }
-    };
-  }, [flushIdeaAssimilationBuffer, stage, transcripts]);
+  }, [transcripts]);
 
   useEffect(() => {
     return () => {
-      if (ideaFlushTimerRef.current) {
-        window.clearTimeout(ideaFlushTimerRef.current);
-      }
-      if (ideaSilenceTimerRef.current) {
-        window.clearTimeout(ideaSilenceTimerRef.current);
-      }
       if (problemDiscussionFlushTimerRef.current) {
         window.clearTimeout(problemDiscussionFlushTimerRef.current);
       }
@@ -6215,7 +6059,7 @@ export default function MeetingCanvasTab({
       const targetSignature = targetRows.map((row) => row.id).join("|");
       const previousFailure = failedProblemDiscussionRef.current;
       if (previousFailure?.signature === targetSignature) {
-        const retryAfter = IDEA_ASSIMILATION_FAILURE_RETRY_DELAY_MS - (Date.now() - previousFailure.failedAt);
+        const retryAfter = CANVAS_LLM_FAILURE_RETRY_DELAY_MS - (Date.now() - previousFailure.failedAt);
         if (retryAfter > 0) {
           setProblemDiscussionStatus(`같은 문제정의 발화 재요청 대기 중 · ${Math.ceil(retryAfter / 1000)}초`);
           return;
@@ -6447,7 +6291,7 @@ export default function MeetingCanvasTab({
 
     const timer = window.setTimeout(() => {
       void flushProblemDiscussionBuffer("silence");
-    }, IDEA_ASSIMILATION_SILENCE_FLUSH_MS);
+    }, CANVAS_LLM_SILENCE_FLUSH_MS);
 
     return () => {
       window.clearTimeout(timer);
@@ -9169,9 +9013,6 @@ export default function MeetingCanvasTab({
 
   const handleStageSelect = useCallback(
     async (nextStage: CanvasStage) => {
-      if (stage === "ideation" && nextStage !== "ideation") {
-        await flushIdeaAssimilationBuffer("stage-change");
-      }
       if (stage === "problem-definition" && nextStage !== "problem-definition") {
         await flushProblemDiscussionBuffer("stage-change");
       }
@@ -9221,7 +9062,6 @@ export default function MeetingCanvasTab({
     [
       busy,
       conclusionBatchBusy,
-      flushIdeaAssimilationBuffer,
       flushProblemDiscussionBuffer,
       handleGenerateProblemDefinition,
       handleGenerateSolutionStage,
@@ -11810,7 +11650,6 @@ export default function MeetingCanvasTab({
 
   const handleStopRecordingClick = async () => {
     await onStopRecording?.();
-    await flushIdeaAssimilationBuffer("manual");
     await flushProblemDiscussionBuffer("manual");
   };
 
@@ -11820,7 +11659,6 @@ export default function MeetingCanvasTab({
       : solutionTopics;
 
   const handleEndMeetingClick = async () => {
-    await flushIdeaAssimilationBuffer("stage-change");
     await flushProblemDiscussionBuffer("stage-change");
 
     const endingSolutionTopics = getEndingSolutionTopicsSnapshot();
@@ -12069,13 +11907,6 @@ export default function MeetingCanvasTab({
   const workspaceGridColumns = rightDrawerCollapsed
     ? "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
-  const selectedAgendaForIdeationCanvas = selectedAgendaId || agendaModels[0]?.id || "";
-  const selectedRootItemForIdeationCanvas = useMemo(() => {
-    if (stage !== "ideation" || !selectedCanvasItemId) return null;
-    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, selectedCanvasItemId);
-    const rootItem = canvasItems.find((item) => item.id === rootId) || null;
-    return rootItem?.agenda_id === selectedAgendaForIdeationCanvas ? rootItem : null;
-  }, [canvasItems, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
   const latestDiscussionRootItem = useMemo(() => {
     if (!latestHighlightedTopicId) return null;
     const latestItem = canvasItems.find((item) => item.id === latestHighlightedTopicId) || null;
@@ -12083,73 +11914,6 @@ export default function MeetingCanvasTab({
     const rootId = getCanvasItemTopLevelAncestorId(canvasItems, latestItem.id);
     return canvasItems.find((item) => item.id === rootId) || latestItem;
   }, [canvasItems, latestHighlightedTopicId]);
-  const ideationSplitNodes = useMemo(() => {
-    if (stage !== "ideation") {
-      return { left: [] as Node[], right: [] as Node[] };
-    }
-
-    const topLevelIds = new Set(
-      canvasItems
-        .filter((item) => item.agenda_id === selectedAgendaForIdeationCanvas && !item.parent_topic_id)
-        .map((item) => item.id),
-    );
-    const descendantIds = new Set(
-      selectedRootItemForIdeationCanvas
-        ? getCanvasItemDescendantIds(canvasItems, selectedRootItemForIdeationCanvas.id)
-        : [],
-    );
-
-    const leftNodes = nodes.filter((node) => {
-      if (node.id === "ideation-drop-placeholder") {
-        return ideationDropPreview?.mode === "detach";
-      }
-
-      const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
-      return canvasItemId ? topLevelIds.has(canvasItemId) : false;
-    });
-    const rightNodes = nodes.filter((node) => {
-      if (node.id === "ideation-drop-placeholder") {
-        const targetItem = ideationDropPreview
-          ? canvasItems.find((item) => item.id === ideationDropPreview.targetId) || null
-          : null;
-        if (!ideationDropPreview || !targetItem) {
-          return false;
-        }
-
-        if (selectedRootItemForIdeationCanvas?.id === targetItem.id) {
-          return true;
-        }
-
-        return Boolean(targetItem.parent_topic_id && descendantIds.has(targetItem.id));
-      }
-
-      const canvasItemId = extractCanvasItemIdFromNodeId(node.id);
-      if (selectedRootItemForIdeationCanvas) {
-        return canvasItemId ? descendantIds.has(canvasItemId) : node.id === "ideation-empty-detail";
-      }
-      return node.id.startsWith("agenda-");
-    });
-
-    return { left: leftNodes, right: rightNodes };
-  }, [canvasItems, ideationDropPreview, nodes, selectedAgendaForIdeationCanvas, selectedRootItemForIdeationCanvas, stage]);
-  const problemSplitNodes = useMemo(() => {
-    if (stage !== "problem-definition") {
-      return { left: [] as Node[], right: [] as Node[] };
-    }
-
-    const problemGroupNodeIds = new Set(problemGroups.map((group) => `problem-${group.group_id}`));
-
-    return {
-      left: nodes.filter((node) => node.id.startsWith("problem-agenda::") || problemGroupNodeIds.has(node.id)),
-      right: nodes.filter((node) => {
-        if (node.id === "problem-source-empty" || node.id.startsWith("problem-discussion-")) {
-          return true;
-        }
-
-        return Boolean(extractProblemSourceCanvasNodeInfo(node.id));
-      }),
-    };
-  }, [nodes, problemGroups, stage]);
   const problemSplitEdges = useMemo(() => {
     if (stage !== "problem-definition") {
       return { left: [] as Edge[], right: [] as Edge[] };
@@ -12254,13 +12018,6 @@ export default function MeetingCanvasTab({
   const canvasHeaderCellClassName = "min-h-[clamp(86px,9.5vh,112px)] px-[clamp(18px,2.8vw,38px)] py-[clamp(12px,1.7vh,18px)]";
   const canvasFloatingStatusInactiveClassName =
     "border-black/10 bg-[#eff0f6] text-[#4d4d4d] hover:bg-[#e3e5ee]";
-  const selectedIdeationSuggestions = selectedRootItemForIdeationCanvas?.ai_suggestions || [];
-  const ideationSuggestionBusy =
-    Boolean(selectedRootItemForIdeationCanvas) &&
-    ideationSuggestionBusyRootId === selectedRootItemForIdeationCanvas?.id;
-  const ideationSuggestionCollapsed =
-    Boolean(selectedRootItemForIdeationCanvas) &&
-    (ideationSuggestionCollapsedByRootId[selectedRootItemForIdeationCanvas?.id || ""] ?? true);
   const ideationDragGhostItem = useMemo(
     () =>
       ideationDragGhost
@@ -12268,193 +12025,6 @@ export default function MeetingCanvasTab({
         : null,
     [canvasItems, ideationDragGhost],
   );
-
-  const persistIdeationCanvasItems = (
-    nextCanvasItemsSnapshot: CanvasItemViewModel[],
-    message: string,
-    selectedItemId = selectedCanvasItemId,
-  ) => {
-    const nextNodePositionsSnapshot = normalizeCanvasNodePositionsForComputedIdeation(nodePositions);
-
-    setCanvasItems(nextCanvasItemsSnapshot);
-    if (selectedItemId) {
-      setSelectedCanvasItemId(selectedItemId);
-      setSelectedNodeId(`canvas-item-${selectedItemId}`);
-    }
-    setActivityMessage(message);
-    latestSharedWorkspaceRef.current = {
-      ...latestSharedWorkspaceRef.current,
-      stage,
-      canvasItems: nextCanvasItemsSnapshot,
-      nodePositions: nextNodePositionsSnapshot,
-      importedState: persistedSharedImportedState,
-    };
-
-    if (!sharedSyncEnabled) {
-      return;
-    }
-
-    if (meetingId) {
-      writeSharedWorkspaceSessionCache(
-        meetingId,
-        buildFullWorkspacePatchPayload({
-          meetingId,
-          meetingGoal: meetingGoalDraft,
-          meetingGoalContext: meetingGoalContextDraft,
-          stage,
-          agendaOverrides,
-          canvasItems: nextCanvasItemsSnapshot,
-          customGroups,
-          problemGroups,
-          solutionTopics,
-          nodePositions: nextNodePositionsSnapshot,
-          importedState: persistedSharedImportedState,
-        }),
-      );
-    }
-    forceBroadcastSharedCanvas({
-      canvasItems: nextCanvasItemsSnapshot,
-      nodePositions: nextNodePositionsSnapshot,
-    });
-    if (meetingId) {
-      void saveCanvasWorkspacePatch({
-        meeting_id: meetingId,
-        canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
-        node_positions: nextNodePositionsSnapshot,
-        imported_state: persistedSharedImportedState,
-      }).catch((error) => {
-        console.error("Failed to save shared ideation suggestions:", error);
-      });
-    }
-  };
-
-  const handleGenerateIdeationSuggestions = async () => {
-    const rootItem = selectedRootItemForIdeationCanvas;
-    if (!rootItem || !meetingId) {
-      setActivityMessage("추천을 만들 topic을 먼저 선택해 주세요.");
-      return;
-    }
-
-    const childItems = getCanvasItemDescendantIds(canvasItems, rootItem.id)
-      .map((itemId) => canvasItems.find((item) => item.id === itemId) || null)
-      .filter((item): item is CanvasItemViewModel => Boolean(item && !isTopicCanvasItem(item)))
-      .slice(0, 12);
-
-    setIdeationSuggestionBusyRootId(rootItem.id);
-    setActivityMessage("AI 추천 아이디어를 생성하는 중입니다.");
-    try {
-      const result = await generateCanvasIdeationSuggestions({
-        meeting_id: meetingId,
-        meeting_topic: meetingTopicForAi,
-        topic: {
-          id: rootItem.id,
-          title: rootItem.title,
-          body: rootItem.body || "",
-          keywords: rootItem.keywords || [],
-        },
-        child_items: childItems.map((item) => ({
-          id: item.id,
-          kind: item.kind || "note",
-          title: item.title,
-          body: item.body || "",
-          keywords: item.keywords || [],
-        })),
-      });
-      const existingByText = new Map(
-        (rootItem.ai_suggestions || []).map((suggestion) => [suggestion.text.trim(), suggestion]),
-      );
-      const nextSuggestions: IdeationSuggestionViewModel[] = (result.suggestions || [])
-        .map((suggestion, index) => {
-          const text = (suggestion.text || "").trim();
-          const existing = existingByText.get(text);
-          return {
-            id: suggestion.id || existing?.id || `ideation-suggestion-${Date.now()}-${index}`,
-            text,
-            status: normalizeIdeationSuggestionStatus(existing?.status || suggestion.status),
-          };
-        })
-        .filter((suggestion) => suggestion.text)
-        .slice(0, 5);
-      const nextCanvasItemsSnapshot = canvasItems.map((item) =>
-        item.id === rootItem.id
-          ? {
-              ...item,
-              ai_suggestions: nextSuggestions,
-            }
-          : item,
-      );
-      persistIdeationCanvasItems(
-        nextCanvasItemsSnapshot,
-        result.warning || `AI 추천 아이디어 ${nextSuggestions.length}개를 생성했습니다.`,
-        rootItem.id,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setActivityMessage(`AI 추천 아이디어 생성 실패: ${message}`);
-    } finally {
-      setIdeationSuggestionBusyRootId("");
-    }
-  };
-
-  const handleAdoptIdeationSuggestion = (suggestionId: string) => {
-    const rootItem = selectedRootItemForIdeationCanvas;
-    if (!rootItem) return;
-    const suggestion = (rootItem.ai_suggestions || []).find((item) => item.id === suggestionId);
-    if (!suggestion || normalizeIdeationSuggestionStatus(suggestion.status) === "selected") return;
-
-    const nextItemId = `item-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
-    const titleSource = suggestion.text.split(/[.!?。！？\n]/)[0]?.trim() || suggestion.text;
-    const title = titleSource.length > 26 ? `${titleSource.slice(0, 26)}...` : titleSource;
-    const nextItem: CanvasItemViewModel = {
-      id: nextItemId,
-      agenda_id: rootItem.agenda_id,
-      point_id: "",
-      kind: "note",
-      status: "discussion",
-      title: title || "AI 추천 아이디어",
-      body: suggestion.text,
-      keywords: extractCanvasItemKeywords(title, suggestion.text, 5),
-      key_evidence: [],
-      refined_utterances: [],
-      evidence_utterance_ids: [],
-      ignored_utterance_ids: [],
-      merged_children: [],
-      compacted_from_ids: [],
-      compaction_level: 0,
-      parent_topic_id: rootItem.id,
-      parent_topic_source: "user",
-      parent_topic_locked: true,
-      child_item_ids: [],
-      topic_collapsed: false,
-      created_by: "user",
-      manual_position: false,
-      ai_generated: true,
-      user_edited: false,
-      ai_pending: false,
-      x: undefined,
-      y: undefined,
-    };
-    const nextCanvasItemsSnapshot = [
-      nextItem,
-      ...canvasItems.map((item) =>
-        item.id === rootItem.id
-          ? {
-              ...item,
-              child_item_ids: [...new Set([...(item.child_item_ids || []), nextItemId])],
-              ai_suggestions: (item.ai_suggestions || []).map((candidate) =>
-                candidate.id === suggestionId
-                  ? {
-                      ...candidate,
-                      status: "selected",
-                    }
-                  : candidate,
-              ),
-            }
-          : item,
-      ),
-    ];
-    persistIdeationCanvasItems(nextCanvasItemsSnapshot, "AI 추천 아이디어를 카드로 채택했습니다.", nextItemId);
-  };
 
   const focusCanvasItemInIdeation = (itemId: string, reason = "원문 위치로 이동했습니다.") => {
     const item = canvasItems.find((candidate) => candidate.id === itemId) || null;
