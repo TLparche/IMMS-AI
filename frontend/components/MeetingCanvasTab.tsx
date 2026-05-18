@@ -1263,21 +1263,6 @@ function trimText(text: string, maxLength: number) {
   return `${clean.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
 }
 
-function buildLiveFlowHint(row: MeetingTranscript | null) {
-  if (!row || !row.text.trim()) return "";
-  const clean = trimText(row.text, 56);
-  const normalized = row.text.toLowerCase();
-  const intent =
-    /[?？]|궁금|어떻게|왜|가능|될까|되나/.test(normalized)
-      ? "질문 중"
-      : /문제|불편|어렵|리스크|걱정|한계|부족/.test(normalized)
-        ? "문제 제기 중"
-        : /하자|하면|아이디어|제안|추가|개선|만들|넣|도입|활용/.test(normalized)
-          ? "아이디어 제시 중"
-          : "의견 공유 중";
-  return `${row.speaker || "참가자"}: ${clean} · ${intent}`;
-}
-
 function problemGroupStatusLabel(status: ProblemGroupStatus) {
   if (status === "review") return "검토중";
   if (status === "final") return "확정";
@@ -4189,15 +4174,12 @@ export default function MeetingCanvasTab({
   incomingSharedCanvasSync,
   onSharedCanvasSync,
   incomingCanvasStateRequestId,
-  liveSpeechPreview,
-  sttFlowSummaries = [],
   audioImportStatusText,
   audioImportRevision,
   isRecording = false,
   onToggleRecording,
   onEndMeeting,
   onStopRecording,
-  sttProgressText = "",
   onCanvasStageContextChange,
   recordingStatusText = "",
 }: MeetingCanvasTabProps) {
@@ -4294,9 +4276,8 @@ export default function MeetingCanvasTab({
   const [solutionStagePending, setSolutionStagePending] = useState(false);
   const [loadingProblemGroupIds, setLoadingProblemGroupIds] = useState<string[]>([]);
   const [solutionSuggestionBusyTopicId, setSolutionSuggestionBusyTopicId] = useState("");
-  const [liveFlowHint, setLiveFlowHint] = useState("");
   const [, setIdeaAssimilationStatus] = useState("");
-  const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
+  const [, setProblemDiscussionStatus] = useState("");
   const [, setIdeaCreateStack] = useState(0);
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
   const [rightDrawerContentVisible, setRightDrawerContentVisible] = useState(false);
@@ -4754,48 +4735,6 @@ export default function MeetingCanvasTab({
     meetingTopicForAi,
     stage,
   ]);
-  const transcriptStripItems = useMemo(() => {
-    const stageSummaries = sttFlowSummaries.filter((item) => !item.stage || item.stage === stage);
-    const summaryRows = stageSummaries
-      .slice(-3)
-      .map((item, index) => ({
-        speaker: `AI 요약 ${index + 1}`,
-        text: item.text || "요약 생성 중",
-        timestamp: item.timestamp || "",
-      }));
-
-    if (summaryRows.length > 0) {
-      const placeholders = [
-        { speaker: "AI 요약", text: "다음 3개 발화 요약 대기 중", timestamp: "" },
-        { speaker: "AI 요약", text: "다음 3개 발화 요약 대기 중", timestamp: "" },
-        { speaker: "AI 요약", text: "다음 3개 발화 요약 대기 중", timestamp: "" },
-      ];
-      return [...summaryRows, ...placeholders].slice(0, 3);
-    }
-
-    const normalized = normalizeTranscriptRows(transcripts).filter((row) => row.canvas_stage === stage);
-    const recentRows = normalized.slice(-3);
-    const rows = recentRows.length
-      ? recentRows
-      : liveSpeechPreview
-      ? [{ speaker: liveSpeechPreview.speaker, text: liveSpeechPreview.text, timestamp: liveSpeechPreview.timestamp }]
-      : [];
-
-    if (rows.length === 0) {
-      return [
-        { speaker: "STT", text: "녹음을 시작하면 현재 발언이 표시됩니다.", timestamp: "" },
-        { speaker: "AI", text: "발언은 2줄 이내로 요약되어 canvas와 함께 보입니다.", timestamp: "" },
-        { speaker: "Canvas", text: "안건과 메모를 같은 화면에서 정리합니다.", timestamp: "" },
-      ];
-    }
-
-    return rows.map((row) => ({
-      speaker: row.speaker || "알 수 없음",
-      text: row.text || "발언 내용 없음",
-      timestamp: row.timestamp || "",
-    }));
-  }, [liveSpeechPreview, sttFlowSummaries, stage, transcripts]);
-
   useEffect(() => {
     if (!selectedAgendaId && agendaModels[0]) {
       setSelectedAgendaId(agendaModels[0].id);
@@ -4885,7 +4824,6 @@ export default function MeetingCanvasTab({
     setSummaryEvidenceOpenGroupIds(new Set());
     setSelectedProblemSourceNodeId("");
     setArmedCanvasTool(null);
-    setLiveFlowHint("");
     setIdeaAssimilationStatus("");
     setProblemDiscussionStatus("");
     setSolutionSuggestionBusyTopicId("");
@@ -5838,12 +5776,6 @@ export default function MeetingCanvasTab({
     });
     evidenceIds.forEach((id) => processedProblemUtteranceIdsRef.current.add(id));
   }, [problemGroups]);
-
-  useEffect(() => {
-    const normalizedRows = normalizeTranscriptRows(transcripts);
-    const latestRow = normalizedRows.at(-1) || null;
-    setLiveFlowHint(buildLiveFlowHint(latestRow));
-  }, [transcripts]);
 
   useEffect(() => {
     return () => {
@@ -10416,6 +10348,7 @@ export default function MeetingCanvasTab({
   };
 
   const canUseCanvasToolbar = stage === "problem-definition";
+  const isProblemDefinitionExploreStage = stage === "problem-definition" && problemDefinitionPhase !== "structure";
   const visibleCanvasTools = useMemo<CanvasTool[]>(
     () =>
       stage === "problem-definition"
@@ -10426,7 +10359,7 @@ export default function MeetingCanvasTab({
   const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] =
     problemDefinitionPhase === "structure"
       ? ["structure-back", "structure-ai-group", "structure-add-group", "structure-refresh"]
-      : ["group", "problem-link", "debug-regenerate", "debug-refresh-chunks", "structure-start"];
+      : ["structure-start"];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
     if (action === "group") return "문제정의 그룹 추가";
@@ -13248,53 +13181,6 @@ export default function MeetingCanvasTab({
       right: [] as Edge[],
     };
   }, [collapsedProblemGroupIds, problemDefinitionPhase, problemGroups, stage]);
-  const canvasHeaderSpeechRows = useMemo(() => {
-    const fallbackCurrent = sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중";
-    const rows = transcriptStripItems
-      .map((item) => ({
-        speaker: item.speaker || "STT",
-        text: item.text || "발언 내용 없음",
-        timestamp: item.timestamp || "",
-      }))
-      .filter((item) => item.text.trim().length > 0);
-    const recentRows = rows.slice(-2);
-
-    if (recentRows.length >= 2) {
-      return recentRows;
-    }
-
-    if (recentRows.length === 1) {
-      return [
-        { speaker: "AI", text: "이전 발언 요약 대기 중", timestamp: "" },
-        recentRows[0],
-      ];
-    }
-
-    return [
-      { speaker: "AI", text: "이전 발언 요약 대기 중", timestamp: "" },
-      { speaker: "STT", text: fallbackCurrent, timestamp: "" },
-    ];
-  }, [liveFlowHint, sttProgressText, transcriptStripItems]);
-  const canvasHeaderLeftTitle =
-    stage === "ideation"
-      ? "아이디어 흐름"
-      : stage === "problem-definition"
-        ? selectedProblemGroup?.topic || "문제 정의"
-        : "최종 정리 문서";
-  const canvasHeaderLeftSummary =
-    stage === "ideation"
-      ? "STT에서 자주 나온 단어가 크기와 근접도로 표시됩니다."
-      : stage === "problem-definition"
-        ? selectedProblemGroup?.insight_lens ||
-          selectedProblemGroup?.conclusion ||
-          "아이디어 단계에서 도출한 내용을 바탕으로 문제 정의를 정리합니다."
-        : `검토 중/확정 구조화 그룹 ${summaryEligibleStructureGroups.length}개를 바탕으로 회의 흐름을 문서화합니다.`;
-  const canvasHeaderGridClassName = `relative grid min-h-[clamp(86px,9.5vh,112px)] shrink-0 grid-cols-1 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] ${
-    stage === "solution"
-      ? "xl:grid-cols-[minmax(18rem,32%)_minmax(0,1fr)]"
-      : "xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]"
-  }`;
-  const canvasHeaderCellClassName = "min-h-[clamp(86px,9.5vh,112px)] px-[clamp(18px,2.8vw,38px)] py-[clamp(12px,1.7vh,18px)]";
   const canvasFloatingStatusInactiveClassName =
     "border-black/10 bg-[#eff0f6] text-[#4d4d4d] hover:bg-[#e3e5ee]";
   const ideationDragGhostItem = useMemo(
@@ -14583,6 +14469,26 @@ export default function MeetingCanvasTab({
               >
                 메인화면으로 돌아가기
               </button>
+              {isProblemDefinitionExploreStage ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshProblemChunkSummaries()}
+                    disabled={busy || problemDefinitionStagePending}
+                    className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] border border-[#ead0f2] bg-[#f4e8fb] px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    요약캐시 재생성
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDebugRegenerateProblemDefinition()}
+                    disabled={busy || problemDefinitionStagePending}
+                    className="h-[clamp(36px,4.4vh,43px)] rounded-[8px] border border-black/10 bg-white px-[clamp(10px,1vw,12px)] text-[clamp(12px,0.95vw,14px)] font-semibold text-[#4d4d4d] transition hover:bg-[#f7ecfb] hover:text-[#6f2b7d] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    디버그 재생성
+                  </button>
+                </>
+              ) : null}
             </div>
 
             <div className="relative min-w-0 justify-self-center text-center">
@@ -14707,42 +14613,6 @@ export default function MeetingCanvasTab({
           style={isDesktopLayout ? { gridTemplateColumns: workspaceGridColumns } : undefined}
         >
           <section ref={canvasSurfaceRef} className="relative order-1 flex min-h-[min(72vh,720px)] flex-col overflow-hidden border-b border-black/10 bg-[#f9f9f9] shadow-[inset_0_1px_0_rgba(0,0,0,0.04)] xl:col-start-1 xl:row-span-2 xl:row-start-1 xl:h-full xl:min-h-0 xl:border-b-0">
-            {stage !== "ideation" ? (
-              <div className={canvasHeaderGridClassName}>
-                <div className={`${canvasHeaderCellClassName} flex items-center border-b border-black/10 xl:border-b-0 xl:border-r`}>
-                  <div className="flex w-full min-w-0 items-start justify-between gap-[clamp(12px,1.5vw,20px)]">
-                    <div className="min-w-0">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]/80">
-                        {stage === "solution" ? "Summary" : "Problem"}
-                      </p>
-                      <h3 className="mt-1 truncate text-[clamp(15px,1.15vw,18px)] font-semibold leading-[24.811px] text-black">
-                        {canvasHeaderLeftTitle}
-                      </h3>
-                      <p className="mt-1 line-clamp-2 max-w-[min(30rem,100%)] text-[clamp(12px,0.9vw,15px)] font-normal leading-[1.55] text-[#4d4d4d]">
-                        {canvasHeaderLeftSummary}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-                <div className={`${canvasHeaderCellClassName} relative flex flex-col items-center justify-center text-center`}>
-                  <div className="pointer-events-none absolute right-4 top-3 z-10 flex max-w-[calc(100%-2rem)] flex-wrap justify-end gap-2">
-                    {problemDiscussionStatus ? (
-                      <span className="rounded-full border border-violet-100 bg-violet-50/95 px-2.5 py-1 text-[11px] font-medium text-violet-700">
-                        {problemDiscussionStatus}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="w-full max-w-[min(46rem,92%)] pt-[clamp(0.35rem,0.8vh,0.7rem)]">
-                    <p className="line-clamp-1 text-[clamp(12px,0.9vw,15px)] font-normal leading-[24.811px] text-[#4d4d4d]">
-                      {canvasHeaderSpeechRows[0]?.text || "이전 발언 요약 대기 중"}
-                    </p>
-                    <p className="mt-1 line-clamp-1 text-[clamp(14px,1.02vw,16px)] font-normal leading-[24.811px] text-black">
-                      {canvasHeaderSpeechRows[1]?.text || sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            ) : null}
             <div
               className="relative min-h-0 w-full flex-1"
               onMouseMove={(event) => {
