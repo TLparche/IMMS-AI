@@ -7827,12 +7827,6 @@ export default function MeetingCanvasTab({
     );
   }, []);
 
-  const handleUpdateProblemStructureNodeBody = useCallback((nodeId: string, body: string) => {
-    setProblemStructureNodes((prev) =>
-      prev.map((node) => (node.id === nodeId ? { ...node, body } : node)),
-    );
-  }, []);
-
   const handleRemoveProblemStructureNode = useCallback((nodeId: string) => {
     setProblemStructureNodes((prev) => prev.filter((node) => node.id !== nodeId));
     setProblemStructureGroups((prev) =>
@@ -7906,7 +7900,7 @@ export default function MeetingCanvasTab({
             problemStructureDrag?.mode === "group" &&
             problemStructureDrag.overGroupId === columnDropGroupId;
           const savedPosition = !isCardSorting ? nodePositions["problem-definition"]?.[nodeId] : undefined;
-          const nodeHeight = Math.max(300, 190 + Math.max(1, columnNodes.length) * 188);
+          const nodeHeight = Math.max(260, 184 + Math.max(1, columnNodes.length) * 92);
           const position = savedPosition || {
             x: baseX + index * (columnWidth + columnGap),
             y: baseY + (!isCardSorting && index % 2 === 1 ? 34 : 0),
@@ -7932,7 +7926,7 @@ export default function MeetingCanvasTab({
                 column.rationale,
                 column.status || "",
                 columnNodes.length,
-                ...columnNodes.flatMap((node) => [node.id, node.title, node.body, node.status, node.depth]),
+                ...columnNodes.flatMap((node) => [node.id, node.title, node.status, node.depth]),
                 ...problemStructureGroups.map((group) => `${group.id}:${group.nodeIds.join(",")}`),
                 problemStructureDrag?.nodeId,
                 problemStructureDrag?.mode,
@@ -8040,55 +8034,30 @@ export default function MeetingCanvasTab({
                             onDragEnd={handleProblemStructureNodeDragEnd}
                             onDragOver={(event) => handleProblemStructureNodeDragOver(event, node.id)}
                             onDrop={(event) => handleProblemStructureNodeDrop(event, node.id)}
-                            className={`nodrag nopan cursor-grab rounded-[10px] border bg-white px-3 py-3 shadow-[0_1px_0_rgba(0,0,0,0.03)] transition active:cursor-grabbing ${
+                            className={`nodrag nopan cursor-grab rounded-[10px] border bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(0,0,0,0.03)] transition active:cursor-grabbing ${
                               isNodeDropTarget
                                 ? "border-[#1b59f8] ring-2 ring-[#1b59f8]/20"
                                 : "border-black/10 hover:border-[#1b59f8]/25"
-                            } ${isDraggingNode ? "opacity-55" : ""}`}
+                              } ${isDraggingNode ? "opacity-55" : ""}`}
                           >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 flex-1">
-                              <input
-                                value={node.title}
-                                onChange={(event) => handleUpdateProblemStructureNodeTitle(node.id, event.target.value)}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                aria-label="구조화 노드 제목"
-                                className="nodrag nopan block w-full rounded-[8px] border border-transparent bg-transparent px-1 py-1 text-sm font-semibold leading-5 text-black outline-none transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/40 focus:bg-white"
-                              />
-                              <textarea
-                                value={node.body}
-                                onChange={(event) => handleUpdateProblemStructureNodeBody(node.id, event.target.value)}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                aria-label="구조화 노드 요약"
-                                className="nodrag nopan mt-1 min-h-[54px] w-full resize-y rounded-[8px] border border-transparent bg-transparent px-1 py-1 text-xs leading-5 text-[#4d4d4d] outline-none transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/40 focus:bg-white"
-                              />
-                            </div>
+                          <div className="flex items-start gap-2">
+                            <textarea
+                              value={node.title}
+                              onChange={(event) => handleUpdateProblemStructureNodeTitle(node.id, event.target.value)}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              aria-label="구조화 노드 제목"
+                              rows={2}
+                              className="nodrag nopan block min-h-[44px] flex-1 resize-none rounded-[8px] border border-transparent bg-transparent px-1 py-1 text-sm font-semibold leading-5 text-black outline-none transition hover:border-black/10 hover:bg-[#f9f9f9] focus:border-[#1b59f8]/40 focus:bg-white"
+                            />
                             <button
                               type="button"
                               onClick={() => handleRemoveProblemStructureNode(node.id)}
                               onPointerDown={(event) => event.stopPropagation()}
-                              className="nodrag nopan shrink-0 rounded-[8px] border border-rose-200 bg-white px-2 py-1 text-[10px] font-semibold text-rose-600 transition hover:bg-rose-50"
+                              aria-label="구조화 노드 제외"
+                              className="nodrag nopan flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-rose-200 bg-white text-[16px] font-semibold leading-none text-rose-600 transition hover:bg-rose-50"
                             >
-                              제외
+                              ×
                             </button>
-                          </div>
-                          <div className="mt-3">
-                            <label className="block min-w-0">
-                              <span className="mb-1 block text-[11px] font-semibold text-[#777]">이동</span>
-                              <select
-                                value={isUngrouped ? "" : column.id}
-                                onChange={(event) => handleAssignProblemStructureNode(node.id, event.target.value)}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                className="nodrag nopan w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2 py-1.5 text-xs font-medium text-[#333] outline-none transition focus:border-[#1b59f8]/40"
-                              >
-                                <option value="">아직 묶지 않음</option>
-                                {problemStructureGroups.map((group) => (
-                                  <option key={`${node.id}-${group.id}`} value={group.id}>
-                                    {group.title || "이름 없는 그룹"}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
                           </div>
                           </div>
                         );
@@ -8111,7 +8080,7 @@ export default function MeetingCanvasTab({
             problemDefinitionPhase,
             problemStructureMethod,
             problemDefinitionMode,
-            ...structureNodes.flatMap((node) => [node.id, node.title, node.body, node.status, node.depth]),
+            ...structureNodes.flatMap((node) => [node.id, node.title, node.status, node.depth]),
             ...problemStructureGroups.flatMap((group) => [
               group.id,
               group.title,
@@ -9394,7 +9363,6 @@ export default function MeetingCanvasTab({
     handleDeleteProblemGroup,
     handleDeleteProblemStructureGroup,
     handleGenerateProblemChildren,
-    handleAssignProblemStructureNode,
     handleProblemStructureGroupDragOver,
     handleProblemStructureGroupDrop,
     handleProblemStructureNodeDragEnd,
@@ -9402,7 +9370,6 @@ export default function MeetingCanvasTab({
     handleProblemStructureNodeDragStart,
     handleProblemStructureNodeDrop,
     handleRemoveProblemStructureNode,
-    handleUpdateProblemStructureNodeBody,
     handleUpdateProblemStructureNodeTitle,
     handleUpdateProblemStructureGroupRationale,
     handleUpdateProblemStructureGroupStatus,
