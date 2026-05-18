@@ -780,6 +780,13 @@ async def websocket_endpoint(
                 'canvas_items': current_workspace.get('canvas_items') or [],
                 'custom_groups': current_workspace.get('custom_groups') or [],
                 'problem_groups': current_workspace.get('problem_groups') or [],
+                'problem_structure': current_workspace.get('problem_structure') or {
+                    'phase': 'explore',
+                    'method': 'affinity',
+                    'mode': '',
+                    'nodes': [],
+                    'groups': [],
+                },
                 'solution_topics': current_workspace.get('solution_topics') or [],
                 'final_solution_summary': current_workspace.get('final_solution_summary') or {
                     'final_count': 0,

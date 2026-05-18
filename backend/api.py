@@ -403,6 +403,7 @@ def _workspace_payload_from_runtime_workspace(workspace: dict[str, Any]) -> dict
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
         "custom_groups": copy.deepcopy(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
+        "problem_structure": _normalize_canvas_problem_structure_state(workspace.get("problem_structure")),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "final_solution_summary": _normalize_canvas_final_solution_summary(
             workspace.get("final_solution_summary")
@@ -443,6 +444,7 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         "canvas_items": copy.deepcopy(shared_state.get("canvas_items") or []),
         "custom_groups": copy.deepcopy(shared_state.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(shared_state.get("problem_groups") or []),
+        "problem_structure": _normalize_canvas_problem_structure_state(shared_state.get("problem_structure")),
         "solution_topics": copy.deepcopy(shared_state.get("solution_topics") or []),
         "final_solution_summary": _normalize_canvas_final_solution_summary(
             shared_state.get("final_solution_summary")
@@ -464,6 +466,103 @@ def _workspace_from_storage_row(meeting_id: str, row: dict[str, Any]) -> dict[st
         else None,
         "saved_at": _safe_text(shared_state.get("saved_at") or row.get("updated_at")),
         "llm_cache": copy.deepcopy(llm_cache),
+    }
+
+
+def _normalize_canvas_problem_structure_state(raw: Any) -> dict[str, Any]:
+    if hasattr(raw, "model_dump"):
+        try:
+            raw = raw.model_dump()
+        except Exception:
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    phase = _safe_text(raw.get("phase"), "explore")
+    if phase not in {"explore", "structure"}:
+        phase = "explore"
+    method = _normalize_problem_structure_method(raw.get("method"))
+    mode = _safe_text(raw.get("mode"))
+    if mode not in {"", "manual", "ai"}:
+        mode = ""
+
+    nodes: list[dict[str, Any]] = []
+    valid_node_ids: set[str] = set()
+    for index, node in enumerate(raw.get("nodes") or []):
+        if hasattr(node, "model_dump"):
+            try:
+                node = node.model_dump()
+            except Exception:
+                node = {}
+        if not isinstance(node, dict):
+            continue
+        node_id = _safe_text(node.get("id")) or f"structure-node-{index + 1}"
+        title = _safe_text(node.get("title"))
+        body = _safe_text(node.get("body"))
+        if not title and not body:
+            continue
+        payload = {
+            "id": node_id,
+            "source_group_id": _safe_text(node.get("source_group_id") or node.get("sourceGroupId")),
+            "title": title or "문제정의 노드",
+            "body": body,
+            "status": _safe_text(node.get("status"), "draft"),
+            "depth": _safe_nonnegative_int(node.get("depth")),
+        }
+        nodes.append(payload)
+        valid_node_ids.add(node_id)
+        if len(nodes) >= 120:
+            break
+
+    groups: list[dict[str, Any]] = []
+    used_group_ids: set[str] = set()
+    for index, group in enumerate(raw.get("groups") or []):
+        if hasattr(group, "model_dump"):
+            try:
+                group = group.model_dump()
+            except Exception:
+                group = {}
+        if not isinstance(group, dict):
+            continue
+        group_id_base = _safe_text(group.get("id")) or f"structure-group-{index + 1}"
+        group_id = group_id_base
+        suffix = 2
+        while group_id in used_group_ids:
+            group_id = f"{group_id_base}-{suffix}"
+            suffix += 1
+        node_ids = [
+            _safe_text(item)
+            for item in (group.get("node_ids") or group.get("nodeIds") or [])
+            if _safe_text(item) and (not valid_node_ids or _safe_text(item) in valid_node_ids)
+        ][:120]
+        title = _safe_text(group.get("title"))
+        if not title and not node_ids:
+            continue
+        created_by = _safe_text(group.get("created_by") or group.get("createdBy"), "user")
+        if created_by not in {"ai", "user"}:
+            created_by = "user"
+        used_group_ids.add(group_id)
+        groups.append(
+            {
+                "id": group_id,
+                "title": title or f"구조화 그룹 {index + 1}",
+                "node_ids": node_ids,
+                "rationale": _safe_text(group.get("rationale")),
+                "created_by": created_by,
+            }
+        )
+        if len(groups) >= 80:
+            break
+
+    if not nodes and not groups:
+        phase = "explore"
+
+    return {
+        "phase": phase,
+        "method": method,
+        "mode": mode,
+        "nodes": nodes,
+        "groups": groups,
     }
 
 
@@ -934,6 +1033,7 @@ def _normalize_canvas_local_state(payload: Any) -> dict[str, Any]:
     if not shared_sync_enabled:
         normalized["stage"] = _normalize_canvas_stage(payload.get("stage"))
         normalized["problem_groups"] = copy.deepcopy(payload.get("problem_groups") or [])
+        normalized["problem_structure"] = _normalize_canvas_problem_structure_state(payload.get("problem_structure"))
         normalized["solution_topics"] = copy.deepcopy(payload.get("solution_topics") or [])
         normalized["final_solution_summary"] = _normalize_canvas_final_solution_summary(
             payload.get("final_solution_summary")
@@ -959,6 +1059,7 @@ def _clone_runtime_workspace_state(meeting_id: str, source: dict[str, Any], save
         "canvas_items": copy.deepcopy(source.get("canvas_items") or []),
         "custom_groups": _normalize_canvas_custom_groups(source.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(source.get("problem_groups") or []),
+        "problem_structure": _normalize_canvas_problem_structure_state(source.get("problem_structure")),
         "solution_topics": copy.deepcopy(source.get("solution_topics") or []),
         "final_solution_summary": _normalize_canvas_final_solution_summary(source.get("final_solution_summary")),
         "node_positions": _normalize_canvas_node_positions(source.get("node_positions") or {}),
@@ -994,6 +1095,7 @@ def _canvas_workspace_response(workspace: dict[str, Any]) -> dict[str, Any]:
         "canvas_items": copy.deepcopy(workspace.get("canvas_items") or []),
         "custom_groups": _normalize_canvas_custom_groups(workspace.get("custom_groups") or []),
         "problem_groups": copy.deepcopy(workspace.get("problem_groups") or []),
+        "problem_structure": _normalize_canvas_problem_structure_state(workspace.get("problem_structure")),
         "solution_topics": copy.deepcopy(workspace.get("solution_topics") or []),
         "final_solution_summary": _normalize_canvas_final_solution_summary(
             workspace.get("final_solution_summary")
@@ -1212,6 +1314,7 @@ def _ensure_canvas_workspace_entry(rt: "RuntimeStore", meeting_id: str) -> dict[
     workspace.setdefault("canvas_items", [])
     workspace.setdefault("custom_groups", [])
     workspace.setdefault("problem_groups", [])
+    workspace.setdefault("problem_structure", _normalize_canvas_problem_structure_state({}))
     workspace.setdefault("solution_topics", [])
     workspace.setdefault("final_solution_summary", _normalize_canvas_final_solution_summary({}))
     workspace.setdefault("node_positions", {})
@@ -2179,6 +2282,31 @@ class CanvasWorkspaceSolutionTopicInput(BaseModel):
     notes: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class CanvasWorkspaceProblemStructureNodeInput(BaseModel):
+    id: str = ""
+    source_group_id: str = ""
+    title: str = ""
+    body: str = ""
+    status: str = "draft"
+    depth: int = Field(default=0, ge=0, le=8)
+
+
+class CanvasWorkspaceProblemStructureGroupInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    node_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    created_by: str = "user"
+
+
+class CanvasWorkspaceProblemStructureInput(BaseModel):
+    phase: str = "explore"
+    method: str = "affinity"
+    mode: str = ""
+    nodes: list[CanvasWorkspaceProblemStructureNodeInput] = Field(default_factory=list)
+    groups: list[CanvasWorkspaceProblemStructureGroupInput] = Field(default_factory=list)
+
+
 class CanvasWorkspaceStateInput(BaseModel):
     meeting_id: str = ""
     meeting_goal: str = ""
@@ -2188,6 +2316,7 @@ class CanvasWorkspaceStateInput(BaseModel):
     canvas_items: list[CanvasWorkspaceCanvasItemInput] = Field(default_factory=list)
     custom_groups: list[CanvasCustomGroupInput] = Field(default_factory=list)
     problem_groups: list[CanvasWorkspaceProblemGroupInput] = Field(default_factory=list)
+    problem_structure: CanvasWorkspaceProblemStructureInput = Field(default_factory=CanvasWorkspaceProblemStructureInput)
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] = Field(default_factory=list)
     final_solution_summary: dict[str, Any] = Field(default_factory=dict)
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] = Field(default_factory=dict)
@@ -2203,6 +2332,7 @@ class CanvasWorkspacePatchInput(BaseModel):
     canvas_items: list[CanvasWorkspaceCanvasItemInput] | None = None
     custom_groups: list[CanvasCustomGroupInput] | None = None
     problem_groups: list[CanvasWorkspaceProblemGroupInput] | None = None
+    problem_structure: CanvasWorkspaceProblemStructureInput | None = None
     solution_topics: list[CanvasWorkspaceSolutionTopicInput] | None = None
     final_solution_summary: dict[str, Any] | None = None
     node_positions: dict[str, dict[str, CanvasNodePositionInput]] | None = None
@@ -11232,6 +11362,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
     workspace["canvas_items"] = _normalize_canvas_workspace_items(payload.canvas_items)
     workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
     workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
+    workspace["problem_structure"] = _normalize_canvas_problem_structure_state(payload.problem_structure)
     workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
     workspace["final_solution_summary"] = _normalize_canvas_final_solution_summary(payload.final_solution_summary)
     workspace["node_positions"] = _normalize_canvas_node_positions(payload.node_positions)
@@ -11251,6 +11382,7 @@ def post_canvas_workspace_state(payload: CanvasWorkspaceStateInput):
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),
+            "problem_structure_phase": _safe_text((workspace.get("problem_structure") or {}).get("phase")),
             "final_solution_count": int((workspace.get("final_solution_summary") or {}).get("final_count") or 0),
             "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
         },
@@ -11284,6 +11416,8 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
         workspace["custom_groups"] = _normalize_canvas_custom_groups(payload.custom_groups)
     if "problem_groups" in provided_fields:
         workspace["problem_groups"] = _normalize_canvas_workspace_problem_groups(payload.problem_groups)
+    if "problem_structure" in provided_fields:
+        workspace["problem_structure"] = _normalize_canvas_problem_structure_state(payload.problem_structure)
     if "solution_topics" in provided_fields:
         workspace["solution_topics"] = _normalize_canvas_workspace_solution_topics(payload.solution_topics)
     if "final_solution_summary" in provided_fields:
@@ -11311,6 +11445,7 @@ def post_canvas_workspace_patch(payload: CanvasWorkspacePatchInput):
             "stage": _safe_text(workspace.get("stage")),
             "canvas_items": len(workspace.get("canvas_items") or []),
             "custom_groups": len(workspace.get("custom_groups") or []),
+            "problem_structure_phase": _safe_text((workspace.get("problem_structure") or {}).get("phase")),
             "node_positions": _summarize_canvas_node_positions_for_debug(workspace.get("node_positions")),
         },
     )

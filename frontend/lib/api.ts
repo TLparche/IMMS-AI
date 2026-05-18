@@ -13,6 +13,7 @@ import type {
   CanvasNodePositionsByStage,
   CanvasPlacementConfirmResponse,
   CanvasPersonalNotesStateResponse,
+  CanvasProblemStructureState,
   CanvasWorkspacePatchRequest,
   CanvasProblemConclusionResponse,
   CanvasProblemDefinitionResponse,
@@ -479,6 +480,7 @@ export async function saveCanvasWorkspaceState(payload: {
   stage: "ideation" | "problem-definition" | "solution";
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
+  problem_structure?: CanvasProblemStructureState;
   solution_topics: CanvasSolutionStageResponse["topics"];
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;

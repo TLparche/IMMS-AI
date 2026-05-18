@@ -47,6 +47,7 @@ import type {
   CanvasLocalState,
   CanvasNodePositionsByStage,
   CanvasProblemDefinitionGroup,
+  CanvasProblemStructureState,
   CanvasRealtimeSyncPayload,
   CanvasRefinedUtterance,
   CanvasProblemDiscussionItem,
@@ -188,6 +189,7 @@ type WorkspaceFieldSignatures = {
   canvas_items: string;
   custom_groups: string;
   problem_groups: string;
+  problem_structure: string;
   solution_topics: string;
   final_solution_summary: string;
   node_positions: string;
@@ -218,6 +220,7 @@ function createWorkspaceFieldSignatures(): WorkspaceFieldSignatures {
     canvas_items: "",
     custom_groups: "",
     problem_groups: "",
+    problem_structure: "",
     solution_topics: "",
     final_solution_summary: "",
     node_positions: "",
@@ -413,6 +416,7 @@ function buildWorkspaceFieldSignatures(input: {
   canvasItems: CanvasItemViewModel[];
   customGroups: CustomGroupViewModel[];
   problemGroups: ProblemGroupViewModel[];
+  problemStructure?: CanvasProblemStructureState;
   solutionTopics: SolutionTopicViewModel[];
   nodePositions: CanvasNodePositionsByStage;
   importedState: MeetingState | null;
@@ -425,6 +429,7 @@ function buildWorkspaceFieldSignatures(input: {
     canvas_items: JSON.stringify(buildWorkspaceCanvasItemsPayload(input.canvasItems)),
     custom_groups: JSON.stringify(serializeCustomGroups(input.customGroups)),
     problem_groups: JSON.stringify(buildWorkspaceProblemGroupsPayload(input.problemGroups)),
+    problem_structure: JSON.stringify(input.problemStructure || createDefaultProblemStructureState()),
     solution_topics: JSON.stringify(buildWorkspaceSolutionTopicsPayload(input.solutionTopics)),
     final_solution_summary: JSON.stringify(buildFinalSolutionSummaryPayload(input.solutionTopics)),
     node_positions: JSON.stringify(normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions)),
@@ -441,6 +446,7 @@ function buildFullWorkspacePatchPayload(input: {
   canvasItems: CanvasItemViewModel[];
   customGroups: CustomGroupViewModel[];
   problemGroups: ProblemGroupViewModel[];
+  problemStructure?: CanvasProblemStructureState;
   solutionTopics: SolutionTopicViewModel[];
   nodePositions: CanvasNodePositionsByStage;
   importedState: MeetingState | null;
@@ -454,6 +460,7 @@ function buildFullWorkspacePatchPayload(input: {
     canvas_items: serializeSharedCanvasItems(input.canvasItems),
     custom_groups: serializeCustomGroups(input.customGroups),
     problem_groups: buildWorkspaceProblemGroupsPayload(input.problemGroups),
+    problem_structure: input.problemStructure || createDefaultProblemStructureState(),
     solution_topics: buildWorkspaceSolutionTopicsPayload(input.solutionTopics),
     final_solution_summary: buildFinalSolutionSummaryPayload(input.solutionTopics),
     node_positions: normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions),
@@ -1333,6 +1340,11 @@ function normalizeCanvasItemStatus(raw: string | undefined): CanvasItemStatus {
   return "discussion";
 }
 
+function normalizeProblemGroupStatus(raw: string | undefined): ProblemGroupStatus {
+  if (raw === "review" || raw === "final") return raw;
+  return "draft";
+}
+
 function normalizeSolutionAiSuggestionStatus(raw: string | undefined): SolutionAiSuggestionStatus {
   if (raw === "selected" || raw === "dismissed") return raw;
   return "draft";
@@ -1567,6 +1579,89 @@ function normalizeProblemStructureGroupsFromResponse(
       } satisfies ProblemStructureGroupViewModel;
     })
     .filter((group): group is ProblemStructureGroupViewModel => Boolean(group));
+}
+
+function buildProblemStructureStatePayload(input: {
+  phase: ProblemDefinitionPhase;
+  method: ProblemStructureMethod;
+  mode: ProblemDefinitionMode;
+  nodes: ProblemStructureNodeViewModel[];
+  groups: ProblemStructureGroupViewModel[];
+}): CanvasProblemStructureState {
+  return {
+    phase: input.phase,
+    method: input.method,
+    mode: input.mode,
+    nodes: input.nodes.map((node) => ({
+      id: node.id,
+      source_group_id: node.sourceGroupId,
+      title: node.title,
+      body: node.body,
+      status: node.status,
+      depth: node.depth,
+    })),
+    groups: input.groups.map((group) => ({
+      id: group.id,
+      title: group.title,
+      node_ids: group.nodeIds,
+      rationale: group.rationale,
+      created_by: group.createdBy,
+    })),
+  };
+}
+
+function createDefaultProblemStructureState(): CanvasProblemStructureState {
+  return buildProblemStructureStatePayload({
+    phase: "explore",
+    method: "affinity",
+    mode: "",
+    nodes: [],
+    groups: [],
+  });
+}
+
+function hydrateProblemStructureState(
+  raw: CanvasProblemStructureState | null | undefined,
+  fallbackProblemGroups: ProblemGroupViewModel[] = [],
+): {
+  phase: ProblemDefinitionPhase;
+  method: ProblemStructureMethod;
+  mode: ProblemDefinitionMode;
+  nodes: ProblemStructureNodeViewModel[];
+  groups: ProblemStructureGroupViewModel[];
+} {
+  const phase: ProblemDefinitionPhase = raw?.phase === "structure" ? "structure" : "explore";
+  const method: ProblemStructureMethod = raw?.method === "card-sorting" ? "card-sorting" : "affinity";
+  const mode: ProblemDefinitionMode = raw?.mode === "ai" || raw?.mode === "manual" ? raw.mode : "";
+  const nodes = (raw?.nodes || [])
+    .map((node) => ({
+      id: node.id?.trim() || "",
+      sourceGroupId: node.source_group_id?.trim() || node.id?.trim() || "",
+      title: node.title?.trim() || "문제정의 노드",
+      body: node.body?.trim() || "정의 1단계에서 가져온 노드입니다.",
+      status: normalizeProblemGroupStatus(node.status),
+      depth: Math.max(0, Number(node.depth || 0)),
+    }))
+    .filter((node) => node.id && node.title);
+  const fallbackNodes = nodes.length > 0 ? nodes : buildProblemStructureNodesFromGroups(fallbackProblemGroups);
+  const validNodeIds = new Set(fallbackNodes.map((node) => node.id));
+  const groups = (raw?.groups || [])
+    .map((group) => ({
+      id: group.id?.trim() || "",
+      title: group.title?.trim() || "구조화 그룹",
+      nodeIds: (group.node_ids || []).filter((nodeId) => validNodeIds.has(nodeId)),
+      rationale: group.rationale?.trim() || "",
+      createdBy: group.created_by === "ai" ? ("ai" as const) : ("user" as const),
+    }))
+    .filter((group) => group.id && (group.title || group.nodeIds.length > 0));
+
+  return {
+    phase: fallbackNodes.length > 0 ? phase : "explore",
+    method,
+    mode,
+    nodes: fallbackNodes,
+    groups: pruneProblemStructureGroups(groups, fallbackNodes),
+  };
 }
 
 function hydrateProblemGroups(
@@ -3374,6 +3469,7 @@ function buildSharedCanvasSignature(payload: {
   canvas_items: unknown[];
   custom_groups?: unknown[];
   problem_groups: unknown[];
+  problem_structure?: unknown;
   solution_topics: unknown[];
   final_solution_summary?: unknown;
   node_positions: CanvasNodePositionsByStage;
@@ -3841,6 +3937,7 @@ export default function MeetingCanvasTab({
     canvasItems: CanvasItemViewModel[];
     customGroups: CustomGroupViewModel[];
     problemGroups: ProblemGroupViewModel[];
+    problemStructure: CanvasProblemStructureState;
     solutionTopics: SolutionTopicViewModel[];
     nodePositions: CanvasNodePositionsByStage;
     importedState: MeetingState | null;
@@ -3852,6 +3949,7 @@ export default function MeetingCanvasTab({
     canvasItems: [],
     customGroups: [],
     problemGroups: [],
+    problemStructure: createDefaultProblemStructureState(),
     solutionTopics: [],
     nodePositions: {},
     importedState: null,
@@ -3901,6 +3999,23 @@ export default function MeetingCanvasTab({
   }, [effectiveState, agendas, transcripts, agendaOverrides, customGroups]);
   const activeMeetingGoal = meetingGoalDraft.trim();
   const meetingTopicForAi = activeMeetingGoal || meetingTitle.trim() || (effectiveState?.meeting_goal || "").trim() || "회의 주제";
+  const problemStructureStatePayload = useMemo(
+    () =>
+      buildProblemStructureStatePayload({
+        phase: problemDefinitionPhase,
+        method: problemStructureMethod,
+        mode: problemDefinitionMode,
+        nodes: problemStructureNodes,
+        groups: problemStructureGroups,
+      }),
+    [
+      problemDefinitionMode,
+      problemDefinitionPhase,
+      problemStructureGroups,
+      problemStructureMethod,
+      problemStructureNodes,
+    ],
+  );
   const transcriptStripItems = useMemo(() => {
     const stageSummaries = sttFlowSummaries.filter((item) => !item.stage || item.stage === stage);
     const summaryRows = stageSummaries
@@ -3994,6 +4109,7 @@ export default function MeetingCanvasTab({
       canvasItems: [],
       customGroups: [],
       problemGroups: [],
+      problemStructure: createDefaultProblemStructureState(),
       solutionTopics: [],
       nodePositions: {},
       importedState: null,
@@ -4074,6 +4190,7 @@ export default function MeetingCanvasTab({
       canvasItems,
       customGroups,
       problemGroups,
+      problemStructure: problemStructureStatePayload,
       solutionTopics,
       nodePositions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       importedState: persistedSharedImportedState,
@@ -4088,6 +4205,7 @@ export default function MeetingCanvasTab({
     nodePositions,
     persistedSharedImportedState,
     problemGroups,
+    problemStructureStatePayload,
     sharedSyncEnabled,
     solutionTopics,
     stage,
@@ -4159,6 +4277,9 @@ export default function MeetingCanvasTab({
     setProblemGroups([]);
     setProblemDefinitionMode("");
     setProblemDefinitionPhase("explore");
+    setProblemStructureMethod("affinity");
+    setProblemStructureDraftMethod("affinity");
+    setProblemStructureDraftMode("ai");
     setProblemStructureSetupOpen(false);
     setProblemStructureNodes([]);
     setProblemStructureGroups([]);
@@ -4175,6 +4296,9 @@ export default function MeetingCanvasTab({
     setStage("ideation");
     setProblemDefinitionMode("");
     setProblemDefinitionPhase("explore");
+    setProblemStructureMethod("affinity");
+    setProblemStructureDraftMethod("affinity");
+    setProblemStructureDraftMode("ai");
     setProblemStructureSetupOpen(false);
     setProblemStructureNodes([]);
     setProblemStructureGroups([]);
@@ -4247,6 +4371,10 @@ export default function MeetingCanvasTab({
         const nextGroups = shouldUseLocalCanvas
           ? hydrateProblemGroups(savedLocalCanvasState?.problem_groups || [], sharedGroups)
           : sharedGroups;
+        const nextProblemStructure = hydrateProblemStructureState(
+          shouldUseLocalCanvas ? savedLocalCanvasState?.problem_structure : saved.problem_structure,
+          nextGroups,
+        );
         const nextStage =
           shouldUseLocalCanvas &&
           (savedLocalCanvasState?.stage === "problem-definition" ||
@@ -4289,11 +4417,14 @@ export default function MeetingCanvasTab({
         setSharedSyncEnabled(nextSharedSyncEnabled);
         setNodePositions(nextNodePositions);
         setImportedState(nextImportedState);
-        setProblemDefinitionMode("");
-        setProblemDefinitionPhase("explore");
+        setProblemDefinitionMode(nextProblemStructure.mode);
+        setProblemDefinitionPhase(nextProblemStructure.phase);
+        setProblemStructureMethod(nextProblemStructure.method);
+        setProblemStructureDraftMethod(nextProblemStructure.method);
+        setProblemStructureDraftMode(nextProblemStructure.mode || "ai");
         setProblemStructureSetupOpen(false);
-        setProblemStructureNodes([]);
-        setProblemStructureGroups([]);
+        setProblemStructureNodes(nextProblemStructure.nodes);
+        setProblemStructureGroups(nextProblemStructure.groups);
         setProblemStructurePending(false);
         analysisSignatureAtImportRef.current = nextImportedState
           ? buildMeetingStateSignature(nextImportedState)
@@ -4308,6 +4439,7 @@ export default function MeetingCanvasTab({
           canvas_items: nextCanvasItems,
           custom_groups: serializeCustomGroups(nextCustomGroups),
           problem_groups: nextGroups,
+          problem_structure: buildProblemStructureStatePayload(nextProblemStructure),
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
           final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
           node_positions: nextNodePositions,
@@ -4321,16 +4453,17 @@ export default function MeetingCanvasTab({
           canvasItems: nextCanvasItems,
           customGroups: nextCustomGroups,
           problemGroups: nextGroups,
+          problemStructure: buildProblemStructureStatePayload(nextProblemStructure),
           solutionTopics: nextSolutionTopics,
           nodePositions: nextNodePositions,
           importedState: nextImportedState,
         });
-        setSelectedProblemGroupId(nextGroups[0]?.group_id || "");
+        setSelectedProblemGroupId(nextProblemStructure.phase === "structure" ? "" : nextGroups[0]?.group_id || "");
         setSelectedSolutionTopicId(nextSolutionTopics[0]?.group_id || "");
         setSelectedCanvasItemId("");
         setSelectedNodeId(
           nextStage === "problem-definition"
-            ? (nextGroups[0] ? `problem-${nextGroups[0].group_id}` : "")
+            ? (nextProblemStructure.phase === "structure" ? "" : nextGroups[0] ? `problem-${nextGroups[0].group_id}` : "")
             : nextStage === "solution"
               ? (nextSolutionTopics[0] ? `solution-${nextSolutionTopics[0].group_id}` : "")
               : "",
@@ -4367,6 +4500,9 @@ export default function MeetingCanvasTab({
         setStage("ideation");
         setProblemDefinitionMode("");
         setProblemDefinitionPhase("explore");
+        setProblemStructureMethod("affinity");
+        setProblemStructureDraftMethod("affinity");
+        setProblemStructureDraftMode("ai");
         setProblemStructureSetupOpen(false);
         setProblemStructureNodes([]);
         setProblemStructureGroups([]);
@@ -4379,6 +4515,7 @@ export default function MeetingCanvasTab({
           canvas_items: [],
           custom_groups: [],
           problem_groups: [],
+          problem_structure: createDefaultProblemStructureState(),
           solution_topics: [],
           final_solution_summary: buildFinalSolutionSummaryPayload([]),
           node_positions: {},
@@ -4392,6 +4529,7 @@ export default function MeetingCanvasTab({
           canvasItems: [],
           customGroups: [],
           problemGroups: [],
+          problemStructure: createDefaultProblemStructureState(),
           solutionTopics: [],
           nodePositions: {},
           importedState: null,
@@ -4646,6 +4784,7 @@ export default function MeetingCanvasTab({
       canvasItems?: CanvasItemViewModel[];
       customGroups?: CustomGroupViewModel[];
       problemGroups?: ProblemGroupViewModel[];
+      problemStructure?: CanvasProblemStructureState;
       solutionTopics?: SolutionTopicViewModel[];
       nodePositions?: CanvasNodePositionsByStage;
       importedState?: MeetingState | null;
@@ -4664,6 +4803,7 @@ export default function MeetingCanvasTab({
         canvas_items: serializeSharedCanvasItems(overrides?.canvasItems ?? canvasItems),
         custom_groups: serializeCustomGroups(overrides?.customGroups ?? customGroups),
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
+        problem_structure: overrides?.problemStructure ?? problemStructureStatePayload,
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
         final_solution_summary: buildFinalSolutionSummaryPayload(overrides?.solutionTopics ?? solutionTopics),
         node_positions: normalizeCanvasNodePositionsForComputedIdeation(overrides?.nodePositions ?? nodePositions),
@@ -4686,6 +4826,7 @@ export default function MeetingCanvasTab({
         canvas_items: snapshot.canvas_items,
         custom_groups: snapshot.custom_groups,
         problem_groups: snapshot.problem_groups,
+        problem_structure: snapshot.problem_structure,
         solution_topics: snapshot.solution_topics,
         final_solution_summary: snapshot.final_solution_summary,
         node_positions: snapshot.node_positions,
@@ -4703,6 +4844,7 @@ export default function MeetingCanvasTab({
       onSharedCanvasSync,
       persistedSharedImportedState,
       problemGroups,
+      problemStructureStatePayload,
       solutionTopics,
       stage,
       userId,
@@ -4749,6 +4891,7 @@ export default function MeetingCanvasTab({
             canvasItems: nextCanvasItems,
             customGroups,
             problemGroups,
+            problemStructure: problemStructureStatePayload,
             solutionTopics,
             nodePositions: nextNodePositions,
             importedState: persistedSharedImportedState,
@@ -4773,6 +4916,7 @@ export default function MeetingCanvasTab({
       onMeetingGoalContextChange,
       persistedSharedImportedState,
       problemGroups,
+      problemStructureStatePayload,
       sharedSyncEnabled,
       solutionTopics,
       stage,
@@ -4784,16 +4928,30 @@ export default function MeetingCanvasTab({
       if (!workspace || workspace.meeting_id !== meetingId) return;
 
       const nextProblemGroups = hydrateProblemGroups(workspace.problem_groups || [], problemGroups);
+      const nextProblemStructure = hydrateProblemStructureState(
+        workspace.problem_structure || problemStructureStatePayload,
+        nextProblemGroups,
+      );
+      const nextProblemStructurePayload = buildProblemStructureStatePayload(nextProblemStructure);
       const nextNodePositions = normalizeCanvasNodePositionsForComputedIdeation(workspace.node_positions || nodePositions);
       (workspace.problem_processed_utterance_ids || []).forEach((id) => {
         if (id) processedProblemUtteranceIdsRef.current.add(id);
       });
 
       setProblemGroups(nextProblemGroups);
+      setProblemDefinitionMode(nextProblemStructure.mode);
+      setProblemDefinitionPhase(nextProblemStructure.phase);
+      setProblemStructureMethod(nextProblemStructure.method);
+      setProblemStructureDraftMethod(nextProblemStructure.method);
+      setProblemStructureDraftMode(nextProblemStructure.mode || "ai");
+      setProblemStructureNodes(nextProblemStructure.nodes);
+      setProblemStructureGroups(nextProblemStructure.groups);
+      setProblemStructurePending(false);
       setNodePositions(nextNodePositions);
       latestSharedWorkspaceRef.current = {
         ...latestSharedWorkspaceRef.current,
         problemGroups: nextProblemGroups,
+        problemStructure: nextProblemStructurePayload,
         nodePositions: nextNodePositions,
         importedState: persistedSharedImportedState,
       };
@@ -4810,6 +4968,7 @@ export default function MeetingCanvasTab({
             canvasItems,
             customGroups,
             problemGroups: nextProblemGroups,
+            problemStructure: nextProblemStructurePayload,
             solutionTopics,
             nodePositions: nextNodePositions,
             importedState: persistedSharedImportedState,
@@ -4817,6 +4976,7 @@ export default function MeetingCanvasTab({
         );
         forceBroadcastSharedCanvas({
           problemGroups: nextProblemGroups,
+          problemStructure: nextProblemStructurePayload,
           nodePositions: nextNodePositions,
         });
       }
@@ -4832,6 +4992,7 @@ export default function MeetingCanvasTab({
       nodePositions,
       persistedSharedImportedState,
       problemGroups,
+      problemStructureStatePayload,
       sharedSyncEnabled,
       solutionTopics,
       stage,
@@ -5430,6 +5591,7 @@ export default function MeetingCanvasTab({
               canvasItems,
               customGroups,
               problemGroups: nextProblemGroupsSnapshot,
+              problemStructure: problemStructureStatePayload,
               solutionTopics,
               nodePositions,
               importedState: persistedSharedImportedState,
@@ -5464,6 +5626,7 @@ export default function MeetingCanvasTab({
       nodePositions,
       persistedSharedImportedState,
       problemGroups,
+      problemStructureStatePayload,
       problemIdeaDrag,
       problemIdeaDropPreview,
       sharedSyncEnabled,
@@ -5497,6 +5660,7 @@ export default function MeetingCanvasTab({
       canvasItems,
       customGroups,
       problemGroups,
+      problemStructure: problemStructureStatePayload,
       solutionTopics,
       nodePositions,
       importedState: persistedSharedImportedState,
@@ -5511,6 +5675,7 @@ export default function MeetingCanvasTab({
       canvas_items?: ReturnType<typeof serializeSharedCanvasItems>;
       custom_groups?: ReturnType<typeof serializeCustomGroups>;
       problem_groups?: ReturnType<typeof buildWorkspaceProblemGroupsPayload>;
+      problem_structure?: CanvasProblemStructureState;
       solution_topics?: ReturnType<typeof buildWorkspaceSolutionTopicsPayload>;
       final_solution_summary?: CanvasFinalSolutionSummary;
       node_positions?: CanvasNodePositionsByStage;
@@ -5548,6 +5713,10 @@ export default function MeetingCanvasTab({
     }
     if (sharedSyncEnabled && nextSignatures.problem_groups !== previousSignatures.problem_groups) {
       patch.problem_groups = nextProblemGroupsPayload;
+      hasChanges = true;
+    }
+    if (sharedSyncEnabled && nextSignatures.problem_structure !== previousSignatures.problem_structure) {
+      patch.problem_structure = problemStructureStatePayload;
       hasChanges = true;
     }
     if (sharedSyncEnabled && nextSignatures.solution_topics !== previousSignatures.solution_topics) {
@@ -5610,6 +5779,7 @@ export default function MeetingCanvasTab({
     persistedSharedImportedState,
     problemDefinitionStagePending,
     problemGroups,
+    problemStructureStatePayload,
     sharedSyncEnabled,
     solutionStagePending,
     solutionTopics,
@@ -5636,6 +5806,7 @@ export default function MeetingCanvasTab({
             custom_groups: serializeCustomGroups(customGroups),
             stage,
             problem_groups: serializeSharedProblemGroups(problemGroups),
+            problem_structure: problemStructureStatePayload,
             solution_topics: serializeSharedSolutionTopics(solutionTopics),
             final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics),
             node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
@@ -5652,6 +5823,7 @@ export default function MeetingCanvasTab({
       nodePositions,
       persistedSharedImportedState,
       problemGroups,
+      problemStructureStatePayload,
       sharedSyncEnabled,
       solutionTopics,
       stage,
@@ -5704,12 +5876,13 @@ export default function MeetingCanvasTab({
       canvas_items: serializeSharedCanvasItems(canvasItems),
       custom_groups: serializeCustomGroups(customGroups),
       problem_groups: serializeSharedProblemGroups(problemGroups),
+      problem_structure: problemStructureStatePayload,
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
       final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics),
       node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       imported_state: persistedSharedImportedState,
     }),
-    [agendaOverrides, canvasItems, customGroups, meetingGoalContextDraft, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, solutionTopics, stage],
+    [agendaOverrides, canvasItems, customGroups, meetingGoalContextDraft, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, problemStructureStatePayload, solutionTopics, stage],
   );
 
   const flushProblemDiscussionBuffer = useCallback(
@@ -6004,6 +6177,7 @@ export default function MeetingCanvasTab({
         canvasItems,
         customGroups,
         problemGroups,
+        problemStructure: problemStructureStatePayload,
         solutionTopics,
         nodePositions,
         importedState: persistedSharedImportedState,
@@ -6019,6 +6193,7 @@ export default function MeetingCanvasTab({
     nodePositions,
     persistedSharedImportedState,
     problemGroups,
+    problemStructureStatePayload,
     sharedSyncEnabled,
     solutionTopics,
     stage,
@@ -6116,6 +6291,11 @@ export default function MeetingCanvasTab({
     }
 
     const nextProblemGroups = hydrateProblemGroups(incomingSharedCanvasSync.problem_groups || [], problemGroups);
+    const nextProblemStructure = hydrateProblemStructureState(
+      incomingSharedCanvasSync.problem_structure || createDefaultProblemStructureState(),
+      nextProblemGroups,
+    );
+    const nextProblemStructurePayload = buildProblemStructureStatePayload(nextProblemStructure);
     const incomingSolutionTopics = hydrateSolutionTopics(
       incomingSharedCanvasSync.solution_topics || [],
       nextProblemGroups,
@@ -6140,6 +6320,7 @@ export default function MeetingCanvasTab({
       canvas_items: nextIncomingCanvasItems,
       custom_groups: serializeCustomGroups(incomingCustomGroups),
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
+      problem_structure: nextProblemStructurePayload,
       solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
       final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
       node_positions: nextIncomingNodePositions,
@@ -6148,6 +6329,14 @@ export default function MeetingCanvasTab({
     applyingRemoteSharedSyncRef.current = true;
 
     setProblemGroups(nextProblemGroups);
+    setProblemDefinitionMode(nextProblemStructure.mode);
+    setProblemDefinitionPhase(nextProblemStructure.phase);
+    setProblemStructureMethod(nextProblemStructure.method);
+    setProblemStructureDraftMethod(nextProblemStructure.method);
+    setProblemStructureDraftMode(nextProblemStructure.mode || "ai");
+    setProblemStructureNodes(nextProblemStructure.nodes);
+    setProblemStructureGroups(nextProblemStructure.groups);
+    setProblemStructurePending(false);
     setSolutionTopics(nextSolutionTopics);
     setMeetingGoalDraft(incomingMeetingGoal);
     setMeetingGoalContextDraft(incomingMeetingGoalContext);
@@ -6176,9 +6365,6 @@ export default function MeetingCanvasTab({
       setImportOverrideActive(false);
     }
     setStage(incomingStage);
-    if (incomingStage === "problem-definition") {
-      setProblemDefinitionMode("");
-    }
     lastWorkspaceFieldSignaturesRef.current = buildWorkspaceFieldSignatures({
       meetingGoal: incomingMeetingGoal,
       meetingGoalContext: incomingMeetingGoalContext,
@@ -6187,13 +6373,14 @@ export default function MeetingCanvasTab({
       canvasItems: nextIncomingCanvasItems,
       customGroups: incomingCustomGroups,
       problemGroups: nextProblemGroups,
+      problemStructure: nextProblemStructurePayload,
       solutionTopics: nextSolutionTopics,
       nodePositions: nextIncomingNodePositions,
       importedState: incomingSharedCanvasSync.imported_state || null,
     });
     setLeftPanelTab("detail");
     if (incomingStage === "problem-definition") {
-      const nextGroupId = nextProblemGroups[0]?.group_id || "";
+      const nextGroupId = nextProblemStructure.phase === "structure" ? "" : nextProblemGroups[0]?.group_id || "";
       setSelectedProblemGroupId(nextGroupId);
       setSelectedSolutionTopicId("");
       setSelectedNodeId(nextGroupId ? `problem-${nextGroupId}` : "");
@@ -6305,6 +6492,7 @@ export default function MeetingCanvasTab({
         canvas_items: sharedCanvasSnapshot.canvas_items,
         custom_groups: sharedCanvasSnapshot.custom_groups,
         problem_groups: sharedCanvasSnapshot.problem_groups,
+        problem_structure: sharedCanvasSnapshot.problem_structure,
         solution_topics: sharedCanvasSnapshot.solution_topics,
         final_solution_summary: sharedCanvasSnapshot.final_solution_summary,
         node_positions: sharedCanvasSnapshot.node_positions,
@@ -9533,6 +9721,7 @@ export default function MeetingCanvasTab({
               canvasItems,
               customGroups,
               problemGroups: nextProblemGroupsSnapshot,
+              problemStructure: problemStructureStatePayload,
               solutionTopics,
               nodePositions: nextNodePositionsSnapshot,
               importedState: persistedSharedImportedState,
@@ -9635,6 +9824,7 @@ export default function MeetingCanvasTab({
               canvasItems,
               customGroups: nextCustomGroupsSnapshot,
               problemGroups,
+              problemStructure: problemStructureStatePayload,
               solutionTopics,
               nodePositions: nextNodePositionsSnapshot,
               importedState: persistedSharedImportedState,
@@ -9790,15 +9980,16 @@ export default function MeetingCanvasTab({
       if (sharedSyncEnabled) {
         writeSharedWorkspaceSessionCache(
           meetingId,
-            buildFullWorkspacePatchPayload({
-              meetingId,
-              meetingGoal: meetingGoalDraft,
-              meetingGoalContext: meetingGoalContextDraft,
-              stage,
+          buildFullWorkspacePatchPayload({
+            meetingId,
+            meetingGoal: meetingGoalDraft,
+            meetingGoalContext: meetingGoalContextDraft,
+            stage,
             agendaOverrides,
             canvasItems: nextCanvasItemsSnapshot,
             customGroups,
             problemGroups,
+            problemStructure: problemStructureStatePayload,
             solutionTopics,
             nodePositions: nextNodePositionsSnapshot,
             importedState: persistedSharedImportedState,
@@ -9847,6 +10038,7 @@ export default function MeetingCanvasTab({
       nodePositions,
       persistedSharedImportedState,
       problemGroups,
+      problemStructureStatePayload,
       selectedAgendaId,
       selectedCanvasItemId,
       selectedProblemGroupId,
@@ -10908,10 +11100,11 @@ export default function MeetingCanvasTab({
             meetingGoalContext: meetingGoalContextDraft,
             stage,
             agendaOverrides,
-          canvasItems: nextCanvasItemsSnapshot || canvasItems,
-          customGroups,
-          problemGroups: nextProblemGroupsSnapshot || problemGroups,
-          solutionTopics,
+            canvasItems: nextCanvasItemsSnapshot || canvasItems,
+            customGroups,
+            problemGroups: nextProblemGroupsSnapshot || problemGroups,
+            problemStructure: problemStructureStatePayload,
+            solutionTopics,
             nodePositions: nextPositionsSnapshot,
             importedState: persistedSharedImportedState,
           }),
@@ -11340,6 +11533,7 @@ export default function MeetingCanvasTab({
             canvasItems: nextCanvasItemsSnapshot,
             customGroups,
             problemGroups,
+            problemStructure: problemStructureStatePayload,
             solutionTopics,
             nodePositions: nextNodePositionsSnapshot,
             importedState: persistedSharedImportedState,
@@ -12220,6 +12414,7 @@ export default function MeetingCanvasTab({
             canvasItems,
             customGroups,
             problemGroups: nextProblemGroups,
+            problemStructure: problemStructureStatePayload,
             solutionTopics,
             nodePositions,
             importedState: persistedSharedImportedState,

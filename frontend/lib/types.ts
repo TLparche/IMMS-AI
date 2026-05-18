@@ -300,6 +300,23 @@ export interface CanvasProblemStructureGroup {
   created_by?: "ai" | "user" | string;
 }
 
+export interface CanvasProblemStructureNode {
+  id: string;
+  source_group_id?: string;
+  title: string;
+  body: string;
+  status?: string;
+  depth?: number;
+}
+
+export interface CanvasProblemStructureState {
+  phase: "explore" | "structure" | string;
+  method: "affinity" | "card-sorting" | string;
+  mode?: "" | "manual" | "ai" | string;
+  nodes: CanvasProblemStructureNode[];
+  groups: CanvasProblemStructureGroup[];
+}
+
 export interface CanvasProblemStructureResponse {
   ok: boolean;
   used_llm: boolean;
@@ -456,6 +473,7 @@ export interface CanvasWorkspaceStateResponse {
   canvas_items: CanvasWorkspaceItem[];
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
+  problem_structure?: CanvasProblemStructureState;
   solution_topics: CanvasSolutionTopicResponse[];
   final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
@@ -482,6 +500,7 @@ export interface CanvasWorkspacePatchRequest {
   canvas_items?: CanvasWorkspaceItem[];
   custom_groups?: CanvasCustomGroup[];
   problem_groups?: CanvasWorkspaceProblemGroup[];
+  problem_structure?: CanvasProblemStructureState;
   solution_topics?: CanvasSolutionTopicResponse[];
   final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
@@ -504,6 +523,7 @@ export interface CanvasLocalState {
   custom_groups?: CanvasCustomGroup[];
   stage?: "ideation" | "problem-definition" | "solution";
   problem_groups?: CanvasWorkspaceProblemGroup[];
+  problem_structure?: CanvasProblemStructureState;
   solution_topics?: CanvasSolutionTopicResponse[];
   final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions?: CanvasNodePositionsByStage;
@@ -539,6 +559,7 @@ export interface CanvasRealtimeSyncPayload {
   canvas_items: CanvasWorkspaceItem[];
   custom_groups?: CanvasCustomGroup[];
   problem_groups: CanvasWorkspaceProblemGroup[];
+  problem_structure?: CanvasProblemStructureState;
   solution_topics: CanvasSolutionTopicResponse[];
   final_solution_summary?: CanvasFinalSolutionSummary;
   node_positions: CanvasNodePositionsByStage;
