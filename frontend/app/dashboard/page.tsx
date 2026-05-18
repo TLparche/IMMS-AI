@@ -186,7 +186,7 @@ function formatDashboardDateTime(value?: string) {
 }
 
 function getMeetingStatusBadgeClass(status: string) {
-  if (isCompletedMeeting(status)) return "bg-[#111827] text-white";
+  if (isCompletedMeeting(status)) return "bg-[#eff0f6] text-[#333]";
   if (status === "active" || status === "in_progress") return "bg-[#f4e8fb] text-[#a13ab8]";
   return "bg-[#eff0f6] text-[#4d4d4d]";
 }
@@ -471,7 +471,7 @@ export default function DashboardPage() {
         <div className="mb-[27px] flex items-center gap-3">
           <button
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] bg-[#a13ab8] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-white transition hover:bg-[#8d2fa3]"
+            className="inline-flex h-[43px] items-center gap-[4.5px] rounded-[16px] border border-[#ead0f2] bg-[#f4e8fb] px-[13.5px] py-[9px] text-[15.789px] font-semibold leading-[20.3px] text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7]"
           >
             <svg aria-hidden="true" className="h-6 w-6 shrink-0" viewBox="0 0 24 24" fill="none">
               <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
@@ -541,7 +541,7 @@ export default function DashboardPage() {
                             e.stopPropagation();
                             void handleOpenMeetingResult(meeting);
                           }}
-                          className="inline-flex h-[41px] items-center justify-center rounded-[16px] bg-[#a13ab8] px-5 text-[16px] font-semibold leading-normal tracking-[-0.1737px] text-white transition hover:bg-[#8d2fa3]"
+                          className="inline-flex h-[41px] items-center justify-center rounded-[16px] border border-[#ead0f2] bg-[#f4e8fb] px-5 text-[16px] font-semibold leading-normal tracking-[-0.1737px] text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7]"
                         >
                           결과 보기
                         </button>
@@ -597,7 +597,7 @@ export default function DashboardPage() {
               <button
                 onClick={() => void handleCreateMeeting()}
                 disabled={!newMeetingTitle.trim()}
-                className="min-w-[164px] rounded-[8px] bg-[#a13ab8] px-8 py-3 text-base font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
+                className="min-w-[164px] rounded-[8px] border border-[#ead0f2] bg-[#f4e8fb] px-8 py-3 text-base font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 시작
               </button>
@@ -616,7 +616,7 @@ export default function DashboardPage() {
                     <span className="rounded-full bg-white/12 px-3 py-1 text-xs font-semibold tracking-[0.12em] text-white/80">
                       FINAL REPORT
                     </span>
-                    <span className="rounded-full bg-[#a13ab8] px-3 py-1 text-xs font-semibold text-white">
+                    <span className="rounded-full bg-[#f4e8fb] px-3 py-1 text-xs font-semibold text-[#6f2b7d]">
                       {getMeetingStatusLabel(selectedResultMeeting.status)}
                     </span>
                   </div>
@@ -695,7 +695,7 @@ export default function DashboardPage() {
                     <button
                       type="button"
                       onClick={() => void handleOpenMeetingResult(selectedResultMeeting)}
-                      className="inline-flex h-10 items-center rounded-[12px] bg-[#a13ab8] px-4 text-sm font-semibold text-white transition hover:bg-[#8d2fa3]"
+                      className="inline-flex h-10 items-center rounded-[12px] border border-[#ead0f2] bg-[#f4e8fb] px-4 text-sm font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7]"
                     >
                       다시 불러오기
                     </button>
@@ -703,7 +703,7 @@ export default function DashboardPage() {
                       type="button"
                       onClick={() => void handleRebuildFinalResult(selectedResultMeeting)}
                       disabled={selectedResultRebuilding}
-                      className="inline-flex h-10 items-center rounded-[12px] bg-[#111827] px-4 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-10 items-center rounded-[12px] border border-black/10 bg-white px-4 text-sm font-semibold text-black transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {selectedResultRebuilding ? "재구성 중" : "결과 재구성"}
                     </button>
@@ -728,14 +728,14 @@ export default function DashboardPage() {
                       type="button"
                       onClick={() => void handleRebuildFinalResult(selectedResultMeeting)}
                       disabled={selectedResultRebuilding}
-                      className="inline-flex h-11 items-center rounded-[14px] bg-[#111827] px-5 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-11 items-center rounded-[14px] border border-black/10 bg-white px-5 text-sm font-semibold text-black transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {selectedResultRebuilding ? "재구성 중" : "결과 재구성"}
                     </button>
                     <button
                       type="button"
                       onClick={() => handleJoinMeeting(selectedResultMeeting.id)}
-                      className="inline-flex h-11 items-center rounded-[14px] bg-[#a13ab8] px-5 text-sm font-semibold text-white transition hover:bg-[#8d2fa3]"
+                      className="inline-flex h-11 items-center rounded-[14px] border border-[#ead0f2] bg-[#f4e8fb] px-5 text-sm font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7]"
                     >
                       회의 화면으로 이동
                     </button>

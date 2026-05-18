@@ -14569,7 +14569,9 @@ export default function MeetingCanvasTab({
                   }
                 }}
                 className={`h-[clamp(36px,4.4vh,43px)] rounded-[8px] px-[clamp(12px,1.2vw,16px)] text-[clamp(12px,0.95vw,14px)] font-semibold ${
-                  isRecording ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100" : "bg-[#a13ab8] text-white"
+                  isRecording
+                    ? "bg-red-50 text-[#ef4e4e] ring-1 ring-red-100"
+                    : "border border-[#ead0f2] bg-[#f4e8fb] text-[#6f2b7d] hover:border-[#d9b7e5] hover:bg-[#ecd9f7]"
                 }`}
               >
                 {isRecording ? "녹음 중지" : "녹음 시작"}
@@ -14668,7 +14670,7 @@ export default function MeetingCanvasTab({
                       type="button"
                       onClick={() => void handleSaveMeetingGoalEdit()}
                       disabled={meetingGoalSaving}
-                      className="rounded-[8px] bg-[#a13ab8] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-[8px] border border-[#ead0f2] bg-[#f4e8fb] px-5 py-2 text-sm font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {meetingGoalSaving ? "저장 중" : "저장"}
                     </button>
@@ -14919,7 +14921,7 @@ export default function MeetingCanvasTab({
                           type="button"
                           onClick={() => void handleCopyFinalSolutionMarkdown()}
                           disabled={!finalSummaryDocument.markdown.trim()}
-                          className="rounded-[8px] bg-[#a13ab8] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
+                          className="rounded-[8px] border border-[#ead0f2] bg-[#f4e8fb] px-3 py-1.5 text-xs font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           복사
                         </button>
@@ -15211,7 +15213,7 @@ export default function MeetingCanvasTab({
                       type="button"
                       onClick={handleStartProblemStructure}
                       disabled={problemStructurePending}
-                      className="rounded-[10px] bg-[#a13ab8] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-[10px] border border-[#ead0f2] bg-[#f4e8fb] px-5 py-2.5 text-sm font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {problemStructurePending ? "AI 묶는 중" : "정의 2단계로 이동"}
                     </button>
@@ -15248,7 +15250,9 @@ export default function MeetingCanvasTab({
                               setActivityMessage(`${problemStructureMethodLabel(method)} 방식으로 시각 표현을 바꿨습니다. 기존 그룹은 유지됩니다.`);
                             }}
                             className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
-                              active ? "bg-[#a13ab8] text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-[#f7ecfb] hover:text-[#a13ab8]"
+                              active
+                                ? "border border-[#ead0f2] bg-[#f4e8fb] text-[#6f2b7d]"
+                                : "border border-transparent bg-[#f5f6f8] text-[#4d4d4d] hover:bg-[#f7ecfb] hover:text-[#a13ab8]"
                             } disabled:cursor-not-allowed disabled:opacity-50`}
                           >
                             {problemStructureMethodLabel(method)}
@@ -15275,7 +15279,9 @@ export default function MeetingCanvasTab({
                               );
                             }}
                             className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
-                              active ? "bg-black text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-black/5 hover:text-black"
+                              active
+                                ? "border border-black/10 bg-white text-black shadow-[0_1px_0_rgba(0,0,0,0.04)]"
+                                : "border border-transparent bg-[#f5f6f8] text-[#4d4d4d] hover:bg-black/5 hover:text-black"
                             } disabled:cursor-not-allowed disabled:opacity-50`}
                           >
                             {problemDefinitionModeLabel(mode)}
@@ -15578,7 +15584,7 @@ export default function MeetingCanvasTab({
                     <button
                       type="submit"
                       disabled={!quickAskDraft.trim()}
-                      className="rounded-[10px] bg-[#a13ab8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#8d2fa3] disabled:cursor-not-allowed disabled:opacity-45"
+                      className="rounded-[10px] border border-[#ead0f2] bg-[#f4e8fb] px-4 py-2 text-sm font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-45"
                     >
                       보내기
                     </button>
