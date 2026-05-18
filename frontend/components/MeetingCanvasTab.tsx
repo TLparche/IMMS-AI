@@ -75,7 +75,14 @@ export type MeetingAgenda = {
 type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
 type CanvasTool = ComposerTool | "group" | "problem-idea";
-type ProblemCanvasToolbarAction = "group" | "problem-link" | "debug-regenerate" | "note" | "problem-idea" | "adopt";
+type ProblemCanvasToolbarAction =
+  | "group"
+  | "problem-link"
+  | "debug-regenerate"
+  | "debug-refresh-chunks"
+  | "note"
+  | "problem-idea"
+  | "adopt";
 type LeftPanelTab = "detail";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type CanvasItemStatus = "discussion" | "confirmed" | "closed";
@@ -8322,8 +8329,9 @@ export default function MeetingCanvasTab({
     };
   }, [agendaModels, canvasItems, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
 
-  const handleGenerateProblemDefinition = useCallback(async (options?: { force?: boolean }) => {
+  const handleGenerateProblemDefinition = useCallback(async (options?: { force?: boolean; refreshChunkSummaries?: boolean }) => {
     const forceRegenerate = Boolean(options?.force);
+    const refreshChunkSummaries = Boolean(options?.refreshChunkSummaries);
     setProblemDefinitionStagePending(true);
     setBusy(true);
     try {
@@ -8378,7 +8386,8 @@ export default function MeetingCanvasTab({
       const result = await generateCanvasProblemTaxonomy({
         meeting_id: meetingId,
         meeting_topic: meetingTopicForAi,
-        debug_nonce: forceRegenerate ? `debug-${Date.now()}` : undefined,
+        debug_nonce: forceRegenerate ? `debug-${refreshChunkSummaries ? "chunks-" : ""}${Date.now()}` : undefined,
+        refresh_chunk_summaries: refreshChunkSummaries || undefined,
         utterances,
         existing_group_ids: [],
         existing_groups: forceRegenerate ? [] : buildProblemTaxonomyExistingGroupsPayload(problemGroups),
@@ -8429,7 +8438,9 @@ export default function MeetingCanvasTab({
         result.warning ||
           (nextGroups.length > 0
             ? forceRegenerate
-              ? `문제정의를 다시 생성했습니다. 큰 분류 ${nextGroups.length}개를 만들었습니다.`
+              ? refreshChunkSummaries
+                ? `요약 캐시까지 다시 만들고 문제정의를 재생성했습니다. 큰 분류 ${nextGroups.length}개를 만들었습니다.`
+                : `문제정의를 다시 생성했습니다. 큰 분류 ${nextGroups.length}개를 만들었습니다.`
               : `STT 발화에서 큰 분류 ${nextGroups.length}개를 만들었습니다.`
             : "분류할 만큼 뚜렷한 STT 발화를 찾지 못했습니다."),
       );
@@ -8460,6 +8471,18 @@ export default function MeetingCanvasTab({
     const ok = window.confirm("디버깅용으로 기존 문제정의 노드와 해결책 결과를 비우고 STT 기반으로 다시 생성할까요?");
     if (!ok) return;
     await handleGenerateProblemDefinition({ force: true });
+  }, [busy, handleGenerateProblemDefinition, problemDefinitionStagePending]);
+
+  const handleRefreshProblemChunkSummaries = useCallback(async () => {
+    if (busy || problemDefinitionStagePending) {
+      setActivityMessage("문제정의 생성 작업이 이미 진행 중입니다.");
+      return;
+    }
+    const ok = window.confirm(
+      "디버깅용으로 chunk summary 캐시까지 새로 만들고 문제정의 노드를 다시 생성할까요?",
+    );
+    if (!ok) return;
+    await handleGenerateProblemDefinition({ force: true, refreshChunkSummaries: true });
   }, [busy, handleGenerateProblemDefinition, problemDefinitionStagePending]);
 
   const handleGenerateSolutionStage = useCallback(async () => {
@@ -8607,19 +8630,25 @@ export default function MeetingCanvasTab({
         : ["note", "comment", "topic", "group"],
     [stage],
   );
-  const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] = ["group", "problem-link", "debug-regenerate"];
+  const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] = [
+    "group",
+    "problem-link",
+    "debug-regenerate",
+    "debug-refresh-chunks",
+  ];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
     if (action === "group") return "문제정의 그룹 추가";
     if (action === "problem-link") return "문제정의 그룹 연결";
     if (action === "debug-regenerate") return "디버그 재생성";
+    if (action === "debug-refresh-chunks") return "요약 캐시 재생성";
     if (action === "note") return "의견추가";
     if (action === "problem-idea") return "아이디어 추가";
     return "채택";
   };
 
   const isProblemToolbarActionActive = (action: ProblemCanvasToolbarAction) => {
-    if (action === "debug-regenerate") return problemDefinitionStagePending;
+    if (action === "debug-regenerate" || action === "debug-refresh-chunks") return problemDefinitionStagePending;
     if (action === "problem-link") return Boolean(pendingProblemGroupLinkId);
     if (action === "adopt") return selectedProblemGroup?.status === "final";
     return armedCanvasTool === action;
@@ -11810,6 +11839,14 @@ export default function MeetingCanvasTab({
       return;
     }
 
+    if (action === "debug-refresh-chunks") {
+      setArmedCanvasTool(null);
+      setCanvasPlacementPreview(null);
+      setPendingProblemGroupLinkId("");
+      void handleRefreshProblemChunkSummaries();
+      return;
+    }
+
     if (action === "problem-link") {
       setArmedCanvasTool(null);
       setCanvasPlacementPreview(null);
@@ -13458,7 +13495,7 @@ export default function MeetingCanvasTab({
                         disabled={
                           !canUseCanvasToolbar ||
                           problemDefinitionStagePending ||
-                          (item === "debug-regenerate" && busy) ||
+                          ((item === "debug-regenerate" || item === "debug-refresh-chunks") && busy) ||
                           (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)
                         }
                         className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(110px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${

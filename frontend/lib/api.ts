@@ -162,6 +162,7 @@ export async function generateCanvasProblemTaxonomy(payload: {
   meeting_id: string;
   meeting_topic: string;
   debug_nonce?: string;
+  refresh_chunk_summaries?: boolean;
   parent_group_id?: string;
   parent_topic?: string;
   parent_depth?: number;
