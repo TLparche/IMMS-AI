@@ -1950,7 +1950,8 @@ function summaryMarkdownToPrintableHtml(markdown: string) {
   return blocks.join("\n") || "<p class=\"empty\">요약 문서가 아직 없습니다.</p>";
 }
 
-function buildPrintableSummaryDocumentHtml(markdown: string) {
+function buildPrintableSummaryDocumentHtml(markdown: string, options: { includeToolbar?: boolean } = {}) {
+  const includeToolbar = options.includeToolbar ?? true;
   return `<!doctype html>
 <html lang="ko">
 <head>
@@ -2032,10 +2033,14 @@ function buildPrintableSummaryDocumentHtml(markdown: string) {
   </style>
 </head>
 <body>
-  <div class="toolbar">
+  ${
+    includeToolbar
+      ? `<div class="toolbar">
     <p>인쇄 대화상자에서 PDF로 저장하면 현재 보이는 문서 형식 그대로 저장됩니다.</p>
     <button type="button" onclick="window.print()">PDF로 저장</button>
-  </div>
+  </div>`
+      : ""
+  }
   <main class="document">
     <h1 class="document-title">최종 정리 문서</h1>
     ${summaryMarkdownToPrintableHtml(markdown)}
@@ -2064,7 +2069,7 @@ function openPrintableSummaryDocumentPdf(markdown: string) {
   }
 
   frameDocument.open();
-  frameDocument.write(buildPrintableSummaryDocumentHtml(markdown));
+  frameDocument.write(buildPrintableSummaryDocumentHtml(markdown, { includeToolbar: false }));
   frameDocument.close();
   frameWindow.focus();
   frameWindow.print();
@@ -4621,6 +4626,7 @@ export default function MeetingCanvasTab({
     topicCount: number;
     solutionTopics: SolutionTopicViewModel[];
   } | null>(null);
+  const [endMeetingSummaryPreviewMarkdown, setEndMeetingSummaryPreviewMarkdown] = useState("");
   const [leftPanelRatio, setLeftPanelRatio] = useState(DEFAULT_LEFT_PANEL_RATIO);
   const [rightPanelRatio, setRightPanelRatio] = useState(DEFAULT_RIGHT_PANEL_RATIO);
   const [isDesktopLayout, setIsDesktopLayout] = useState(false);
@@ -4874,6 +4880,13 @@ export default function MeetingCanvasTab({
       problemStructureMethod,
       problemStructureNodes,
     ],
+  );
+  const endMeetingSummaryPreviewHtml = useMemo(
+    () =>
+      endMeetingSummaryPreviewMarkdown
+        ? buildPrintableSummaryDocumentHtml(endMeetingSummaryPreviewMarkdown, { includeToolbar: false })
+        : "",
+    [endMeetingSummaryPreviewMarkdown],
   );
   const quickAskPendingCount = useMemo(
     () => quickAskMessages.filter((message) => message.status === "pending").length,
@@ -13225,25 +13238,28 @@ export default function MeetingCanvasTab({
     setEndMeetingConfirmOpen(true);
   };
 
+  const handleDownloadEndMeetingSummaryPdf = () => {
+    if (!endMeetingSummaryPreviewMarkdown.trim()) return;
+    const printStarted = openPrintableSummaryDocumentPdf(endMeetingSummaryPreviewMarkdown);
+    if (!printStarted) {
+      alert("PDF 저장 화면을 열 수 없습니다. 브라우저 인쇄 메뉴에서 직접 PDF로 저장해 주세요.");
+    }
+  };
+
   const handleCancelEndMeeting = () => {
     if (endMeetingSaving) return;
     setEndMeetingConfirmOpen(false);
     setEndMeetingPreview(null);
+    setEndMeetingSummaryPreviewMarkdown("");
   };
 
-  const handleConfirmEndMeeting = async () => {
+  const handleBackToEndMeetingConfirm = () => {
     if (endMeetingSaving) return;
-    const finalSummarySnapshot = getEndingFinalSummaryDocumentSnapshot();
-    const shouldOfferSummaryPdf = Boolean(finalSummarySnapshot.markdown.trim());
-    const shouldDownloadSummaryPdf = shouldOfferSummaryPdf
-      ? window.confirm("최종 정리 문서를 PDF로 저장하고 바로 보시겠습니까?")
-      : false;
-    if (shouldDownloadSummaryPdf) {
-      const printStarted = openPrintableSummaryDocumentPdf(finalSummarySnapshot.markdown);
-      if (!printStarted) {
-        alert("PDF 저장 화면을 열 수 없습니다. 브라우저 인쇄 메뉴에서 직접 PDF로 저장해 주세요.");
-      }
-    }
+    setEndMeetingSummaryPreviewMarkdown("");
+    setEndMeetingConfirmOpen(true);
+  };
+
+  const handleSaveAndEndMeeting = async (finalSummarySnapshot: CanvasFinalSolutionSummary) => {
     setEndMeetingSaving(true);
 
     let endingSolutionTopics = endMeetingPreview?.solutionTopics || getEndingSolutionTopicsSnapshot();
@@ -13274,12 +13290,24 @@ export default function MeetingCanvasTab({
       await onEndMeeting?.();
       setEndMeetingConfirmOpen(false);
       setEndMeetingPreview(null);
+      setEndMeetingSummaryPreviewMarkdown("");
     } catch (error) {
       console.error("Failed to end meeting after final summary save:", error);
       alert("회의 종료에 실패했습니다.");
     } finally {
       setEndMeetingSaving(false);
     }
+  };
+
+  const handleConfirmEndMeeting = async () => {
+    if (endMeetingSaving) return;
+    const finalSummarySnapshot = getEndingFinalSummaryDocumentSnapshot();
+    if (finalSummarySnapshot.markdown.trim()) {
+      setEndMeetingConfirmOpen(false);
+      setEndMeetingSummaryPreviewMarkdown(finalSummarySnapshot.markdown);
+      return;
+    }
+    await handleSaveAndEndMeeting(finalSummarySnapshot);
   };
 
   const handleOpenMeetingGoalEditor = () => {
@@ -15953,6 +15981,50 @@ export default function MeetingCanvasTab({
                 {endMeetingSaving ? "저장 중" : (endMeetingPreview?.finalCount || 0) > 0 ? "저장하고 종료" : "결과 없이 종료"}
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {endMeetingSummaryPreviewMarkdown ? (
+        <div className="fixed inset-0 z-[85] flex flex-col bg-[#f5f6f8]">
+          <div className="flex min-h-[64px] items-center justify-between gap-4 border-b border-black/10 bg-white px-5 shadow-[0_1px_0_rgba(0,0,0,0.04)]">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#a13ab8]">Preview</p>
+              <h2 className="mt-1 truncate text-lg font-semibold text-black">최종 정리 문서</h2>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={handleDownloadEndMeetingSummaryPdf}
+                disabled={endMeetingSaving}
+                className="inline-flex h-10 items-center justify-center rounded-[10px] border border-[#ead0f2] bg-[#f4e8fb] px-4 text-sm font-semibold text-[#6f2b7d] transition hover:border-[#d9b7e5] hover:bg-[#ecd9f7] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                PDF 다운
+              </button>
+              <button
+                type="button"
+                onClick={handleBackToEndMeetingConfirm}
+                disabled={endMeetingSaving}
+                className="inline-flex h-10 items-center justify-center rounded-[10px] border border-black/10 bg-white px-4 text-sm font-semibold text-[#4d4d4d] transition hover:bg-[#f7ecfb] hover:text-[#6f2b7d] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                돌아가기
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveAndEndMeeting(getEndingFinalSummaryDocumentSnapshot())}
+                disabled={endMeetingSaving}
+                className="inline-flex h-10 items-center justify-center rounded-[10px] bg-[#ef4e4e] px-4 text-sm font-semibold text-white transition hover:bg-[#df3f3f] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {endMeetingSaving ? "저장 중" : "저장하고 종료"}
+              </button>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 p-4">
+            <iframe
+              title="최종 정리 문서 미리보기"
+              srcDoc={endMeetingSummaryPreviewHtml}
+              className="h-full w-full rounded-[16px] border border-black/10 bg-white shadow-[0_20px_70px_rgba(15,23,42,0.09)]"
+            />
           </div>
         </div>
       ) : null}
