@@ -200,6 +200,8 @@ export interface AudioImportJobStatusResponse {
 
 export interface CanvasProblemDefinitionGroup {
   group_id: string;
+  parent_group_id?: string;
+  depth?: number;
   topic: string;
   insight_lens?: string;
   insight_user_edited?: boolean;
@@ -214,6 +216,7 @@ export interface CanvasProblemDefinitionGroup {
   }>;
   discussion_items?: CanvasProblemDiscussionItem[];
   linked_group_ids?: string[];
+  evidence_utterance_ids?: string[];
   source_summary_items: string[];
   conclusion: string;
   conclusion_user_edited?: boolean;
@@ -243,6 +246,14 @@ export interface CanvasProblemDiscussionItem {
 }
 
 export interface CanvasProblemDefinitionResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  groups: CanvasProblemDefinitionGroup[];
+}
+
+export interface CanvasProblemTaxonomyResponse {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -365,6 +376,8 @@ export interface CanvasCustomGroup {
 
 export interface CanvasWorkspaceProblemGroup {
   group_id: string;
+  parent_group_id?: string;
+  depth?: number;
   topic: string;
   insight_lens?: string;
   insight_user_edited?: boolean;
@@ -378,6 +391,8 @@ export interface CanvasWorkspaceProblemGroup {
     body: string;
   }>;
   discussion_items?: CanvasProblemDiscussionItem[];
+  linked_group_ids?: string[];
+  evidence_utterance_ids?: string[];
   source_summary_items: string[];
   conclusion: string;
   conclusion_user_edited?: boolean;

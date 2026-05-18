@@ -248,7 +248,7 @@ function HomeContent() {
   const [isRecording, setIsRecording] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [loadingMeeting, setLoadingMeeting] = useState(true);
-  const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
+  const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 저장되고 키워드 버블에 반영됩니다.");
   const [autoSyncing] = useState(false);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
   const [incomingCanvasStateRequestId, setIncomingCanvasStateRequestId] = useState("");
@@ -381,7 +381,7 @@ function HomeContent() {
     setMeetingGoal("");
     setMeetingGoalContext("");
     setIncomingCanvasStateRequestId("");
-    setCanvasSyncStatus("실시간 전사가 canvas 분석 상태에 자동 반영됩니다.");
+    setCanvasSyncStatus("실시간 전사가 저장되고 키워드 버블에 반영됩니다.");
     setSttProgressText("");
     setSttFlowSummaries([]);
     setAudioImportJob(null);

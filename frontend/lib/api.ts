@@ -16,6 +16,7 @@ import type {
   CanvasWorkspacePatchRequest,
   CanvasProblemConclusionResponse,
   CanvasProblemDefinitionResponse,
+  CanvasProblemTaxonomyResponse,
   CanvasSolutionStageResponse,
   CanvasWorkspaceProblemGroup,
   CanvasWorkspaceStateResponse,
@@ -150,6 +151,29 @@ export async function generateCanvasProblemDefinition(payload: {
   }>;
 }): Promise<CanvasProblemDefinitionResponse> {
   return requestJson<CanvasProblemDefinitionResponse>("/api/canvas/problem-definition", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generateCanvasProblemTaxonomy(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  parent_group_id?: string;
+  parent_topic?: string;
+  parent_depth?: number;
+  parent_evidence_utterance_ids?: string[];
+  existing_group_ids?: string[];
+  max_groups?: number;
+  utterances: Array<{
+    id: string;
+    speaker: string;
+    text: string;
+    timestamp?: string;
+  }>;
+}): Promise<CanvasProblemTaxonomyResponse> {
+  return requestJson<CanvasProblemTaxonomyResponse>("/api/canvas/problem-taxonomy", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),

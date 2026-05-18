@@ -462,6 +462,8 @@ def _normalize_canvas_workspace_problem_groups(
     return [
         {
             "group_id": _safe_text(group.group_id),
+            "parent_group_id": _safe_text(group.parent_group_id),
+            "depth": _safe_nonnegative_int(group.depth),
             "topic": _safe_text(group.topic),
             "insight_lens": _safe_text(group.insight_lens),
             "insight_user_edited": bool(group.insight_user_edited),
@@ -514,6 +516,14 @@ def _normalize_canvas_workspace_problem_groups(
                 for item in (group.discussion_items or [])
                 if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
             ],
+            "linked_group_ids": [
+                _safe_text(item)
+                for item in (group.linked_group_ids or [])
+                if _safe_text(item) and _safe_text(item) != _safe_text(group.group_id)
+            ],
+            "evidence_utterance_ids": [
+                _safe_text(item) for item in (group.evidence_utterance_ids or []) if _safe_text(item)
+            ][:400],
             "source_summary_items": [
                 _safe_text(item) for item in (group.source_summary_items or []) if _safe_text(item)
             ],
@@ -1831,6 +1841,25 @@ class ProblemDefinitionGenerateInput(BaseModel):
     ideas: list[ProblemDefinitionIdeaInput] = Field(default_factory=list)
 
 
+class ProblemTaxonomyUtteranceInput(BaseModel):
+    id: str = ""
+    speaker: str = "참가자"
+    text: str = ""
+    timestamp: str = ""
+
+
+class ProblemTaxonomyGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    parent_group_id: str = ""
+    parent_topic: str = ""
+    parent_depth: int = Field(default=-1, ge=-1, le=8)
+    parent_evidence_utterance_ids: list[str] = Field(default_factory=list)
+    existing_group_ids: list[str] = Field(default_factory=list)
+    utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, min_length=1, max_length=300)
+    max_groups: int = Field(default=6, ge=1, le=12)
+
+
 class ProblemConclusionIdeaInput(BaseModel):
     id: str = ""
     kind: str = "note"
@@ -2041,6 +2070,8 @@ class CanvasNodePositionInput(BaseModel):
 
 class CanvasWorkspaceProblemGroupInput(BaseModel):
     group_id: str = ""
+    parent_group_id: str = ""
+    depth: int = 0
     topic: str = ""
     insight_lens: str = ""
     insight_user_edited: bool = False
@@ -2049,6 +2080,8 @@ class CanvasWorkspaceProblemGroupInput(BaseModel):
     agenda_titles: list[str] = Field(default_factory=list)
     ideas: list[CanvasWorkspaceIdeaInput] = Field(default_factory=list)
     discussion_items: list[CanvasProblemDiscussionInput] = Field(default_factory=list)
+    linked_group_ids: list[str] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
     source_summary_items: list[str] = Field(default_factory=list)
     conclusion: str = ""
     conclusion_user_edited: bool = False
@@ -2408,6 +2441,288 @@ def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
     if cleaned:
         return " ".join(cleaned)
     return _safe_text(fallback, "주제")
+
+
+def _stable_short_id(raw: Any) -> str:
+    text = _safe_text(raw)
+    value = 2166136261
+    for ch in text:
+        value ^= ord(ch)
+        value = (value * 16777619) & 0xFFFFFFFF
+    return format(value, "x")[:8]
+
+
+def _problem_taxonomy_utterance_dict(item: ProblemTaxonomyUtteranceInput) -> dict[str, str]:
+    return {
+        "id": _safe_text(item.id) or f"utterance-{_stable_short_id(item.text)}",
+        "speaker": _safe_text(item.speaker, "참가자"),
+        "text": _strip_leading_timestamp(item.text),
+        "timestamp": _safe_text(item.timestamp),
+    }
+
+
+def _split_taxonomy_clauses(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", _strip_leading_timestamp(text)).strip()
+    if not normalized:
+        return []
+    chunks = re.split(r"[.!?\n。！？]+|(?:\s*/\s*)|(?:,\s*)|(?:;\s*)", normalized)
+    clauses: list[str] = []
+    for chunk in chunks:
+        cleaned = re.sub(r"^(음|어|아|그|저|네|예|그러니까|그리고|근데|일단)\s+", "", chunk.strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if len(cleaned) < 3:
+            continue
+        if cleaned.lower() in STOPWORDS:
+            continue
+        clauses.append(cleaned[:80])
+    return clauses or ([normalized[:80]] if normalized else [])
+
+
+def _problem_taxonomy_tokens(text: str) -> list[str]:
+    tokens = []
+    for token in re.findall(r"[A-Za-z0-9가-힣]{2,}", _safe_text(text).lower()):
+        if token in STOPWORDS or _is_title_keyword_noise(token):
+            continue
+        tokens.append(token)
+    return _dedup_preserve(tokens, limit=12)
+
+
+def _problem_taxonomy_relevance(row: dict[str, str], parent_topic: str, parent_tokens: set[str]) -> int:
+    if not parent_topic and not parent_tokens:
+        return 1
+    text = row.get("text", "").lower()
+    score = 0
+    if parent_topic and parent_topic.lower() in text:
+        score += 4
+    row_tokens = set(_problem_taxonomy_tokens(text))
+    score += len(row_tokens & parent_tokens) * 2
+    return score
+
+
+def _select_problem_taxonomy_rows(payload: ProblemTaxonomyGenerateInput) -> list[dict[str, str]]:
+    rows = [
+        row
+        for row in (_problem_taxonomy_utterance_dict(item) for item in (payload.utterances or []))
+        if _safe_text(row.get("text"))
+    ]
+    parent_ids = {_safe_text(item) for item in (payload.parent_evidence_utterance_ids or []) if _safe_text(item)}
+    if parent_ids:
+        filtered = [row for row in rows if _safe_text(row.get("id")) in parent_ids]
+        if filtered:
+            return filtered
+
+    parent_topic = _safe_text(payload.parent_topic)
+    parent_tokens = set(_problem_taxonomy_tokens(parent_topic))
+    if not parent_topic and not parent_tokens:
+        return rows
+
+    scored = [
+        (row, _problem_taxonomy_relevance(row, parent_topic, parent_tokens))
+        for row in rows
+    ]
+    relevant = [row for row, score in scored if score > 0]
+    return relevant or rows
+
+
+def _problem_taxonomy_group_from_cluster(
+    payload: ProblemTaxonomyGenerateInput,
+    index: int,
+    cluster: dict[str, Any],
+    used_ids: set[str],
+) -> dict[str, Any]:
+    parent_group_id = _safe_text(payload.parent_group_id)
+    parent_depth = int(payload.parent_depth if payload.parent_depth is not None else -1)
+    depth = max(0, parent_depth + 1)
+    label = _normalize_problem_topic_label(cluster.get("label"), f"분류 {index}")
+    group_id_base = f"{parent_group_id or 'problem-group'}-{_stable_short_id(label)}"
+    group_id = group_id_base
+    suffix = 2
+    while group_id in used_ids:
+        group_id = f"{group_id_base}-{suffix}"
+        suffix += 1
+    used_ids.add(group_id)
+
+    rows = cluster.get("rows") or []
+    source_items = [
+        _to_summary_point(row.get("text", ""), max_len=None)
+        for row in rows
+        if _safe_text(row.get("text"))
+    ]
+    source_items = _dedup_preserve([item for item in source_items if item], limit=5)
+    keywords = _dedup_preserve(
+        [
+            token
+            for row in rows
+            for token in _problem_taxonomy_tokens(row.get("text", ""))
+        ],
+        limit=6,
+    )
+    evidence_ids = _dedup_preserve(
+        [_safe_text(row.get("id")) for row in rows if _safe_text(row.get("id"))],
+        limit=60,
+    )
+    conclusion = _safe_text(cluster.get("summary")) or (source_items[0] if source_items else label)
+
+    return {
+        "group_id": group_id,
+        "parent_group_id": parent_group_id,
+        "depth": depth,
+        "topic": label,
+        "insight_lens": "실제 발화에서 묶인 논의 흐름",
+        "keywords": keywords,
+        "agenda_ids": ["agenda-fallback"],
+        "agenda_titles": [_safe_text(payload.meeting_topic, "현재 회의")],
+        "ideas": [],
+        "discussion_items": [],
+        "linked_group_ids": [],
+        "evidence_utterance_ids": evidence_ids,
+        "source_summary_items": source_items,
+        "conclusion": _to_summary_point(conclusion, max_len=None),
+        "conclusion_user_edited": False,
+        "status": "draft",
+        "source_signature": _canvas_llm_signature(
+            {
+                "parent_group_id": parent_group_id,
+                "topic": label,
+                "evidence_utterance_ids": evidence_ids,
+            }
+        ),
+        "source_agenda_signatures": {},
+        "source_idea_signatures": {},
+    }
+
+
+def _build_problem_taxonomy_groups_local(payload: ProblemTaxonomyGenerateInput) -> list[dict[str, Any]]:
+    rows = _select_problem_taxonomy_rows(payload)
+    if not rows:
+        return []
+
+    clusters: list[dict[str, Any]] = []
+    for row in rows:
+        clauses = _split_taxonomy_clauses(row.get("text", ""))
+        candidates = clauses[:2] or [row.get("text", "")]
+        tokens = set(_problem_taxonomy_tokens(" ".join(candidates)))
+        if not tokens:
+            continue
+
+        best_cluster: dict[str, Any] | None = None
+        best_score = 0
+        for cluster in clusters:
+            overlap = len(tokens & set(cluster.get("tokens") or []))
+            if overlap > best_score:
+                best_score = overlap
+                best_cluster = cluster
+
+        if best_cluster and best_score >= 2:
+            best_cluster["rows"].append(row)
+            best_cluster["tokens"] = _dedup_preserve([*(best_cluster.get("tokens") or []), *tokens], limit=18)
+            continue
+
+        label_source = candidates[0]
+        label_tokens = _problem_taxonomy_tokens(label_source)
+        label = " ".join(label_tokens[:3]) if label_tokens else label_source
+        clusters.append(
+            {
+                "label": label,
+                "summary": label_source,
+                "tokens": list(tokens),
+                "rows": [row],
+            }
+        )
+
+    clusters.sort(key=lambda item: (-len(item.get("rows") or []), _safe_text(item.get("label"))))
+    used_ids = {_safe_text(item) for item in (payload.existing_group_ids or []) if _safe_text(item)}
+    return [
+        _problem_taxonomy_group_from_cluster(payload, index + 1, cluster, used_ids)
+        for index, cluster in enumerate(clusters[: payload.max_groups])
+    ]
+
+
+def _normalize_problem_taxonomy_llm_groups(
+    payload: ProblemTaxonomyGenerateInput,
+    raw_groups: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_groups, list):
+        return []
+    rows_by_id = {row["id"]: row for row in _select_problem_taxonomy_rows(payload)}
+    used_ids = {_safe_text(item) for item in (payload.existing_group_ids or []) if _safe_text(item)}
+    groups: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_groups[: payload.max_groups], start=1):
+        if not isinstance(raw, dict):
+            continue
+        evidence_ids = [
+            _safe_text(item)
+            for item in (raw.get("evidence_utterance_ids") or raw.get("evidenceUtteranceIds") or [])
+            if _safe_text(item) in rows_by_id
+        ]
+        source_rows = [rows_by_id[item] for item in evidence_ids]
+        if not source_rows:
+            source_rows = list(rows_by_id.values())[:2]
+        cluster = {
+            "label": raw.get("topic") or raw.get("label") or raw.get("title") or f"분류 {index}",
+            "summary": raw.get("conclusion") or raw.get("summary") or "",
+            "rows": source_rows,
+        }
+        group = _problem_taxonomy_group_from_cluster(payload, index, cluster, used_ids)
+        llm_source_items = [
+            _safe_text(item)
+            for item in (raw.get("source_summary_items") or raw.get("sourceSummaryItems") or [])
+            if _safe_text(item)
+        ]
+        if llm_source_items:
+            group["source_summary_items"] = _dedup_preserve(llm_source_items, limit=5)
+        llm_keywords = [_safe_text(item) for item in (raw.get("keywords") or []) if _safe_text(item)]
+        if llm_keywords:
+            group["keywords"] = _dedup_preserve(llm_keywords, limit=6)
+        group["topic"] = _normalize_problem_topic_label(raw.get("topic"), group["topic"])
+        group["conclusion"] = _to_summary_point(raw.get("conclusion") or group["conclusion"], max_len=None)
+        groups.append(group)
+    return groups
+
+
+def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str:
+    rows = _select_problem_taxonomy_rows(payload)
+    parent_topic = _safe_text(payload.parent_topic)
+    input_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "parent_topic": parent_topic,
+        "parent_group_id": _safe_text(payload.parent_group_id),
+        "utterances": rows[:160],
+        "max_groups": payload.max_groups,
+    }
+    scope = (
+        f"'{parent_topic}'의 바로 아래 세부 분류"
+        if parent_topic
+        else "아이디어 단계 발화의 최상위 큰 분류"
+    )
+    return (
+        "너는 회의 퍼실리테이터를 위한 문제정의 캔버스 정리기다. 출력은 JSON 하나만 반환한다.\n\n"
+        f"[목표]\n- 입력 발화에서 실제로 말한 내용만 근거로 {scope}를 만든다.\n"
+        "- 새로운 아이디어, 장소, 원인, 해결책을 발명하지 않는다.\n"
+        "- topic은 명사 하나만 강제하지 말고, 논의 핵심이 드러나는 짧은 구/문장으로 쓴다.\n"
+        "- source_summary_items는 실제 발화를 1~3문장으로 압축한 근거 요약이다.\n"
+        "- evidence_utterance_ids에는 그 분류를 뒷받침하는 utterance id만 넣는다.\n"
+        "- 근거가 부족하면 groups를 빈 배열로 둔다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(input_payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "groups": [\n'
+        "    {\n"
+        '      "topic": "서울 현장학습 후보",\n'
+        '      "keywords": ["서울", "경복궁"],\n'
+        '      "source_summary_items": ["서울은 이동이 쉽고 경복궁과 박물관을 함께 볼 수 있다는 의견이 나왔다."],\n'
+        '      "conclusion": "서울은 접근성과 학습 장소 다양성이 함께 언급된 후보였다.",\n'
+        '      "evidence_utterance_ids": ["utt-1", "utt-3"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "[규칙]\n"
+        f"- groups는 최대 {payload.max_groups}개다.\n"
+        "- 같은 의미의 분류를 중복 생성하지 않는다.\n"
+        "- parent_topic이 있으면 parent_topic과 직접 관련된 세부 분류만 만든다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
 
 
 def _build_meeting_goal_local(topic: str) -> str:
@@ -8894,6 +9209,66 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
         RT,
         normalized_meeting_id,
         "problem_definition",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/problem-taxonomy")
+def post_canvas_problem_taxonomy(payload: ProblemTaxonomyGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        groups = _build_problem_taxonomy_groups_local(payload)
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_problem_taxonomy_prompt(payload),
+                    stage="canvas_problem_taxonomy",
+                    temperature=0.15,
+                    max_tokens=1800,
+                )
+                parsed_groups = parsed.get("groups") if isinstance(parsed, dict) else None
+                llm_groups = _normalize_problem_taxonomy_llm_groups(payload, parsed_groups)
+                if llm_groups:
+                    groups = llm_groups
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_problem_taxonomy",
+                        "groups": copy.deepcopy(groups),
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                elif isinstance(parsed_groups, list):
+                    groups = []
+                    used_llm = True
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 분류를 사용했습니다."
+            except Exception as exc:
+                warning = f"문제정의 분류 LLM 생성 실패: {exc}"
+        elif not groups:
+            warning = llm_note or "LLM 미연결 상태이며 로컬 분류를 만들 충분한 발화가 없습니다."
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 분류를 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "groups": groups,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "problem_taxonomy",
         signature,
         _compute,
     )
