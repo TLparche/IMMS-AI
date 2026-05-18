@@ -31,6 +31,7 @@ import {
   generateProblemStructure,
   generateCanvasProblemTaxonomy,
   generateCanvasSolutionStage,
+  generateCanvasSummaryDocument,
   flushCanvasPersonalNotes,
   flushCanvasWorkspacePatch,
   importAgendaSnapshot,
@@ -51,6 +52,7 @@ import type {
   CanvasRealtimeSyncPayload,
   CanvasRefinedUtterance,
   CanvasProblemDiscussionItem,
+  CanvasSummaryDocumentSection,
   CanvasSolutionTopicResponse,
   CanvasWorkspaceStateResponse,
   CanvasWorkspaceItem,
@@ -291,7 +293,67 @@ function buildWorkspaceSolutionTopicsPayload(topics: SolutionTopicViewModel[]) {
   }));
 }
 
-function buildFinalSolutionSummaryPayload(topics: SolutionTopicViewModel[]): CanvasFinalSolutionSummary {
+function createEmptyFinalSolutionSummary(): CanvasFinalSolutionSummary {
+  return {
+    final_count: 0,
+    topics: [],
+    items: [],
+    markdown: "",
+    document_status: "empty",
+    generated_at: "",
+    used_llm: false,
+    warning: "",
+    source_signature: "",
+    sections: [],
+  };
+}
+
+function normalizeFinalSolutionSummaryPayload(raw?: CanvasFinalSolutionSummary | null): CanvasFinalSolutionSummary {
+  const fallback = createEmptyFinalSolutionSummary();
+  if (!raw || typeof raw !== "object") return fallback;
+  const markdown = typeof raw.markdown === "string" ? raw.markdown : "";
+  const sections = Array.isArray(raw.sections)
+    ? raw.sections.map((section) => ({
+        group_id: section.group_id || "",
+        title: section.title || "요약 그룹",
+        status: section.status || "draft",
+        status_label: section.status_label || (section.status === "review" ? "검토 중" : section.status === "final" ? "확정" : "초안"),
+        rationale: section.rationale || "",
+        node_titles: Array.isArray(section.node_titles) ? section.node_titles.filter(Boolean) : [],
+        evidence: Array.isArray(section.evidence)
+          ? section.evidence
+              .map((item) => ({
+                utterance_id: item.utterance_id || "",
+                speaker: item.speaker || "참가자",
+                timestamp: item.timestamp || "",
+                text: item.text || "",
+              }))
+              .filter((item) => item.text)
+          : [],
+      }))
+    : [];
+
+  return {
+    final_count: Math.max(Number.isFinite(raw.final_count) ? raw.final_count : raw.items?.length || 0, sections.length),
+    topics: Array.isArray(raw.topics) ? raw.topics : [],
+    items: Array.isArray(raw.items) ? raw.items : [],
+    markdown,
+    document_status: raw.document_status || (markdown ? "ready" : "empty"),
+    generated_at: raw.generated_at || "",
+    used_llm: Boolean(raw.used_llm),
+    warning: raw.warning || "",
+    source_signature: raw.source_signature || "",
+    sections,
+  };
+}
+
+function buildFinalSolutionSummaryPayload(
+  topics: SolutionTopicViewModel[],
+  summaryDocument?: CanvasFinalSolutionSummary | null,
+): CanvasFinalSolutionSummary {
+  if (summaryDocument) {
+    return normalizeFinalSolutionSummaryPayload(summaryDocument);
+  }
   const summaryTopics = topics
     .map((topic) => {
       const finalNotes = solutionTopicFinalNotes(topic).map((note) => ({
@@ -337,6 +399,8 @@ function buildFinalSolutionSummaryPayload(topics: SolutionTopicViewModel[]): Can
     topics: summaryTopics,
     items,
     markdown,
+    document_status: markdown ? "ready" : "empty",
+    sections: [],
   };
 }
 
@@ -427,6 +491,7 @@ function buildWorkspaceFieldSignatures(input: {
   problemGroups: ProblemGroupViewModel[];
   problemStructure?: CanvasProblemStructureState;
   solutionTopics: SolutionTopicViewModel[];
+  finalSolutionSummary?: CanvasFinalSolutionSummary;
   nodePositions: CanvasNodePositionsByStage;
   importedState: MeetingState | null;
 }): WorkspaceFieldSignatures {
@@ -440,7 +505,7 @@ function buildWorkspaceFieldSignatures(input: {
     problem_groups: JSON.stringify(buildWorkspaceProblemGroupsPayload(input.problemGroups)),
     problem_structure: JSON.stringify(input.problemStructure || createDefaultProblemStructureState()),
     solution_topics: JSON.stringify(buildWorkspaceSolutionTopicsPayload(input.solutionTopics)),
-    final_solution_summary: JSON.stringify(buildFinalSolutionSummaryPayload(input.solutionTopics)),
+    final_solution_summary: JSON.stringify(buildFinalSolutionSummaryPayload(input.solutionTopics, input.finalSolutionSummary)),
     node_positions: JSON.stringify(normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions)),
     imported_state: JSON.stringify(input.importedState || null),
   };
@@ -457,6 +522,7 @@ function buildFullWorkspacePatchPayload(input: {
   problemGroups: ProblemGroupViewModel[];
   problemStructure?: CanvasProblemStructureState;
   solutionTopics: SolutionTopicViewModel[];
+  finalSolutionSummary?: CanvasFinalSolutionSummary;
   nodePositions: CanvasNodePositionsByStage;
   importedState: MeetingState | null;
 }) {
@@ -471,7 +537,7 @@ function buildFullWorkspacePatchPayload(input: {
     problem_groups: buildWorkspaceProblemGroupsPayload(input.problemGroups),
     problem_structure: input.problemStructure || createDefaultProblemStructureState(),
     solution_topics: buildWorkspaceSolutionTopicsPayload(input.solutionTopics),
-    final_solution_summary: buildFinalSolutionSummaryPayload(input.solutionTopics),
+    final_solution_summary: buildFinalSolutionSummaryPayload(input.solutionTopics, input.finalSolutionSummary),
     node_positions: normalizeCanvasNodePositionsForComputedIdeation(input.nodePositions),
     imported_state: input.importedState,
   };
@@ -1689,6 +1755,63 @@ function hydrateProblemStructureState(
     nodes: fallbackNodes,
     groups: pruneProblemStructureGroups(groups, fallbackNodes),
   };
+}
+
+function problemStructureStatusLabel(status: string) {
+  if (status === "final") return "확정";
+  if (status === "review") return "검토 중";
+  return "초안";
+}
+
+function getSummaryEligibleStructureGroups(groups: ProblemStructureGroupViewModel[]) {
+  return groups.filter((group) => group.status === "final" || group.status === "review");
+}
+
+function buildSummaryDocumentSourceSignature(
+  groups: ProblemStructureGroupViewModel[],
+  nodes: ProblemStructureNodeViewModel[],
+) {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  return JSON.stringify(
+    getSummaryEligibleStructureGroups(groups).map((group) => ({
+      id: group.id,
+      title: group.title,
+      status: group.status,
+      rationale: group.rationale,
+      nodeIds: group.nodeIds,
+      nodes: group.nodeIds.map((nodeId) => {
+        const node = nodeById.get(nodeId);
+        return {
+          id: nodeId,
+          sourceGroupId: node?.sourceGroupId || "",
+          title: node?.title || "",
+          body: node?.body || "",
+        };
+      }),
+    })),
+  );
+}
+
+function buildSummaryDocumentFromResponse(input: {
+  markdown: string;
+  sections: CanvasSummaryDocumentSection[];
+  generatedAt: string;
+  usedLlm: boolean;
+  warning?: string;
+  sourceSignature: string;
+}): CanvasFinalSolutionSummary {
+  return normalizeFinalSolutionSummaryPayload({
+    final_count: input.sections.length,
+    topics: [],
+    items: [],
+    markdown: input.markdown,
+    document_status: input.markdown.trim() ? "ready" : "empty",
+    generated_at: input.generatedAt,
+    used_llm: input.usedLlm,
+    warning: input.warning || "",
+    source_signature: input.sourceSignature,
+    sections: input.sections,
+  });
 }
 
 function hydrateProblemGroups(
@@ -3803,6 +3926,10 @@ export default function MeetingCanvasTab({
   const [problemStructurePending, setProblemStructurePending] = useState(false);
   const [problemStructureDrag, setProblemStructureDrag] = useState<ProblemStructureDragState | null>(null);
   const [solutionTopics, setSolutionTopics] = useState<SolutionTopicViewModel[]>([]);
+  const [finalSummaryDocument, setFinalSummaryDocument] = useState<CanvasFinalSolutionSummary>(() =>
+    createEmptyFinalSolutionSummary(),
+  );
+  const [summaryEvidenceOpenGroupIds, setSummaryEvidenceOpenGroupIds] = useState<Set<string>>(() => new Set());
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
   const [editingSolutionTopicId, setEditingSolutionTopicId] = useState("");
   const [solutionTopicDraftTitle, setSolutionTopicDraftTitle] = useState("");
@@ -3967,6 +4094,7 @@ export default function MeetingCanvasTab({
     problemGroups: ProblemGroupViewModel[];
     problemStructure: CanvasProblemStructureState;
     solutionTopics: SolutionTopicViewModel[];
+    finalSolutionSummary: CanvasFinalSolutionSummary;
     nodePositions: CanvasNodePositionsByStage;
     importedState: MeetingState | null;
   }>({
@@ -3979,6 +4107,7 @@ export default function MeetingCanvasTab({
     problemGroups: [],
     problemStructure: createDefaultProblemStructureState(),
     solutionTopics: [],
+    finalSolutionSummary: createEmptyFinalSolutionSummary(),
     nodePositions: {},
     importedState: null,
   });
@@ -4139,6 +4268,7 @@ export default function MeetingCanvasTab({
       problemGroups: [],
       problemStructure: createDefaultProblemStructureState(),
       solutionTopics: [],
+      finalSolutionSummary: createEmptyFinalSolutionSummary(),
       nodePositions: {},
       importedState: null,
     };
@@ -4169,6 +4299,8 @@ export default function MeetingCanvasTab({
     setEditingSolutionNoteKey("");
     setSolutionNoteTextDraft("");
     setSolutionNoteFinalCommentDraft("");
+    setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+    setSummaryEvidenceOpenGroupIds(new Set());
     setSelectedProblemSourceNodeId("");
     setArmedCanvasTool(null);
     setLiveFlowHint("");
@@ -4220,6 +4352,7 @@ export default function MeetingCanvasTab({
       problemGroups,
       problemStructure: problemStructureStatePayload,
       solutionTopics,
+      finalSolutionSummary: finalSummaryDocument,
       nodePositions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       importedState: persistedSharedImportedState,
     };
@@ -4234,6 +4367,7 @@ export default function MeetingCanvasTab({
     persistedSharedImportedState,
     problemGroups,
     problemStructureStatePayload,
+    finalSummaryDocument,
     sharedSyncEnabled,
     solutionTopics,
     stage,
@@ -4314,6 +4448,8 @@ export default function MeetingCanvasTab({
     setProblemStructurePending(false);
     setProblemStructureDrag(null);
     setSolutionTopics([]);
+    setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+    setSummaryEvidenceOpenGroupIds(new Set());
     setPersonalNotes([]);
     setAgendaOverrides({});
     setCanvasItems([]);
@@ -4415,6 +4551,11 @@ export default function MeetingCanvasTab({
         const nextSolutionTopics = shouldUseLocalCanvas
           ? hydrateSolutionTopics(savedLocalCanvasState?.solution_topics || [], nextGroups, sharedSolutionTopics)
           : sharedSolutionTopics;
+        const nextFinalSummary = normalizeFinalSolutionSummaryPayload(
+          shouldUseLocalCanvas
+            ? savedLocalCanvasState?.final_solution_summary || saved.final_solution_summary || null
+            : saved.final_solution_summary || null,
+        );
         const nextNodePositions = normalizeCanvasNodePositionsForComputedIdeation(
           shouldUseLocalCanvas
             ? savedLocalCanvasState?.node_positions || {}
@@ -4433,6 +4574,8 @@ export default function MeetingCanvasTab({
 
         setProblemGroups(nextGroups);
         setSolutionTopics(nextSolutionTopics);
+        setFinalSummaryDocument(nextFinalSummary);
+        setSummaryEvidenceOpenGroupIds(new Set());
         setPersonalNotes(nextPersonalNotes);
         setAgendaOverrides(nextAgendaOverrides);
         setCanvasItems(nextCanvasItems);
@@ -4471,7 +4614,7 @@ export default function MeetingCanvasTab({
           problem_groups: nextGroups,
           problem_structure: buildProblemStructureStatePayload(nextProblemStructure),
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
-          final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
+          final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics, nextFinalSummary),
           node_positions: nextNodePositions,
           imported_state: nextImportedState,
         });
@@ -4485,6 +4628,7 @@ export default function MeetingCanvasTab({
           problemGroups: nextGroups,
           problemStructure: buildProblemStructureStatePayload(nextProblemStructure),
           solutionTopics: nextSolutionTopics,
+          finalSolutionSummary: nextFinalSummary,
           nodePositions: nextNodePositions,
           importedState: nextImportedState,
         });
@@ -4519,6 +4663,8 @@ export default function MeetingCanvasTab({
         if (cancelled) return;
         setProblemGroups([]);
         setSolutionTopics([]);
+        setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+        setSummaryEvidenceOpenGroupIds(new Set());
         setPersonalNotes([]);
         setAgendaOverrides({});
         setCanvasItems([]);
@@ -4547,7 +4693,7 @@ export default function MeetingCanvasTab({
           problem_groups: [],
           problem_structure: createDefaultProblemStructureState(),
           solution_topics: [],
-          final_solution_summary: buildFinalSolutionSummaryPayload([]),
+          final_solution_summary: buildFinalSolutionSummaryPayload([], createEmptyFinalSolutionSummary()),
           node_positions: {},
           imported_state: null,
         });
@@ -4561,6 +4707,7 @@ export default function MeetingCanvasTab({
           problemGroups: [],
           problemStructure: createDefaultProblemStructureState(),
           solutionTopics: [],
+          finalSolutionSummary: createEmptyFinalSolutionSummary(),
           nodePositions: {},
           importedState: null,
         });
@@ -4816,6 +4963,7 @@ export default function MeetingCanvasTab({
       problemGroups?: ProblemGroupViewModel[];
       problemStructure?: CanvasProblemStructureState;
       solutionTopics?: SolutionTopicViewModel[];
+      finalSolutionSummary?: CanvasFinalSolutionSummary;
       nodePositions?: CanvasNodePositionsByStage;
       importedState?: MeetingState | null;
       meetingGoal?: string;
@@ -4835,7 +4983,10 @@ export default function MeetingCanvasTab({
         problem_groups: serializeSharedProblemGroups(overrides?.problemGroups ?? problemGroups),
         problem_structure: overrides?.problemStructure ?? problemStructureStatePayload,
         solution_topics: serializeSharedSolutionTopics(overrides?.solutionTopics ?? solutionTopics),
-        final_solution_summary: buildFinalSolutionSummaryPayload(overrides?.solutionTopics ?? solutionTopics),
+        final_solution_summary: buildFinalSolutionSummaryPayload(
+          overrides?.solutionTopics ?? solutionTopics,
+          overrides?.finalSolutionSummary ?? finalSummaryDocument,
+        ),
         node_positions: normalizeCanvasNodePositionsForComputedIdeation(overrides?.nodePositions ?? nodePositions),
         imported_state:
           overrides && "importedState" in overrides
@@ -4867,6 +5018,7 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       canvasItems,
       customGroups,
+      finalSummaryDocument,
       meetingGoalContextDraft,
       meetingGoalDraft,
       meetingId,
@@ -5692,6 +5844,7 @@ export default function MeetingCanvasTab({
       problemGroups,
       problemStructure: problemStructureStatePayload,
       solutionTopics,
+      finalSolutionSummary: finalSummaryDocument,
       nodePositions,
       importedState: persistedSharedImportedState,
     });
@@ -5751,7 +5904,11 @@ export default function MeetingCanvasTab({
     }
     if (sharedSyncEnabled && nextSignatures.solution_topics !== previousSignatures.solution_topics) {
       patch.solution_topics = nextSolutionTopicsPayload;
-      patch.final_solution_summary = buildFinalSolutionSummaryPayload(solutionTopics);
+      patch.final_solution_summary = buildFinalSolutionSummaryPayload(solutionTopics, finalSummaryDocument);
+      hasChanges = true;
+    }
+    if (sharedSyncEnabled && nextSignatures.final_solution_summary !== previousSignatures.final_solution_summary) {
+      patch.final_solution_summary = buildFinalSolutionSummaryPayload(solutionTopics, finalSummaryDocument);
       hasChanges = true;
     }
     if (sharedSyncEnabled && nextSignatures.node_positions !== previousSignatures.node_positions) {
@@ -5801,6 +5958,7 @@ export default function MeetingCanvasTab({
     canvasItems,
     conclusionBatchBusy,
     customGroups,
+    finalSummaryDocument,
     meetingGoalContextDraft,
     meetingGoalDraft,
     meetingId,
@@ -5838,7 +5996,7 @@ export default function MeetingCanvasTab({
             problem_groups: serializeSharedProblemGroups(problemGroups),
             problem_structure: problemStructureStatePayload,
             solution_topics: serializeSharedSolutionTopics(solutionTopics),
-            final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics),
+            final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics, finalSummaryDocument),
             node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
             imported_state: persistedSharedImportedState,
             import_override_active: importOverrideActive,
@@ -5847,6 +6005,7 @@ export default function MeetingCanvasTab({
       agendaOverrides,
       canvasItems,
       customGroups,
+      finalSummaryDocument,
       importOverrideActive,
       meetingGoalContextDraft,
       meetingGoalDraft,
@@ -5908,11 +6067,11 @@ export default function MeetingCanvasTab({
       problem_groups: serializeSharedProblemGroups(problemGroups),
       problem_structure: problemStructureStatePayload,
       solution_topics: serializeSharedSolutionTopics(solutionTopics),
-      final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics),
+      final_solution_summary: buildFinalSolutionSummaryPayload(solutionTopics, finalSummaryDocument),
       node_positions: normalizeCanvasNodePositionsForComputedIdeation(nodePositions),
       imported_state: persistedSharedImportedState,
     }),
-    [agendaOverrides, canvasItems, customGroups, meetingGoalContextDraft, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, problemStructureStatePayload, solutionTopics, stage],
+    [agendaOverrides, canvasItems, customGroups, finalSummaryDocument, meetingGoalContextDraft, meetingGoalDraft, nodePositions, persistedSharedImportedState, problemGroups, problemStructureStatePayload, solutionTopics, stage],
   );
 
   const flushProblemDiscussionBuffer = useCallback(
@@ -6339,8 +6498,9 @@ export default function MeetingCanvasTab({
             editingSolutionNoteKey,
             solutionNoteTextDraft,
             solutionNoteFinalCommentDraft,
-          )
+        )
         : incomingSolutionTopics;
+    const nextFinalSummary = normalizeFinalSolutionSummaryPayload(incomingSharedCanvasSync.final_solution_summary || null);
 
     lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
       meeting_goal: incomingMeetingGoal,
@@ -6352,7 +6512,7 @@ export default function MeetingCanvasTab({
       problem_groups: incomingSharedCanvasSync.problem_groups || [],
       problem_structure: nextProblemStructurePayload,
       solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
-      final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
+      final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics, nextFinalSummary),
       node_positions: nextIncomingNodePositions,
       imported_state: incomingSharedCanvasSync.imported_state || null,
     });
@@ -6368,6 +6528,7 @@ export default function MeetingCanvasTab({
     setProblemStructureGroups(nextProblemStructure.groups);
     setProblemStructurePending(false);
     setSolutionTopics(nextSolutionTopics);
+    setFinalSummaryDocument(nextFinalSummary);
     setMeetingGoalDraft(incomingMeetingGoal);
     setMeetingGoalContextDraft(incomingMeetingGoalContext);
     setMeetingGoalEditorDraft(incomingMeetingGoal);
@@ -6405,6 +6566,7 @@ export default function MeetingCanvasTab({
       problemGroups: nextProblemGroups,
       problemStructure: nextProblemStructurePayload,
       solutionTopics: nextSolutionTopics,
+      finalSolutionSummary: nextFinalSummary,
       nodePositions: nextIncomingNodePositions,
       importedState: incomingSharedCanvasSync.imported_state || null,
     });
@@ -6688,7 +6850,7 @@ export default function MeetingCanvasTab({
           const patch = {
             meeting_id: meetingId,
             solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
-            final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
+            final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics, finalSummaryDocument),
             imported_state: persistedSharedImportedState,
           };
           if (persistImmediately) {
@@ -6706,6 +6868,7 @@ export default function MeetingCanvasTab({
     },
     [
       forceBroadcastSharedCanvas,
+      finalSummaryDocument,
       meetingId,
       persistedSharedImportedState,
       sharedSyncEnabled,
@@ -6756,7 +6919,7 @@ export default function MeetingCanvasTab({
         void saveCanvasWorkspacePatch({
           meeting_id: meetingId,
           solution_topics: serializeSharedSolutionTopics(nextSolutionTopics),
-          final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics),
+          final_solution_summary: buildFinalSolutionSummaryPayload(nextSolutionTopics, finalSummaryDocument),
           imported_state: persistedSharedImportedState,
         }).catch((error) => {
           console.error("Failed to save solution note edit:", error);
@@ -6767,6 +6930,7 @@ export default function MeetingCanvasTab({
     setActivityMessage("해결책 카드를 저장했습니다.");
   }, [
     editingSolutionNoteKey,
+    finalSummaryDocument,
     forceBroadcastSharedCanvas,
     meetingId,
     persistedSharedImportedState,
@@ -6778,20 +6942,42 @@ export default function MeetingCanvasTab({
   ]);
 
   const handleCopyFinalSolutionMarkdown = useCallback(async () => {
-    const markdown = buildFinalSolutionSummaryPayload(solutionTopics).markdown.trim();
+    const markdown = finalSummaryDocument.markdown.trim();
     if (!markdown) {
-      setActivityMessage("복사할 최종 해결책 결론이 없습니다.");
+      setActivityMessage("복사할 요약 문서가 없습니다.");
       return;
     }
 
     try {
       await navigator.clipboard.writeText(markdown);
-      setActivityMessage("최종 해결책 결론을 마크다운으로 복사했습니다.");
+      setActivityMessage("요약 문서를 마크다운으로 복사했습니다.");
     } catch (error) {
       console.error("Failed to copy final solution markdown:", error);
       setActivityMessage("브라우저 권한 문제로 마크다운 복사에 실패했습니다.");
     }
-  }, [solutionTopics]);
+  }, [finalSummaryDocument.markdown]);
+
+  const handleSummaryDocumentMarkdownChange = useCallback((value: string) => {
+    setFinalSummaryDocument((current) =>
+      normalizeFinalSolutionSummaryPayload({
+        ...current,
+        markdown: value,
+        document_status: value.trim() ? "edited" : "empty",
+      }),
+    );
+  }, []);
+
+  const handleToggleSummaryEvidence = useCallback((groupId: string) => {
+    setSummaryEvidenceOpenGroupIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }, []);
 
   const commitProblemGroupsSnapshot = useCallback(
     (nextGroups: ProblemGroupViewModel[], message: string, selectedGroupId?: string) => {
@@ -9030,9 +9216,18 @@ export default function MeetingCanvasTab({
     () => solutionTopics.find((topic) => topic.group_id === selectedSolutionTopicId) || solutionTopics[0] || null,
     [selectedSolutionTopicId, solutionTopics],
   );
-  const finalSolutionSummary = useMemo(
-    () => buildFinalSolutionSummaryPayload(solutionTopics),
-    [solutionTopics],
+  const finalSolutionSummary = finalSummaryDocument;
+  const summaryDocumentSections = useMemo(
+    () => finalSummaryDocument.sections || [],
+    [finalSummaryDocument.sections],
+  );
+  const summaryDocumentSectionByGroupId = useMemo(
+    () => new Map(summaryDocumentSections.map((section) => [section.group_id, section])),
+    [summaryDocumentSections],
+  );
+  const summaryEligibleStructureGroups = useMemo(
+    () => getSummaryEligibleStructureGroups(problemStructureGroups),
+    [problemStructureGroups],
   );
   const allSolutionFinalNotes = useMemo(
     () =>
@@ -9483,8 +9678,8 @@ export default function MeetingCanvasTab({
     await handleGenerateProblemDefinition({ force: true, refreshChunkSummaries: true });
   }, [busy, handleGenerateProblemDefinition, problemDefinitionStagePending]);
 
-  const handleGenerateSolutionStage = useCallback(async () => {
-    const finalizedGroups = problemGroups.filter((group) => group.status === "final");
+  const handleGenerateSolutionStage = useCallback(async (options?: { force?: boolean }) => {
+    const eligibleGroups = getSummaryEligibleStructureGroups(problemStructureGroups);
     setStage("solution");
     setLeftPanelTab("detail");
     setSelectedProblemGroupId("");
@@ -9492,50 +9687,101 @@ export default function MeetingCanvasTab({
     setSelectedNodeId("");
     setEditingSolutionTopicId("");
 
-    if (finalizedGroups.length === 0) {
-      setActivityMessage("확정된 문제 정의 그룹이 없습니다. 먼저 그룹을 확정해 주세요.");
+    if (eligibleGroups.length === 0) {
+      setActivityMessage("요약 문서에 포함할 검토 중/확정 구조화 그룹이 없습니다.");
+      return;
+    }
+
+    const hasExistingSummaryDocument =
+      finalSummaryDocument.markdown.trim() && (finalSummaryDocument.sections || []).length > 0;
+    if (!options?.force && hasExistingSummaryDocument) {
+      setActivityMessage("기존 요약 문서를 유지했습니다. 다시 만들려면 요약 단계의 다시 생성 버튼을 사용해 주세요.");
       return;
     }
 
     setSolutionStagePending(true);
     setBusy(true);
     try {
-      const result = await generateCanvasSolutionStage({
+      const result = await generateCanvasSummaryDocument({
         meeting_id: meetingId,
         meeting_topic: meetingTopicForAi,
-        topics: finalizedGroups.map((group, index) => ({
-          group_id: group.group_id,
-          topic_no: index + 1,
-          topic: group.topic,
-          conclusion: group.conclusion,
+        groups: eligibleGroups.map((group) => ({
+          id: group.id,
+          title: group.title,
+          node_ids: group.nodeIds,
+          rationale: group.rationale,
+          status: group.status,
+          created_by: group.createdBy,
+        })),
+        nodes: problemStructureNodes.map((node) => ({
+          id: node.id,
+          source_group_id: node.sourceGroupId,
+          title: node.title,
+          body: node.body,
+          status: node.status,
+          depth: node.depth,
         })),
       });
-      const nextSolutionTopics = hydrateSolutionTopics(result.topics, problemGroups, solutionTopics);
-      setSolutionTopics(nextSolutionTopics);
-      setSelectedSolutionTopicId(nextSolutionTopics[0]?.group_id || "");
-      setSelectedNodeId(nextSolutionTopics[0] ? `solution-${nextSolutionTopics[0].group_id}` : "");
-      if (!sharedSyncEnabled) {
+      const nextFinalSummary = buildSummaryDocumentFromResponse({
+        markdown: result.markdown || "",
+        sections: result.sections || [],
+        generatedAt: result.generated_at,
+        usedLlm: result.used_llm,
+        warning: result.warning,
+        sourceSignature: result.source_signature || buildSummaryDocumentSourceSignature(eligibleGroups, problemStructureNodes),
+      });
+
+      setFinalSummaryDocument(nextFinalSummary);
+      setSummaryEvidenceOpenGroupIds(new Set());
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        stage: "solution",
+        finalSolutionSummary: nextFinalSummary,
+        importedState: persistedSharedImportedState,
+      };
+      if (sharedSyncEnabled) {
         forceBroadcastSharedCanvas({
           stage: "solution",
-          solutionTopics: nextSolutionTopics,
+          finalSolutionSummary: nextFinalSummary,
         });
+        if (meetingId) {
+          void saveCanvasWorkspacePatch({
+            meeting_id: meetingId,
+            stage: "solution",
+            final_solution_summary: nextFinalSummary,
+            imported_state: persistedSharedImportedState,
+          }).catch((error) => {
+            console.error("Failed to save summary document:", error);
+          });
+        }
       }
-      setActivityMessage(result.warning || `확정된 문제 정의 ${finalizedGroups.length}개 기준으로 해결책을 생성했습니다.`);
+      setActivityMessage(result.warning || `구조화 그룹 ${eligibleGroups.length}개 기준으로 요약 문서를 생성했습니다.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setActivityMessage(`해결책 생성 실패: ${message}`);
+      setActivityMessage(`요약 문서 생성 실패: ${message}`);
     } finally {
       setSolutionStagePending(false);
       setBusy(false);
     }
   }, [
     forceBroadcastSharedCanvas,
+    finalSummaryDocument.markdown,
+    finalSummaryDocument.sections,
     meetingId,
     meetingTopicForAi,
-    problemGroups,
+    persistedSharedImportedState,
+    problemStructureGroups,
+    problemStructureNodes,
     sharedSyncEnabled,
-    solutionTopics,
   ]);
+
+  const handleRegenerateSummaryDocument = useCallback(async () => {
+    if (busy || solutionStagePending) {
+      setActivityMessage("요약 문서 생성 작업이 이미 진행 중입니다.");
+      return;
+    }
+    await handleGenerateSolutionStage({ force: true });
+  }, [busy, handleGenerateSolutionStage, solutionStagePending]);
 
   const handleStageSelect = useCallback(
     async (nextStage: CanvasStage) => {
@@ -9547,21 +9793,23 @@ export default function MeetingCanvasTab({
         if (busy || solutionStagePending) {
           setActivityMessage(
             solutionStagePending
-              ? "해결책 단계를 준비하는 중이라 잠시 후 다시 시도해 주세요."
-              : "다른 작업이 진행 중이라 아직 해결책 단계로 전환할 수 없습니다.",
+              ? "요약 문서를 생성하는 중이라 잠시 후 다시 시도해 주세요."
+              : "다른 작업이 진행 중이라 아직 요약 단계로 전환할 수 없습니다.",
           );
           return;
         }
 
-        if (solutionTopics.length === 0) {
+        const hasExistingSummaryDocument =
+          finalSummaryDocument.markdown.trim() && (finalSummaryDocument.sections || []).length > 0;
+        if (!hasExistingSummaryDocument) {
           await handleGenerateSolutionStage();
           return;
         }
 
         setStage("solution");
         setSelectedProblemGroupId("");
-        setSelectedSolutionTopicId(solutionTopics[0]?.group_id || "");
-        setSelectedNodeId(solutionTopics[0] ? `solution-${solutionTopics[0].group_id}` : "");
+        setSelectedSolutionTopicId("");
+        setSelectedNodeId("");
         setLeftPanelTab("detail");
         return;
       }
@@ -9595,11 +9843,12 @@ export default function MeetingCanvasTab({
     [
       busy,
       conclusionBatchBusy,
+      finalSummaryDocument.markdown,
+      finalSummaryDocument.sections,
       flushProblemDiscussionBuffer,
       handleGenerateProblemDefinition,
       handleGenerateSolutionStage,
       solutionStagePending,
-      solutionTopics,
       stage,
     ],
   );
@@ -12137,10 +12386,13 @@ export default function MeetingCanvasTab({
     await flushProblemDiscussionBuffer("stage-change");
 
     const endingSolutionTopics = getEndingSolutionTopicsSnapshot();
-    const finalSolutionSummary = buildFinalSolutionSummaryPayload(endingSolutionTopics);
+    const finalSolutionSummary = buildFinalSolutionSummaryPayload(
+      endingSolutionTopics,
+      latestSharedWorkspaceRef.current.finalSolutionSummary || finalSummaryDocument,
+    );
     setEndMeetingPreview({
       finalCount: finalSolutionSummary.final_count,
-      topicCount: finalSolutionSummary.topics.length,
+      topicCount: finalSolutionSummary.sections?.length || finalSolutionSummary.topics.length,
       solutionTopics: endingSolutionTopics,
     });
     setEndMeetingConfirmOpen(true);
@@ -12161,7 +12413,10 @@ export default function MeetingCanvasTab({
       endingSolutionTopics = await handlePruneSolutionSuggestions("", true, endingSolutionTopics);
     }
     if (meetingId) {
-      const finalSolutionSummary = buildFinalSolutionSummaryPayload(endingSolutionTopics);
+      const finalSolutionSummary = buildFinalSolutionSummaryPayload(
+        endingSolutionTopics,
+        latestSharedWorkspaceRef.current.finalSolutionSummary || finalSummaryDocument,
+      );
       try {
         await saveCanvasWorkspacePatch({
           meeting_id: meetingId,
@@ -12470,17 +12725,6 @@ export default function MeetingCanvasTab({
       right: [] as Edge[],
     };
   }, [collapsedProblemGroupIds, problemDefinitionPhase, problemGroups, stage]);
-  const solutionSplitNodes = useMemo(() => {
-    if (stage !== "solution") {
-      return { left: [] as Node[], right: [] as Node[] };
-    }
-    const leftNodeIds = new Set(solutionTopics.map((topic) => `solution-${topic.group_id}`));
-
-    return {
-      left: nodes.filter((node) => leftNodeIds.has(node.id)),
-      right: nodes.filter((node) => extractSolutionDetailTopicIdFromNodeId(node.id)),
-    };
-  }, [nodes, solutionTopics, stage]);
   const canvasHeaderSpeechRows = useMemo(() => {
     const fallbackCurrent = sttProgressText || liveFlowHint || "현재 발언 흐름 대기 중";
     const rows = transcriptStripItems
@@ -12513,7 +12757,7 @@ export default function MeetingCanvasTab({
       ? "아이디어 흐름"
       : stage === "problem-definition"
         ? selectedProblemGroup?.topic || "문제 정의"
-        : selectedSolutionTopic?.topic || "요약";
+        : "최종 정리 문서";
   const canvasHeaderLeftSummary =
     stage === "ideation"
       ? "STT에서 자주 나온 단어가 크기와 근접도로 표시됩니다."
@@ -12521,13 +12765,10 @@ export default function MeetingCanvasTab({
         ? selectedProblemGroup?.insight_lens ||
           selectedProblemGroup?.conclusion ||
           "아이디어 단계에서 도출한 내용을 바탕으로 문제 정의를 정리합니다."
-        : selectedSolutionTopic?.problem_insight ||
-          selectedSolutionTopic?.problem_conclusion ||
-          selectedSolutionTopic?.conclusion ||
-          "문제 정의 이후의 요약을 확인합니다.";
+        : `검토 중/확정 구조화 그룹 ${summaryEligibleStructureGroups.length}개를 바탕으로 회의 흐름을 문서화합니다.`;
   const canvasHeaderGridClassName = `relative grid min-h-[clamp(86px,9.5vh,112px)] shrink-0 grid-cols-1 border border-black/10 bg-white shadow-[0_1px_0_rgba(0,0,0,0.04)] ${
     stage === "solution"
-      ? "xl:grid-cols-[minmax(17rem,36%)_minmax(0,1fr)]"
+      ? "xl:grid-cols-[minmax(18rem,32%)_minmax(0,1fr)]"
       : "xl:grid-cols-[minmax(17rem,38%)_minmax(0,1fr)]"
   }`;
   const canvasHeaderCellClassName = "min-h-[clamp(86px,9.5vh,112px)] px-[clamp(18px,2.8vw,38px)] py-[clamp(12px,1.7vh,18px)]";
@@ -14008,6 +14249,8 @@ export default function MeetingCanvasTab({
                         setCustomGroups([]);
                         setProblemGroups([]);
                         setSolutionTopics([]);
+                        setFinalSummaryDocument(createEmptyFinalSolutionSummary());
+                        setSummaryEvidenceOpenGroupIds(new Set());
                         setNodePositions({});
                         setStage("ideation");
                         setProblemDefinitionMode("");
@@ -14031,6 +14274,7 @@ export default function MeetingCanvasTab({
                             customGroups: [],
                             problemGroups: [],
                             solutionTopics: [],
+                            finalSolutionSummary: createEmptyFinalSolutionSummary(),
                             nodePositions: {},
                             importedState: result.state,
                           });
@@ -14042,7 +14286,7 @@ export default function MeetingCanvasTab({
                             custom_groups: [],
                             problem_groups: [],
                             solution_topics: [],
-                            final_solution_summary: buildFinalSolutionSummaryPayload([]),
+                            final_solution_summary: buildFinalSolutionSummaryPayload([], createEmptyFinalSolutionSummary()),
                             node_positions: {},
                             imported_state: result.state,
                           }).catch((error) => {
@@ -14190,59 +14434,134 @@ export default function MeetingCanvasTab({
                   <Controls />
                 </ReactFlow>
               ) : stage === "solution" ? (
-                <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(17rem,36%)_minmax(0,1fr)]">
-                  <div className="flex min-h-[320px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
-                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
-                      <ReactFlow<Node, Edge>
-                        nodes={solutionSplitNodes.left}
-                        edges={[] as Edge[]}
-                        onInit={(instance) => {
-                          flowRef.current = instance;
-                        }}
-                        onNodeClick={handleCanvasNodeClick}
-                        onPaneClick={handleCanvasPaneClick}
-                        nodesConnectable={false}
-                        nodesDraggable={false}
-                        panOnDrag
-                        noPanClassName="nopan"
-                        minZoom={0.45}
-                        maxZoom={1.6}
-                        proOptions={{ hideAttribution: true }}
-                      >
-                        <Controls />
-                      </ReactFlow>
+                <div className="grid h-full min-h-0 grid-cols-1 bg-[#f5f6f8] xl:grid-cols-[minmax(18rem,32%)_minmax(0,1fr)]">
+                  <aside className="flex min-h-[280px] flex-col overflow-hidden border-b border-black/10 bg-white xl:border-b-0 xl:border-r">
+                    <div className="border-b border-black/10 px-5 py-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Summary Source</p>
+                      <h4 className="mt-1 text-lg font-semibold text-black">구조화 결과</h4>
+                      <p className="mt-1 text-sm leading-6 text-[#4d4d4d]">
+                        검토 중/확정 그룹 {summaryEligibleStructureGroups.length}개가 요약 문서에 포함됩니다.
+                      </p>
                     </div>
-                  </div>
-
-                  <div ref={solutionRightPaneRef} className="flex min-h-[420px] flex-col overflow-hidden bg-white">
-                    <div className="min-h-0 flex-1 bg-[#f5f6f8]">
-                      <ReactFlow<Node, Edge>
-                        nodes={solutionSplitNodes.right}
-                        edges={[] as Edge[]}
-                        onInit={(instance) => {
-                          flowRef.current = instance;
-                        }}
-                        onNodeClick={handleCanvasNodeClick}
-                        onPaneClick={handleCanvasPaneClick}
-                        nodesConnectable={false}
-                        nodesDraggable={false}
-                        panOnDrag
-                        noPanClassName="nopan"
-                        minZoom={0.45}
-                        maxZoom={1.6}
-                        proOptions={{ hideAttribution: true }}
-                      >
-                        <MiniMap
-                          zoomable
-                          pannable
-                          maskColor="rgba(15, 23, 42, 0.08)"
-                          nodeColor="#047857"
-                        />
-                        <Controls />
-                      </ReactFlow>
+                    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                      {summaryEligibleStructureGroups.length > 0 ? (
+                        <div className="space-y-3">
+                          {summaryEligibleStructureGroups.map((group, index) => {
+                            const section = summaryDocumentSectionByGroupId.get(group.id);
+                            const evidenceOpen = summaryEvidenceOpenGroupIds.has(group.id);
+                            const groupNodes = group.nodeIds
+                              .map((nodeId) => problemStructureNodes.find((node) => node.id === nodeId))
+                              .filter((node): node is ProblemStructureNodeViewModel => Boolean(node));
+                            return (
+                              <div key={`summary-source-${group.id}`} className="border border-black/10 bg-white p-4">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-semibold text-[#777]">#{index + 1}</p>
+                                    <h5 className="mt-1 line-clamp-2 text-sm font-semibold leading-5 text-black">
+                                      {group.title}
+                                    </h5>
+                                  </div>
+                                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                                    group.status === "final" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                                  }`}>
+                                    {problemStructureStatusLabel(group.status)}
+                                  </span>
+                                </div>
+                                {groupNodes.length > 0 ? (
+                                  <div className="mt-3 space-y-1.5">
+                                    {groupNodes.slice(0, 4).map((node) => (
+                                      <p key={`summary-node-${group.id}-${node.id}`} className="line-clamp-2 bg-[#f5f6f8] px-3 py-2 text-xs leading-5 text-[#4d4d4d]">
+                                        {node.title}
+                                      </p>
+                                    ))}
+                                    {groupNodes.length > 4 ? (
+                                      <p className="px-1 text-[11px] font-medium text-[#777]">+ {groupNodes.length - 4}개 더 있음</p>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                                {section && section.evidence.length > 0 ? (
+                                  <div className="mt-3 border-t border-black/10 pt-3">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleSummaryEvidence(group.id)}
+                                      className="text-xs font-semibold text-[#1b59f8] transition hover:text-[#164be0]"
+                                    >
+                                      근거 발언 {evidenceOpen ? "접기" : "보기"} ({section.evidence.length})
+                                    </button>
+                                    {evidenceOpen ? (
+                                      <div className="mt-2 space-y-2">
+                                        {section.evidence.map((item, evidenceIndex) => (
+                                          <p key={`summary-evidence-${group.id}-${item.utterance_id || evidenceIndex}`} className="bg-[#eef4ff] px-3 py-2 text-xs leading-5 text-[#334155]">
+                                            <span className="font-semibold text-[#1b59f8]">{item.speaker}</span>
+                                            {item.timestamp ? <span className="ml-2 text-[#777]">{item.timestamp}</span> : null}
+                                            <span className="mt-1 block">{item.text}</span>
+                                          </p>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="border border-dashed border-black/10 bg-[#fafafa] px-4 py-5 text-sm leading-6 text-[#777]">
+                          정의 2단계에서 그룹을 검토 중 또는 확정 상태로 바꾸면 요약 문서에 포함됩니다.
+                        </div>
+                      )}
                     </div>
+                  </aside>
 
-                  </div>
+                  <section ref={solutionRightPaneRef} className="flex min-h-[420px] flex-col overflow-hidden bg-white">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/10 px-5 py-4">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Final Document</p>
+                        <h4 className="mt-1 text-lg font-semibold text-black">최종 정리 문서</h4>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {finalSummaryDocument.used_llm ? (
+                          <span className="rounded-full bg-[#eef4ff] px-3 py-1 text-xs font-semibold text-[#1b59f8]">AI 초안</span>
+                        ) : null}
+                        {finalSummaryDocument.document_status === "edited" ? (
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">사용자 수정됨</span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => void handleRegenerateSummaryDocument()}
+                          disabled={solutionStagePending || summaryEligibleStructureGroups.length === 0}
+                          className="rounded-[8px] border border-black/10 bg-white px-3 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#f5f6f8] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          다시 생성
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyFinalSolutionMarkdown()}
+                          disabled={!finalSummaryDocument.markdown.trim()}
+                          className="rounded-[8px] bg-[#1b59f8] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          복사
+                        </button>
+                      </div>
+                    </div>
+                    {finalSummaryDocument.warning ? (
+                      <div className="border-b border-amber-100 bg-amber-50 px-5 py-2 text-xs leading-5 text-amber-700">
+                        {finalSummaryDocument.warning}
+                      </div>
+                    ) : null}
+                    <div className="min-h-0 flex-1 overflow-hidden bg-[#f5f6f8] p-5">
+                      <textarea
+                        value={finalSummaryDocument.markdown}
+                        onChange={(event) => handleSummaryDocumentMarkdownChange(event.target.value)}
+                        placeholder={
+                          solutionStagePending
+                            ? "AI가 요약 문서를 생성하는 중입니다."
+                            : "요약 단계로 들어오면 구조화 그룹을 기준으로 문서 초안이 자동 생성됩니다."
+                        }
+                        className="h-full min-h-[360px] w-full resize-none border border-black/10 bg-white px-6 py-5 font-mono text-sm leading-7 text-[#1f2937] outline-none transition placeholder:font-sans placeholder:text-[#999] focus:border-[#1b59f8]/30 focus:ring-2 focus:ring-[#1b59f8]/10"
+                      />
+                    </div>
+                  </section>
                 </div>
               ) : (
                 <ReactFlow
@@ -14391,14 +14710,14 @@ export default function MeetingCanvasTab({
               </div>
             ) : null}
 
-            {stage === "solution" && solutionTopics.length === 0 && !solutionStagePending ? (
+            {stage === "solution" && !finalSummaryDocument.markdown.trim() && !solutionStagePending ? (
               <div className="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center bg-white/70 backdrop-blur-[1px]">
                 <div className="rounded-2xl border border-slate-200 bg-white px-6 py-5 text-center shadow-lg shadow-slate-200/70">
-                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-600">Solution Stage</p>
+                  <p className="text-sm font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Summary Stage</p>
                   <p className="mt-2 text-base text-slate-700">
-                    {problemGroups.some((group) => group.status === "final")
-                      ? "해결책 토픽을 준비하는 중입니다."
-                      : "확정된 문제 정의 그룹이 있어야 해결책을 만들 수 있습니다."}
+                    {summaryEligibleStructureGroups.length > 0
+                      ? "요약 문서를 준비하는 중입니다."
+                      : "검토 중 또는 확정된 구조화 그룹이 있어야 요약 문서를 만들 수 있습니다."}
                   </p>
                 </div>
               </div>
@@ -14649,13 +14968,13 @@ export default function MeetingCanvasTab({
                     </div>
                   </div>
                   <p className="mt-6 text-sm font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                    Solution Stage
+                    Summary Stage
                   </p>
                   <h3 className="mt-2 text-2xl font-semibold text-slate-900">
-                    해결책 단계를 준비하고 있습니다
+                    요약 문서를 생성하고 있습니다
                   </h3>
                   <p className="mt-3 text-base leading-7 text-slate-500">
-                    확정된 문제 정의 그룹을 바탕으로 해결 방향과 실행 아이디어를 정리하는 중입니다.
+                    구조화 단계의 검토 중/확정 그룹과 회의 흐름을 바탕으로 문서 초안을 작성하는 중입니다.
                   </p>
                 </div>
               </div>

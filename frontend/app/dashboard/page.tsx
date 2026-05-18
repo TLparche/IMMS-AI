@@ -44,7 +44,7 @@ function isCompletedMeeting(status: string) {
 function getFinalResultCount(summary: CanvasFinalSolutionSummary | null | undefined) {
   if (!summary) return 0;
   const topicNoteCount = (summary.topics || []).reduce((count, topic) => count + (topic.final_notes || []).length, 0);
-  return Math.max(summary.final_count || 0, (summary.items || []).length, topicNoteCount);
+  return Math.max(summary.final_count || 0, (summary.items || []).length, topicNoteCount, (summary.sections || []).length);
 }
 
 function hasFinalResult(summary: CanvasFinalSolutionSummary | null | undefined) {

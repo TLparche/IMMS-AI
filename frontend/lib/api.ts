@@ -20,6 +20,7 @@ import type {
   CanvasProblemGroupingRationaleResponse,
   CanvasProblemStructureResponse,
   CanvasProblemTaxonomyResponse,
+  CanvasSummaryDocumentResponse,
   CanvasSolutionStageResponse,
   CanvasWorkspaceProblemGroup,
   CanvasWorkspaceStateResponse,
@@ -309,6 +310,34 @@ export async function generateCanvasSolutionStage(payload: {
   });
 }
 
+export async function generateCanvasSummaryDocument(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  refresh_chunk_summaries?: boolean;
+  groups: Array<{
+    id: string;
+    title: string;
+    node_ids: string[];
+    rationale?: string;
+    status?: string;
+    created_by?: string;
+  }>;
+  nodes: Array<{
+    id: string;
+    source_group_id?: string;
+    title: string;
+    body?: string;
+    status?: string;
+    depth?: number;
+  }>;
+}): Promise<CanvasSummaryDocumentResponse> {
+  return requestJson<CanvasSummaryDocumentResponse>("/api/canvas/summary-document", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function generateCanvasIdeationSuggestions(payload: {
   meeting_id: string;
   meeting_topic: string;
@@ -482,6 +511,7 @@ export async function saveCanvasWorkspaceState(payload: {
   problem_groups: CanvasWorkspaceProblemGroup[];
   problem_structure?: CanvasProblemStructureState;
   solution_topics: CanvasSolutionStageResponse["topics"];
+  final_solution_summary?: CanvasWorkspaceStateResponse["final_solution_summary"];
   node_positions?: CanvasNodePositionsByStage;
   imported_state?: MeetingState | null;
 }): Promise<CanvasWorkspaceStateResponse> {

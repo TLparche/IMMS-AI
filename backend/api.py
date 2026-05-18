@@ -706,6 +706,8 @@ def _normalize_canvas_final_solution_summary(raw: Any) -> dict[str, Any]:
             "topics": [],
             "items": [],
             "markdown": "",
+            "document_status": "empty",
+            "sections": [],
         }
 
     def normalize_item(item: Any) -> dict[str, Any] | None:
@@ -765,12 +767,67 @@ def _normalize_canvas_final_solution_summary(raw: Any) -> dict[str, Any]:
         if normalized
     ]
     items = explicit_items or flat_items
+    sections: list[dict[str, Any]] = []
+    for section in raw.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        title = _safe_text(section.get("title"))
+        group_id = _safe_text(section.get("group_id") or section.get("groupId"))
+        if not title and not group_id:
+            continue
+        status = _safe_text(section.get("status"), "draft")
+        if status not in {"draft", "review", "final"}:
+            status = "draft"
+        evidence: list[dict[str, str]] = []
+        for item in section.get("evidence") or []:
+            if not isinstance(item, dict):
+                continue
+            text = _safe_text(item.get("text") or item.get("quote"))
+            if not text:
+                continue
+            evidence.append(
+                {
+                    "utterance_id": _safe_text(item.get("utterance_id") or item.get("utteranceId") or item.get("id")),
+                    "speaker": _safe_text(item.get("speaker"), "참가자"),
+                    "timestamp": _safe_text(item.get("timestamp")),
+                    "text": text,
+                }
+            )
+            if len(evidence) >= 8:
+                break
+        sections.append(
+            {
+                "group_id": group_id,
+                "title": title or "요약 그룹",
+                "status": status,
+                "status_label": _safe_text(section.get("status_label") or section.get("statusLabel"), "검토 중" if status == "review" else "확정" if status == "final" else "초안"),
+                "rationale": _safe_text(section.get("rationale")),
+                "node_titles": [
+                    _safe_text(value)
+                    for value in (section.get("node_titles") or section.get("nodeTitles") or [])
+                    if _safe_text(value)
+                ][:40],
+                "evidence": evidence,
+            }
+        )
+        if len(sections) >= 40:
+            break
+
+    document_status = _safe_text(raw.get("document_status") or raw.get("documentStatus"), "ready" if _safe_text(raw.get("markdown")) else "empty")
+    if document_status not in {"empty", "ready", "edited"}:
+        document_status = "ready" if _safe_text(raw.get("markdown")) else "empty"
 
     return {
-        "final_count": len(items),
+        "final_count": max(len(items), len(sections)),
         "topics": topics,
         "items": items,
         "markdown": _safe_text(raw.get("markdown")),
+        "document_status": document_status,
+        "generated_at": _safe_text(raw.get("generated_at") or raw.get("generatedAt")),
+        "used_llm": bool(raw.get("used_llm") or raw.get("usedLlm")),
+        "warning": _safe_text(raw.get("warning")),
+        "source_signature": _safe_text(raw.get("source_signature") or raw.get("sourceSignature")),
+        "sections": sections,
     }
 
 
@@ -2112,6 +2169,32 @@ class SolutionStageGenerateInput(BaseModel):
     meeting_id: str = ""
     meeting_topic: str = ""
     topics: list[SolutionStageTopicInput] = Field(default_factory=list)
+
+
+class SummaryDocumentNodeInput(BaseModel):
+    id: str = ""
+    source_group_id: str = ""
+    title: str = ""
+    body: str = ""
+    status: str = "draft"
+    depth: int = Field(default=0, ge=0, le=8)
+
+
+class SummaryDocumentGroupInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    node_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    status: str = "draft"
+    created_by: str = "user"
+
+
+class SummaryDocumentGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    refresh_chunk_summaries: bool = False
+    groups: list[SummaryDocumentGroupInput] = Field(default_factory=list, max_length=40)
+    nodes: list[SummaryDocumentNodeInput] = Field(default_factory=list, max_length=120)
 
 
 class IdeationSuggestionTopicInput(BaseModel):
@@ -4829,6 +4912,292 @@ def _build_solution_stage_prompt(meeting_topic: str, topics: list[dict[str, Any]
         "- 서로 중복되지 않게 작성한다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
+
+
+def _summary_document_status_label(status: str) -> str:
+    if status == "final":
+        return "확정"
+    if status == "review":
+        return "검토 중"
+    return "초안"
+
+
+def _summary_document_source_signature(groups: list[dict[str, Any]]) -> str:
+    signature_payload = [
+        {
+            "id": group.get("group_id"),
+            "title": group.get("title"),
+            "status": group.get("status"),
+            "rationale": group.get("rationale"),
+            "nodes": [
+                {
+                    "id": node.get("id"),
+                    "title": node.get("title"),
+                    "body": node.get("body"),
+                    "source_group_id": node.get("source_group_id"),
+                }
+                for node in group.get("nodes") or []
+            ],
+        }
+        for group in groups
+    ]
+    return _stable_short_id(_canvas_llm_signature({"version": 1, "groups": signature_payload}))
+
+
+def _summary_document_groups(payload: SummaryDocumentGenerateInput, workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    node_by_id: dict[str, dict[str, Any]] = {}
+    for node in payload.nodes or []:
+        node_id = _safe_text(node.id)
+        title = _safe_text(node.title)
+        body = _safe_text(node.body)
+        if not node_id or not (title or body):
+            continue
+        node_by_id[node_id] = {
+            "id": node_id,
+            "source_group_id": _safe_text(node.source_group_id),
+            "title": title or "구조화 노드",
+            "body": body,
+            "status": _safe_text(node.status, "draft"),
+            "depth": int(node.depth or 0),
+        }
+
+    problem_group_by_id = {
+        _safe_text(group.get("group_id")): group
+        for group in (workspace.get("problem_groups") or [])
+        if isinstance(group, dict) and _safe_text(group.get("group_id"))
+    }
+
+    groups: list[dict[str, Any]] = []
+    for index, group in enumerate(payload.groups or [], start=1):
+        status = _safe_text(group.status, "draft")
+        if status not in {"review", "final"}:
+            continue
+        group_nodes = [node_by_id[node_id] for node_id in group.node_ids if node_id in node_by_id]
+        if not group_nodes and not _safe_text(group.title):
+            continue
+
+        source_group_ids = _dedup_preserve(
+            [_safe_text(node.get("source_group_id")) for node in group_nodes if _safe_text(node.get("source_group_id"))],
+            limit=80,
+        )
+        source_summary_items: list[str] = []
+        evidence_utterance_ids: list[str] = []
+        for source_group_id in source_group_ids:
+            source_group = problem_group_by_id.get(source_group_id)
+            if not isinstance(source_group, dict):
+                continue
+            source_summary_items.extend(
+                _safe_text(item)
+                for item in (source_group.get("source_summary_items") or [])
+                if _safe_text(item)
+            )
+            evidence_utterance_ids.extend(
+                _safe_text(item)
+                for item in (source_group.get("evidence_utterance_ids") or [])
+                if _safe_text(item)
+            )
+
+        groups.append(
+            {
+                "group_id": _safe_text(group.id) or f"summary-group-{index}",
+                "title": _safe_text(group.title) or f"정리 항목 {index}",
+                "status": status,
+                "status_label": _summary_document_status_label(status),
+                "rationale": _safe_text(group.rationale),
+                "created_by": _safe_text(group.created_by, "user"),
+                "nodes": group_nodes[:80],
+                "source_group_ids": source_group_ids,
+                "source_summary_items": _dedup_preserve(source_summary_items, limit=12),
+                "evidence_utterance_ids": _dedup_preserve(evidence_utterance_ids, limit=80),
+            }
+        )
+
+    return groups[:24]
+
+
+def _summary_document_group_tokens(group: dict[str, Any]) -> set[str]:
+    text = " ".join(
+        [
+            _safe_text(group.get("title")),
+            _safe_text(group.get("rationale")),
+            " ".join(_safe_text(item) for item in group.get("source_summary_items") or []),
+            " ".join(
+                f"{_safe_text(node.get('title'))} {_safe_text(node.get('body'))}"
+                for node in group.get("nodes") or []
+                if isinstance(node, dict)
+            ),
+        ]
+    )
+    return set(_problem_taxonomy_tokens(text))
+
+
+def _summary_document_evidence_for_group(rows: list[dict[str, str]], group: dict[str, Any]) -> list[dict[str, str]]:
+    evidence_ids = {_safe_text(item) for item in (group.get("evidence_utterance_ids") or []) if _safe_text(item)}
+    tokens = _summary_document_group_tokens(group)
+    scored: list[tuple[int, int, dict[str, str]]] = []
+    for index, row in enumerate(rows):
+        text = _safe_text(row.get("text"))
+        if not text:
+            continue
+        row_id = _safe_text(row.get("id"))
+        score = 8 if row_id and row_id in evidence_ids else 0
+        if tokens:
+            score += len(tokens & set(_problem_taxonomy_tokens(text)))
+        if score <= 0:
+            continue
+        scored.append((score, index, row))
+
+    if not scored:
+        return []
+
+    evidence: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for _score, _index, row in sorted(scored, key=lambda item: (-item[0], item[1])):
+        key = _safe_text(row.get("id")) or _safe_text(row.get("text"))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        evidence.append(
+            {
+                "utterance_id": _safe_text(row.get("id")),
+                "speaker": _safe_text(row.get("speaker"), "참가자"),
+                "timestamp": _safe_text(row.get("timestamp")),
+                "text": _truncate_text(row.get("text"), 220),
+            }
+        )
+        if len(evidence) >= 5:
+            break
+    return evidence
+
+
+def _summary_document_sections(groups: list[dict[str, Any]], rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "group_id": _safe_text(group.get("group_id")),
+            "title": _safe_text(group.get("title"), "요약 그룹"),
+            "status": _safe_text(group.get("status"), "draft"),
+            "status_label": _safe_text(group.get("status_label"), _summary_document_status_label(_safe_text(group.get("status")))),
+            "rationale": _safe_text(group.get("rationale")),
+            "node_titles": [
+                _safe_text(node.get("title"))
+                for node in group.get("nodes") or []
+                if isinstance(node, dict) and _safe_text(node.get("title"))
+            ][:40],
+            "evidence": _summary_document_evidence_for_group(rows, group),
+        }
+        for group in groups
+    ]
+
+
+def _build_summary_document_local_markdown(meeting_topic: str, groups: list[dict[str, Any]]) -> str:
+    title = _safe_text(meeting_topic, "회의")
+    lines = [f"# {title} 요약", "", "## 전체 흐름", "구조화 단계에서 검토 중이거나 확정된 그룹을 기준으로 회의 내용을 정리했습니다."]
+    for index, group in enumerate(groups, start=1):
+        status_label = _safe_text(group.get("status_label"), "확정")
+        review_suffix = " (검토 중)" if group.get("status") == "review" else ""
+        lines.extend(["", f"## {index}. {_safe_text(group.get('title'), f'정리 항목 {index}')}{review_suffix}", f"- 상태: {status_label}"])
+        node_titles = [
+            _safe_text(node.get("title"))
+            for node in group.get("nodes") or []
+            if isinstance(node, dict) and _safe_text(node.get("title"))
+        ]
+        source_items = [_safe_text(item) for item in group.get("source_summary_items") or [] if _safe_text(item)]
+        rationale = _safe_text(group.get("rationale"))
+        flow_items = _dedup_preserve([*source_items, *node_titles, rationale], limit=4)
+        if flow_items:
+            lines.extend(["", "### 논의 흐름"])
+            lines.extend(f"- {item}" for item in flow_items)
+        lines.extend(["", "### 정리된 결론"])
+        conclusion = source_items[0] if source_items else (rationale or f"{_safe_text(group.get('title'), '이 항목')}을 중심으로 논의가 정리되었습니다.")
+        lines.append(_to_summary_point(conclusion, max_len=None))
+    return "\n".join(lines).strip()
+
+
+def _build_summary_document_prompt(
+    payload: SummaryDocumentGenerateInput,
+    groups: list[dict[str, Any]],
+    sections: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> str:
+    overview_summaries = context.get("overview_summaries") if isinstance(context.get("overview_summaries"), list) else []
+    chunk_summaries = context.get("chunk_summaries") if isinstance(context.get("chunk_summaries"), list) else []
+    rows = context.get("rows") if isinstance(context.get("rows"), list) else []
+    input_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "context_policy": {
+            "total_utterance_count": int(context.get("total_utterance_count") or 0),
+            "included_raw_utterance_count": int(context.get("included_utterance_count") or len(rows)),
+            "included_chunk_summary_count": int(context.get("included_chunk_summary_count") or len(chunk_summaries)),
+            "overview_summary_count": len(overview_summaries),
+            "note": "문서 본문에는 원문 발언을 직접 인용하지 않는다. 근거 발언은 별도 evidence UI에서만 보여준다.",
+        },
+        "structure_groups": [
+            {
+                "group_id": group.get("group_id"),
+                "title": group.get("title"),
+                "status": group.get("status"),
+                "status_label": group.get("status_label"),
+                "rationale": group.get("rationale"),
+                "nodes": [
+                    {
+                        "title": node.get("title"),
+                        "body": node.get("body"),
+                    }
+                    for node in group.get("nodes") or []
+                    if isinstance(node, dict)
+                ][:40],
+                "source_summary_items": group.get("source_summary_items", [])[:8],
+            }
+            for group in groups
+        ],
+        "overview_summaries": overview_summaries,
+        "chunk_summaries": chunk_summaries,
+        "evidence_hints": [
+            {
+                "group_id": section.get("group_id"),
+                "evidence_summaries": [
+                    _truncate_text(item.get("text"), 160)
+                    for item in section.get("evidence") or []
+                    if isinstance(item, dict) and _safe_text(item.get("text"))
+                ],
+            }
+            for section in sections
+        ],
+        "raw_utterances_for_nuance_only": _problem_taxonomy_prompt_rows(rows[:24], 360),
+    }
+    return (
+        "너는 회의가 끝난 뒤 사람들이 다시 읽을 수 있는 최종 회의 요약 문서를 쓰는 AI 퍼실리테이터다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 구조화 단계에서 상태가 '확정' 또는 '검토 중'인 그룹들을 기준으로 문서형 요약을 작성한다.\n"
+        "- 사람들이 회의가 끝난 뒤 읽었을 때 왜 이런 결론이 나왔는지 논의 흐름을 이해할 수 있어야 한다.\n"
+        "- 웹 LLM 서비스의 Markdown 요약처럼 제목, 하위 제목, bullet을 적절히 사용한다.\n"
+        "- '검토 중' 그룹은 제목에 반드시 '(검토 중)'을 붙이거나 본문에 상태를 드러낸다.\n"
+        "- 원문 발언의 직접 인용, 화자명, timestamp는 문서 본문에 넣지 않는다. 근거 발언은 UI에서 별도로 접어 보여준다.\n"
+        "- 새로운 사실, 결정, 원인, 해결책을 발명하지 않는다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(input_payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "markdown": "# 회의 요약\\n\\n## 전체 흐름\\n...\\n\\n## 1. 목적지 경복궁 설정\\n..."\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- markdown은 한국어 Markdown 문자열 하나다.\n"
+        "- 문서에는 # 제목 1개, ## 그룹별 섹션, 필요한 경우 ### 논의 흐름 / 정리된 결론 / 남은 확인 사항을 둔다.\n"
+        "- 각 그룹은 1~3문단과 bullet 2~5개 정도로 간결하게 쓴다.\n"
+        "- 원문 그대로의 긴 인용은 금지한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _normalize_summary_document_markdown(parsed: Any, fallback_markdown: str) -> str:
+    markdown = ""
+    if isinstance(parsed, dict):
+        markdown = _safe_text(parsed.get("markdown") or parsed.get("document"))
+    else:
+        markdown = _safe_text(parsed)
+    markdown = re.sub(r"^```(?:markdown|md|json)?\s*", "", markdown.strip(), flags=re.IGNORECASE)
+    markdown = re.sub(r"\s*```$", "", markdown).strip()
+    return markdown or fallback_markdown
 
 
 def _build_ideation_suggestions_prompt(payload: IdeationSuggestionGenerateInput) -> str:
@@ -11178,6 +11547,111 @@ def post_canvas_solution_stage(payload: SolutionStageGenerateInput):
         RT,
         normalized_meeting_id,
         "solution_stage",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/summary-document")
+def post_canvas_summary_document(payload: SummaryDocumentGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    workspace = _warm_canvas_workspace_cache(RT, normalized_meeting_id) if normalized_meeting_id else {}
+    groups = _summary_document_groups(payload, workspace)
+    source_signature = _summary_document_source_signature(groups)
+    signature = _canvas_llm_signature(
+        {
+            "version": 1,
+            "meeting_topic": _safe_text(payload.meeting_topic),
+            "source_signature": source_signature,
+            "refresh_chunk_summaries": bool(payload.refresh_chunk_summaries),
+        }
+    )
+
+    def _compute() -> dict[str, Any]:
+        rows = _resolve_problem_taxonomy_utterance_rows(normalized_meeting_id, [])
+        sections = _summary_document_sections(groups, rows)
+        fallback_markdown = _build_summary_document_local_markdown(payload.meeting_topic, groups)
+        used_llm = False
+        warning = ""
+
+        if not groups:
+            return {
+                "ok": True,
+                "used_llm": False,
+                "warning": "요약 문서에 포함할 검토 중/확정 구조화 그룹이 없습니다.",
+                "generated_at": _now_ts(),
+                "source_signature": source_signature,
+                "markdown": "",
+                "sections": [],
+            }
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        taxonomy_context: dict[str, Any] = {
+            "rows": rows,
+            "chunk_summaries": [],
+            "overview_summaries": [],
+            "total_utterance_count": len(rows),
+            "included_utterance_count": len(rows),
+            "included_chunk_summary_count": 0,
+            "overview_summary_count": 0,
+        }
+        if llm_ready:
+            try:
+                taxonomy_payload = ProblemTaxonomyGenerateInput(
+                    meeting_id=normalized_meeting_id,
+                    meeting_topic=_safe_text(payload.meeting_topic),
+                    refresh_chunk_summaries=bool(payload.refresh_chunk_summaries),
+                    max_groups=6,
+                )
+                taxonomy_context, context_warning = _build_problem_taxonomy_context(
+                    RT,
+                    taxonomy_payload,
+                    client,
+                    llm_ready,
+                )
+                if context_warning:
+                    warning = context_warning
+            except Exception as exc:
+                warning = f"요약 문서용 chunk context 생성 실패: {exc}"
+
+        markdown = fallback_markdown
+        if llm_ready and client is not None:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_summary_document_prompt(payload, groups, sections, taxonomy_context),
+                    stage="canvas_summary_document",
+                    temperature=0.18,
+                    max_tokens=3600,
+                )
+                markdown = _normalize_summary_document_markdown(parsed, fallback_markdown)
+                used_llm = True
+                RT.last_llm_parsed_json = {
+                    "stage": "canvas_summary_document",
+                    "source_signature": source_signature,
+                    "markdown": markdown,
+                }
+                RT.last_llm_parsed_at = _now_ts()
+            except Exception as exc:
+                warning = f"{warning} 요약 문서 LLM 생성 실패: {exc}".strip()
+        elif not warning:
+            warning = llm_note or "LLM 미연결 상태로 로컬 요약 문서를 만들었습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "source_signature": source_signature,
+            "markdown": markdown,
+            "sections": sections,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "summary_document",
         signature,
         _compute,
     )

@@ -597,6 +597,39 @@ export interface CanvasFinalSolutionSummary {
   topics: CanvasFinalSolutionSummaryTopic[];
   items: CanvasFinalSolutionSummaryItem[];
   markdown: string;
+  document_status?: "empty" | "ready" | "edited" | string;
+  generated_at?: string;
+  used_llm?: boolean;
+  warning?: string;
+  source_signature?: string;
+  sections?: CanvasSummaryDocumentSection[];
+}
+
+export interface CanvasSummaryEvidenceItem {
+  utterance_id: string;
+  speaker: string;
+  timestamp?: string;
+  text: string;
+}
+
+export interface CanvasSummaryDocumentSection {
+  group_id: string;
+  title: string;
+  status: "draft" | "review" | "final" | string;
+  status_label: string;
+  rationale?: string;
+  node_titles: string[];
+  evidence: CanvasSummaryEvidenceItem[];
+}
+
+export interface CanvasSummaryDocumentResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  source_signature: string;
+  markdown: string;
+  sections: CanvasSummaryDocumentSection[];
 }
 
 export interface MeetingGoalSuggestionResponse {
