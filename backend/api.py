@@ -1848,6 +1848,15 @@ class ProblemTaxonomyUtteranceInput(BaseModel):
     timestamp: str = ""
 
 
+class ProblemTaxonomyExistingGroupInput(BaseModel):
+    group_id: str = ""
+    parent_group_id: str = ""
+    depth: int = 0
+    topic: str = ""
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    source_summary_items: list[str] = Field(default_factory=list)
+
+
 class ProblemTaxonomyGenerateInput(BaseModel):
     meeting_id: str = ""
     meeting_topic: str = ""
@@ -1856,6 +1865,7 @@ class ProblemTaxonomyGenerateInput(BaseModel):
     parent_depth: int = Field(default=-1, ge=-1, le=8)
     parent_evidence_utterance_ids: list[str] = Field(default_factory=list)
     existing_group_ids: list[str] = Field(default_factory=list)
+    existing_groups: list[ProblemTaxonomyExistingGroupInput] = Field(default_factory=list)
     utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, min_length=1, max_length=300)
     max_groups: int = Field(default=6, ge=1, le=12)
 
@@ -2461,6 +2471,149 @@ def _problem_taxonomy_utterance_dict(item: ProblemTaxonomyUtteranceInput) -> dic
     }
 
 
+def _problem_taxonomy_existing_group_dict(item: ProblemTaxonomyExistingGroupInput) -> dict[str, Any]:
+    return {
+        "group_id": _safe_text(item.group_id),
+        "parent_group_id": _safe_text(item.parent_group_id),
+        "depth": int(item.depth or 0),
+        "topic": _safe_text(item.topic),
+        "evidence_utterance_ids": _dedup_preserve(
+            [_safe_text(value) for value in (item.evidence_utterance_ids or []) if _safe_text(value)],
+            limit=80,
+        ),
+        "source_summary_items": _dedup_preserve(
+            [_safe_text(value) for value in (item.source_summary_items or []) if _safe_text(value)],
+            limit=8,
+        ),
+    }
+
+
+def _problem_taxonomy_topic_key(raw: Any) -> str:
+    text = _strip_leading_timestamp(raw).lower()
+    text = re.sub(r"[^a-z0-9가-힣]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _problem_taxonomy_topic_token_set(raw: Any) -> set[str]:
+    return set(_problem_taxonomy_tokens(_safe_text(raw)))
+
+
+def _problem_taxonomy_topic_overlap(left: Any, right: Any) -> float:
+    left_tokens = _problem_taxonomy_topic_token_set(left)
+    right_tokens = _problem_taxonomy_topic_token_set(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
+
+
+def _problem_taxonomy_topics_similar(left: Any, right: Any) -> bool:
+    left_key = _problem_taxonomy_topic_key(left)
+    right_key = _problem_taxonomy_topic_key(right)
+    if not left_key or not right_key:
+        return False
+    if left_key == right_key:
+        return True
+
+    left_tokens = _problem_taxonomy_topic_token_set(left)
+    right_tokens = _problem_taxonomy_topic_token_set(right)
+    if min(len(left_tokens), len(right_tokens)) < 2:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    return overlap >= 2 and overlap / max(1, min(len(left_tokens), len(right_tokens))) >= 0.8
+
+
+def _problem_taxonomy_scope_existing_groups(payload: ProblemTaxonomyGenerateInput) -> list[dict[str, Any]]:
+    parent_group_id = _safe_text(payload.parent_group_id)
+    groups = [
+        _problem_taxonomy_existing_group_dict(item)
+        for item in (payload.existing_groups or [])
+        if _safe_text(item.group_id) or _safe_text(item.topic)
+    ]
+    return [
+        group
+        for group in groups
+        if _safe_text(group.get("parent_group_id")) == parent_group_id
+        or _safe_text(group.get("group_id")) == parent_group_id
+    ][:40]
+
+
+def _problem_taxonomy_evidence_overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / max(1, min(len(left), len(right)))
+
+
+def _problem_taxonomy_is_duplicate_group(
+    payload: ProblemTaxonomyGenerateInput,
+    group: dict[str, Any],
+) -> bool:
+    parent_group_id = _safe_text(payload.parent_group_id)
+    group_id = _safe_text(group.get("group_id"))
+    topic = _safe_text(group.get("topic"))
+    if group_id and group_id in {_safe_text(item) for item in (payload.existing_group_ids or []) if _safe_text(item)}:
+        return True
+    if _safe_text(payload.parent_topic) and _problem_taxonomy_topics_similar(topic, payload.parent_topic):
+        return True
+
+    candidate_evidence = {
+        _safe_text(item)
+        for item in (group.get("evidence_utterance_ids") or [])
+        if _safe_text(item)
+    }
+    for existing in _problem_taxonomy_scope_existing_groups(payload):
+        existing_id = _safe_text(existing.get("group_id"))
+        if group_id and existing_id == group_id:
+            return True
+        if existing_id == parent_group_id and _problem_taxonomy_topics_similar(topic, existing.get("topic")):
+            return True
+        if _safe_text(existing.get("parent_group_id")) != parent_group_id:
+            continue
+        if _problem_taxonomy_topics_similar(topic, existing.get("topic")):
+            return True
+
+        existing_evidence = {
+            _safe_text(item)
+            for item in (existing.get("evidence_utterance_ids") or [])
+            if _safe_text(item)
+        }
+        if (
+            _problem_taxonomy_evidence_overlap(candidate_evidence, existing_evidence) >= 0.75
+            and _problem_taxonomy_topic_overlap(topic, existing.get("topic")) >= 0.5
+        ):
+            return True
+    return False
+
+
+def _filter_problem_taxonomy_duplicate_groups(
+    payload: ProblemTaxonomyGenerateInput,
+    groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen_topics: list[str] = []
+    seen_evidence: list[set[str]] = []
+    for group in groups:
+        topic = _safe_text(group.get("topic"))
+        evidence = {
+            _safe_text(item)
+            for item in (group.get("evidence_utterance_ids") or [])
+            if _safe_text(item)
+        }
+        if _problem_taxonomy_is_duplicate_group(payload, group):
+            continue
+        if any(_problem_taxonomy_topics_similar(topic, previous_topic) for previous_topic in seen_topics):
+            continue
+        if any(
+            _problem_taxonomy_evidence_overlap(evidence, previous_evidence) >= 0.85
+            and _problem_taxonomy_topic_overlap(topic, seen_topics[index]) >= 0.5
+            for index, previous_evidence in enumerate(seen_evidence)
+        ):
+            continue
+        output.append(group)
+        seen_topics.append(topic)
+        seen_evidence.append(evidence)
+    return output
+
+
 def _split_taxonomy_clauses(text: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", _strip_leading_timestamp(text)).strip()
     if not normalized:
@@ -2687,6 +2840,14 @@ def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str
         "meeting_topic": _safe_text(payload.meeting_topic),
         "parent_topic": parent_topic,
         "parent_group_id": _safe_text(payload.parent_group_id),
+        "existing_groups_in_scope": [
+            {
+                "group_id": group.get("group_id", ""),
+                "topic": group.get("topic", ""),
+                "evidence_utterance_ids": group.get("evidence_utterance_ids", [])[:20],
+            }
+            for group in _problem_taxonomy_scope_existing_groups(payload)
+        ],
         "utterances": rows[:160],
         "max_groups": payload.max_groups,
     }
@@ -2702,6 +2863,7 @@ def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str
         "- topic은 명사 하나만 강제하지 말고, 논의 핵심이 드러나는 짧은 구/문장으로 쓴다.\n"
         "- source_summary_items는 실제 발화를 1~3문장으로 압축한 근거 요약이다.\n"
         "- evidence_utterance_ids에는 그 분류를 뒷받침하는 utterance id만 넣는다.\n"
+        "- existing_groups_in_scope와 같은 topic 또는 같은 근거의 분류는 다시 만들지 않는다.\n"
         "- 근거가 부족하면 groups를 빈 배열로 둔다.\n\n"
         "[입력 JSON]\n"
         f"{json.dumps(input_payload, ensure_ascii=False, indent=2)}\n\n"
@@ -9256,6 +9418,13 @@ def post_canvas_problem_taxonomy(payload: ProblemTaxonomyGenerateInput):
             warning = llm_note or "LLM 미연결 상태이며 로컬 분류를 만들 충분한 발화가 없습니다."
         else:
             warning = llm_note or "LLM 미연결 상태로 로컬 분류를 사용했습니다."
+
+        group_count_before_dedupe = len(groups)
+        groups = _filter_problem_taxonomy_duplicate_groups(payload, groups)
+        skipped_group_count = group_count_before_dedupe - len(groups)
+        if skipped_group_count > 0:
+            dedupe_note = f"이미 생성된 분류와 겹치는 {skipped_group_count}개를 제외했습니다."
+            warning = f"{warning} {dedupe_note}".strip() if warning else dedupe_note
 
         return {
             "ok": True,

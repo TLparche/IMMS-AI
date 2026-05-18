@@ -165,6 +165,14 @@ export async function generateCanvasProblemTaxonomy(payload: {
   parent_depth?: number;
   parent_evidence_utterance_ids?: string[];
   existing_group_ids?: string[];
+  existing_groups?: Array<{
+    group_id: string;
+    parent_group_id?: string;
+    depth?: number;
+    topic: string;
+    evidence_utterance_ids?: string[];
+    source_summary_items?: string[];
+  }>;
   max_groups?: number;
   utterances: Array<{
     id: string;
