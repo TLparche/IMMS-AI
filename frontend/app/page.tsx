@@ -257,6 +257,8 @@ function HomeContent() {
   const [isRecording, setIsRecording] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const [loadingMeeting, setLoadingMeeting] = useState(true);
+  const [meetingLoadError, setMeetingLoadError] = useState("");
+  const [meetingReloadToken, setMeetingReloadToken] = useState(0);
   const [canvasSyncStatus, setCanvasSyncStatus] = useState("실시간 전사가 저장되고 키워드 버블에 반영됩니다.");
   const [autoSyncing] = useState(false);
   const [incomingCanvasSync, setIncomingCanvasSync] = useState<CanvasRealtimeSyncPayload | null>(null);
@@ -471,7 +473,7 @@ function HomeContent() {
     };
 
     void loadMeeting();
-  }, [applyMeetingStateToUi, user, meetingId, stopAudioImportPolling]);
+  }, [applyMeetingStateToUi, user, meetingId, meetingReloadToken, stopAudioImportPolling]);
 
   useEffect(() => {
     if (!user || !meetingId) return;
