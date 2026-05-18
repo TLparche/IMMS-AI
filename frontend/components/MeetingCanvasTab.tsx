@@ -2040,35 +2040,36 @@ function buildPrintableSummaryDocumentHtml(markdown: string) {
     <h1 class="document-title">최종 정리 문서</h1>
     ${summaryMarkdownToPrintableHtml(markdown)}
   </main>
-  <script>
-    window.setTimeout(function () {
-      window.focus();
-      window.print();
-    }, 400);
-  </script>
 </body>
 </html>`;
 }
 
-function showSummaryPdfPreparingWindow(previewWindow: Window | null) {
-  if (!previewWindow) return;
-  previewWindow.document.write(
-    "<!doctype html><html><head><title>PDF 준비 중</title></head><body style=\"font-family:sans-serif;padding:32px;color:#333\"><h1 style=\"font-size:20px\">최종 정리 문서를 준비하고 있습니다.</h1><p>잠시 후 PDF 저장 화면이 열립니다.</p></body></html>",
-  );
-  previewWindow.document.close();
-}
+function openPrintableSummaryDocumentPdf(markdown: string) {
+  const iframe = document.createElement("iframe");
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  iframe.style.opacity = "0";
+  iframe.setAttribute("aria-hidden", "true");
+  document.body.appendChild(iframe);
 
-function openPrintableSummaryDocumentPdf(input: {
-  markdown: string;
-  previewWindow?: Window | null;
-}) {
-  const targetWindow = input.previewWindow && !input.previewWindow.closed ? input.previewWindow : window.open("", "_blank");
-  if (!targetWindow) {
-    throw new Error("PDF 미리보기 창을 열 수 없습니다.");
+  const frameWindow = iframe.contentWindow;
+  const frameDocument = iframe.contentDocument || frameWindow?.document;
+  if (!frameWindow || !frameDocument) {
+    iframe.remove();
+    return false;
   }
-  targetWindow.document.open();
-  targetWindow.document.write(buildPrintableSummaryDocumentHtml(input.markdown));
-  targetWindow.document.close();
+
+  frameDocument.open();
+  frameDocument.write(buildPrintableSummaryDocumentHtml(markdown));
+  frameDocument.close();
+  frameWindow.focus();
+  frameWindow.print();
+  window.setTimeout(() => iframe.remove(), 60000);
+  return true;
 }
 
 function hydrateProblemGroups(
@@ -13237,10 +13238,11 @@ export default function MeetingCanvasTab({
     const shouldDownloadSummaryPdf = shouldOfferSummaryPdf
       ? window.confirm("최종 정리 문서를 PDF로 저장하고 바로 보시겠습니까?")
       : false;
-    const summaryPdfPreviewWindow = shouldDownloadSummaryPdf ? window.open("", "_blank") : null;
-    if (summaryPdfPreviewWindow) {
-      summaryPdfPreviewWindow.opener = null;
-      showSummaryPdfPreparingWindow(summaryPdfPreviewWindow);
+    if (shouldDownloadSummaryPdf) {
+      const printStarted = openPrintableSummaryDocumentPdf(finalSummarySnapshot.markdown);
+      if (!printStarted) {
+        alert("PDF 저장 화면을 열 수 없습니다. 브라우저 인쇄 메뉴에서 직접 PDF로 저장해 주세요.");
+      }
     }
     setEndMeetingSaving(true);
 
@@ -13263,25 +13265,12 @@ export default function MeetingCanvasTab({
       } catch (error) {
         console.error("Failed to save final solution summary before ending meeting:", error);
         alert("최종 결과 저장에 실패했습니다. 결과 확인에 표시되지 않을 수 있어 회의 종료를 중단했습니다.");
-        summaryPdfPreviewWindow?.close();
         setEndMeetingSaving(false);
         return;
       }
     }
 
     try {
-      if (shouldDownloadSummaryPdf) {
-        try {
-          openPrintableSummaryDocumentPdf({
-            markdown: finalSummarySnapshot.markdown,
-            previewWindow: summaryPdfPreviewWindow,
-          });
-        } catch (error) {
-          console.error("Failed to export final summary PDF:", error);
-          alert("PDF 생성에 실패했습니다. 회의 종료는 계속 진행합니다.");
-          summaryPdfPreviewWindow?.close();
-        }
-      }
       await onEndMeeting?.();
       setEndMeetingConfirmOpen(false);
       setEndMeetingPreview(null);
