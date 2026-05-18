@@ -28,6 +28,7 @@ import {
   getCanvasProblemDiscussionWorkspaceJob,
   generateProblemGroupConclusion,
   generateProblemGroupingRationale,
+  generateProblemStructure,
   generateCanvasProblemTaxonomy,
   generateCanvasSolutionStage,
   flushCanvasPersonalNotes,
@@ -82,6 +83,7 @@ type ProblemCanvasToolbarAction =
   | "debug-refresh-chunks"
   | "structure-start"
   | "structure-back"
+  | "structure-ai-group"
   | "structure-add-group"
   | "structure-refresh"
   | "note"
@@ -1520,6 +1522,51 @@ function pruneProblemStructureGroups(
     ...group,
     nodeIds: group.nodeIds.filter((nodeId) => validNodeIds.has(nodeId)),
   }));
+}
+
+function normalizeProblemStructureGroupsFromResponse(
+  groups: Array<{
+    id?: string;
+    title?: string;
+    node_ids?: string[];
+    rationale?: string;
+    created_by?: string;
+  }>,
+  nodes: ProblemStructureNodeViewModel[],
+): ProblemStructureGroupViewModel[] {
+  const validNodeIds = new Set(nodes.map((node) => node.id));
+  const usedNodeIds = new Set<string>();
+  const usedGroupIds = new Set<string>();
+
+  return groups
+    .map((group, index) => {
+      const nodeIds = (group.node_ids || []).filter((nodeId) => {
+        if (!validNodeIds.has(nodeId) || usedNodeIds.has(nodeId)) {
+          return false;
+        }
+        usedNodeIds.add(nodeId);
+        return true;
+      });
+      if (nodeIds.length === 0) {
+        return null;
+      }
+      const baseId = group.id || `structure-ai-group-${index + 1}`;
+      let id = baseId;
+      let suffix = 2;
+      while (usedGroupIds.has(id)) {
+        id = `${baseId}-${suffix}`;
+        suffix += 1;
+      }
+      usedGroupIds.add(id);
+      return {
+        id,
+        title: group.title?.trim() || `AI 구조화 그룹 ${index + 1}`,
+        nodeIds,
+        rationale: group.rationale?.trim() || "",
+        createdBy: group.created_by === "user" ? "user" : "ai",
+      } satisfies ProblemStructureGroupViewModel;
+    })
+    .filter((group): group is ProblemStructureGroupViewModel => Boolean(group));
 }
 
 function hydrateProblemGroups(
@@ -3630,6 +3677,7 @@ export default function MeetingCanvasTab({
   const [problemStructureSetupOpen, setProblemStructureSetupOpen] = useState(false);
   const [problemStructureNodes, setProblemStructureNodes] = useState<ProblemStructureNodeViewModel[]>([]);
   const [problemStructureGroups, setProblemStructureGroups] = useState<ProblemStructureGroupViewModel[]>([]);
+  const [problemStructurePending, setProblemStructurePending] = useState(false);
   const [solutionTopics, setSolutionTopics] = useState<SolutionTopicViewModel[]>([]);
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
   const [editingSolutionTopicId, setEditingSolutionTopicId] = useState("");
@@ -3784,6 +3832,7 @@ export default function MeetingCanvasTab({
   const failedProblemDiscussionRef = useRef<{ signature: string; failedAt: number; detail: string } | null>(null);
   const problemDiscussionFlushTimerRef = useRef<number | null>(null);
   const problemDiscussionInFlightRef = useRef(false);
+  const problemStructureRequestSeqRef = useRef(0);
   const latestSharedWorkspaceRef = useRef<{
     meetingGoal: string;
     meetingGoalContext: string;
@@ -4113,6 +4162,7 @@ export default function MeetingCanvasTab({
     setProblemStructureSetupOpen(false);
     setProblemStructureNodes([]);
     setProblemStructureGroups([]);
+    setProblemStructurePending(false);
     setSolutionTopics([]);
     setPersonalNotes([]);
     setAgendaOverrides({});
@@ -4128,6 +4178,7 @@ export default function MeetingCanvasTab({
     setProblemStructureSetupOpen(false);
     setProblemStructureNodes([]);
     setProblemStructureGroups([]);
+    setProblemStructurePending(false);
     setProblemDefinitionStagePending(false);
     setSolutionStagePending(false);
     setSelectedProblemGroupId("");
@@ -4243,6 +4294,7 @@ export default function MeetingCanvasTab({
         setProblemStructureSetupOpen(false);
         setProblemStructureNodes([]);
         setProblemStructureGroups([]);
+        setProblemStructurePending(false);
         analysisSignatureAtImportRef.current = nextImportedState
           ? buildMeetingStateSignature(nextImportedState)
           : "";
@@ -4318,6 +4370,7 @@ export default function MeetingCanvasTab({
         setProblemStructureSetupOpen(false);
         setProblemStructureNodes([]);
         setProblemStructureGroups([]);
+        setProblemStructurePending(false);
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           meeting_goal: "",
           meeting_goal_context: "",
@@ -6711,7 +6764,86 @@ export default function MeetingCanvasTab({
     setProblemStructureSetupOpen(true);
   }, [problemDefinitionMode, problemGroups.length, problemStructureMethod]);
 
-  const handleStartProblemStructure = useCallback(() => {
+  const runProblemStructureGrouping = useCallback(
+    async (options?: { nodes?: ProblemStructureNodeViewModel[]; method?: ProblemStructureMethod }) => {
+      const structureNodes =
+        options?.nodes && options.nodes.length > 0
+          ? options.nodes
+          : problemStructureNodes.length > 0
+            ? problemStructureNodes
+            : buildProblemStructureNodesFromGroups(problemGroups);
+      if (structureNodes.length === 0) {
+        setActivityMessage("AI가 묶을 문제정의 노드가 아직 없습니다.");
+        return;
+      }
+
+      const requestSeq = problemStructureRequestSeqRef.current + 1;
+      problemStructureRequestSeqRef.current = requestSeq;
+      const method = options?.method || problemStructureMethod;
+      setProblemStructurePending(true);
+      setActivityMessage(`${problemStructureMethodLabel(method)} 기준으로 AI가 노드를 묶고 있습니다.`);
+
+      try {
+        const result = await generateProblemStructure({
+          meeting_id: meetingId,
+          meeting_topic: meetingTopicForAi,
+          method,
+          nodes: structureNodes.map((node) => ({
+            id: node.id,
+            title: node.title,
+            body: node.body,
+            status: node.status,
+            depth: node.depth,
+          })),
+          existing_groups: problemStructureGroups.map((group) => ({
+            id: group.id,
+            title: group.title,
+            node_ids: group.nodeIds,
+            rationale: group.rationale,
+          })),
+          max_groups: Math.min(8, Math.max(1, Math.ceil(structureNodes.length / 2))),
+        });
+        if (problemStructureRequestSeqRef.current !== requestSeq) {
+          return;
+        }
+
+        const nextGroups = normalizeProblemStructureGroupsFromResponse(result.groups || [], structureNodes);
+        if (nextGroups.length === 0) {
+          setActivityMessage(result.warning || "AI가 유효한 구조화 그룹을 만들지 못했습니다.");
+          return;
+        }
+
+        setProblemDefinitionMode("ai");
+        setProblemStructureMethod(method);
+        setProblemStructureNodes(structureNodes);
+        setProblemStructureGroups(nextGroups);
+        setActivityMessage(
+          result.warning ||
+            `${result.used_llm ? "AI" : "로컬 fallback"}가 ${structureNodes.length}개 노드를 ${nextGroups.length}개 그룹으로 묶었습니다.`,
+        );
+      } catch (error) {
+        if (problemStructureRequestSeqRef.current !== requestSeq) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setActivityMessage(`AI 구조화 실패: ${message}`);
+      } finally {
+        if (problemStructureRequestSeqRef.current === requestSeq) {
+          setProblemStructurePending(false);
+        }
+      }
+    },
+    [
+      meetingId,
+      meetingTopicForAi,
+      problemGroups,
+      problemStructureGroups,
+      problemStructureMethod,
+      problemStructureNodes,
+    ],
+  );
+
+  const handleStartProblemStructure = useCallback(async () => {
     if (problemGroups.length === 0) {
       setActivityMessage("구조화할 문제정의 노드가 아직 없습니다.");
       return;
@@ -6731,10 +6863,17 @@ export default function MeetingCanvasTab({
     setActivityMessage(
       `${problemStructureMethodLabel(problemStructureDraftMethod)} · ${problemDefinitionModeLabel(nextMode)} 방식으로 정의 2단계를 시작했습니다. 노드 ${nextNodes.length}개를 가져왔습니다.`,
     );
+    if (nextMode === "ai") {
+      await runProblemStructureGrouping({
+        nodes: nextNodes,
+        method: problemStructureDraftMethod,
+      });
+    }
   }, [
     problemGroups.length,
     problemStructureDraftMethod,
     problemStructureDraftMode,
+    runProblemStructureGrouping,
     syncProblemStructureNodesFromDefinition,
   ]);
 
@@ -8747,6 +8886,7 @@ export default function MeetingCanvasTab({
           setProblemStructureSetupOpen(false);
           setProblemStructureNodes([]);
           setProblemStructureGroups([]);
+          setProblemStructurePending(false);
         }
         setProblemDefinitionMode("");
         setSelectedProblemGroupId("");
@@ -8770,6 +8910,7 @@ export default function MeetingCanvasTab({
         setProblemStructureSetupOpen(false);
         setProblemStructureNodes([]);
         setProblemStructureGroups([]);
+        setProblemStructurePending(false);
         setSelectedProblemGroupId("");
         setSelectedProblemSourceNodeId("");
         setSelectedNodeId("");
@@ -8799,6 +8940,9 @@ export default function MeetingCanvasTab({
       setProblemGroups(nextGroups);
       setProblemDefinitionPhase("explore");
       setProblemStructureSetupOpen(false);
+      setProblemStructureNodes([]);
+      setProblemStructureGroups([]);
+      setProblemStructurePending(false);
       const nextSelectedGroupId = nextGroups[0]?.group_id || "";
       setSelectedProblemGroupId(nextSelectedGroupId);
       setSelectedNodeId(nextSelectedGroupId ? `problem-${nextSelectedGroupId}` : "");
@@ -8968,6 +9112,7 @@ export default function MeetingCanvasTab({
 
       if (nextStage !== "problem-definition") {
         setProblemStructureSetupOpen(false);
+        setProblemStructurePending(false);
         setStage(nextStage);
         return;
       }
@@ -8984,6 +9129,7 @@ export default function MeetingCanvasTab({
       setProblemDefinitionMode("");
       setProblemDefinitionPhase("explore");
       setProblemStructureSetupOpen(false);
+      setProblemStructurePending(false);
       await handleGenerateProblemDefinition();
       setLeftPanelTab("detail");
       return;
@@ -9033,7 +9179,7 @@ export default function MeetingCanvasTab({
   );
   const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] =
     problemDefinitionPhase === "structure"
-      ? ["structure-back", "structure-add-group", "structure-refresh"]
+      ? ["structure-back", "structure-ai-group", "structure-add-group", "structure-refresh"]
       : ["group", "problem-link", "debug-regenerate", "debug-refresh-chunks", "structure-start"];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
@@ -9043,6 +9189,7 @@ export default function MeetingCanvasTab({
     if (action === "debug-refresh-chunks") return "요약 캐시 재생성";
     if (action === "structure-start") return "구조화 시작";
     if (action === "structure-back") return "정의 1단계";
+    if (action === "structure-ai-group") return problemStructurePending ? "AI 묶는 중" : "AI 묶기";
     if (action === "structure-add-group") return "그룹 추가";
     if (action === "structure-refresh") return "다시 가져오기";
     if (action === "note") return "의견추가";
@@ -9053,6 +9200,7 @@ export default function MeetingCanvasTab({
   const isProblemToolbarActionActive = (action: ProblemCanvasToolbarAction) => {
     if (action === "debug-regenerate" || action === "debug-refresh-chunks") return problemDefinitionStagePending;
     if (action === "structure-start") return problemDefinitionPhase === "structure" || problemStructureSetupOpen;
+    if (action === "structure-ai-group") return problemStructurePending;
     if (action === "problem-link") return Boolean(pendingProblemGroupLinkId);
     if (action === "adopt") return selectedProblemGroup?.status === "final";
     return armedCanvasTool === action;
@@ -12275,6 +12423,11 @@ export default function MeetingCanvasTab({
       return;
     }
 
+    if (action === "structure-ai-group") {
+      void runProblemStructureGrouping();
+      return;
+    }
+
     if (action === "structure-add-group") {
       handleAddProblemStructureGroup();
       return;
@@ -13397,6 +13550,7 @@ export default function MeetingCanvasTab({
                         setProblemStructureSetupOpen(false);
                         setProblemStructureNodes([]);
                         setProblemStructureGroups([]);
+                        setProblemStructurePending(false);
                         setSelectedProblemGroupId("");
                         setSelectedSolutionTopicId("");
                         setSelectedNodeId("");
@@ -13871,7 +14025,7 @@ export default function MeetingCanvasTab({
                               </span>
                               <span className="mt-1 block text-sm leading-6 text-[#4d4d4d]">
                                 {mode === "ai"
-                                  ? "이번 버전에서는 빈 구조화 캔버스로 진입하고, 자동 묶기는 다음 작업에서 연결합니다."
+                                  ? "AI가 현재 노드들을 먼저 묶고, 사용자가 이후에 수정합니다."
                                   : "사용자가 그룹을 만들고 노드를 옮기며 구조화합니다."}
                               </span>
                             </button>
@@ -13888,9 +14042,10 @@ export default function MeetingCanvasTab({
                     <button
                       type="button"
                       onClick={handleStartProblemStructure}
-                      className="rounded-[10px] bg-[#1b59f8] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#164be0]"
+                      disabled={problemStructurePending}
+                      className="rounded-[10px] bg-[#1b59f8] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      정의 2단계로 이동
+                      {problemStructurePending ? "AI 묶는 중" : "정의 2단계로 이동"}
                     </button>
                   </div>
                 </div>
@@ -13908,6 +14063,9 @@ export default function MeetingCanvasTab({
                       <p className="mt-1 text-sm font-semibold text-black">
                         {problemStructureMethodLabel(problemStructureMethod)} · {problemDefinitionModeLabel(problemDefinitionMode)}
                       </p>
+                      {problemStructurePending ? (
+                        <p className="mt-1 text-xs font-medium text-[#1b59f8]">AI가 구조화 그룹을 생성하는 중입니다.</p>
+                      ) : null}
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {(["affinity", "card-sorting"] as ProblemStructureMethod[]).map((method) => {
@@ -13916,13 +14074,14 @@ export default function MeetingCanvasTab({
                           <button
                             key={`structure-method-${method}`}
                             type="button"
+                            disabled={problemStructurePending}
                             onClick={() => {
                               setProblemStructureMethod(method);
                               setActivityMessage(`${problemStructureMethodLabel(method)} 방식으로 시각 표현을 바꿨습니다. 기존 그룹은 유지됩니다.`);
                             }}
                             className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
                               active ? "bg-[#1b59f8] text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-[#eef4ff] hover:text-[#1b59f8]"
-                            }`}
+                            } disabled:cursor-not-allowed disabled:opacity-50`}
                           >
                             {problemStructureMethodLabel(method)}
                           </button>
@@ -13936,17 +14095,20 @@ export default function MeetingCanvasTab({
                           <button
                             key={`structure-mode-${mode}`}
                             type="button"
+                            disabled={problemStructurePending}
                             onClick={() => {
                               setProblemDefinitionMode(mode);
+                              if (mode === "ai") {
+                                void runProblemStructureGrouping();
+                                return;
+                              }
                               setActivityMessage(
-                                mode === "ai"
-                                  ? "AI 초안 모드로 표시했습니다. 자동 묶기는 다음 작업에서 연결합니다."
-                                  : "직접 구성 모드로 표시했습니다.",
+                                "직접 구성 모드로 표시했습니다.",
                               );
                             }}
                             className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
                               active ? "bg-black text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-black/5 hover:text-black"
-                            }`}
+                            } disabled:cursor-not-allowed disabled:opacity-50`}
                           >
                             {problemDefinitionModeLabel(mode)}
                           </button>
@@ -14056,6 +14218,8 @@ export default function MeetingCanvasTab({
                           problemDefinitionStagePending ||
                           ((item === "debug-regenerate" || item === "debug-refresh-chunks") && busy) ||
                           (item === "structure-start" && problemGroups.length === 0) ||
+                          (item === "structure-ai-group" &&
+                            (problemStructurePending || (problemStructureNodes.length === 0 && problemGroups.length === 0))) ||
                           ((item === "structure-add-group" || item === "structure-refresh") && problemDefinitionPhase !== "structure") ||
                           (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)
                         }

@@ -1931,6 +1931,30 @@ class ProblemGroupingRationaleGenerateInput(BaseModel):
     utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, max_length=300)
 
 
+class ProblemStructureNodeInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    body: str = ""
+    status: str = "draft"
+    depth: int = Field(default=0, ge=0, le=8)
+
+
+class ProblemStructureExistingGroupInput(BaseModel):
+    id: str = ""
+    title: str = ""
+    node_ids: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class ProblemStructureGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    method: str = "affinity"
+    nodes: list[ProblemStructureNodeInput] = Field(default_factory=list, max_length=80)
+    existing_groups: list[ProblemStructureExistingGroupInput] = Field(default_factory=list, max_length=40)
+    max_groups: int = Field(default=6, ge=1, le=12)
+
+
 class MeetingGoalGenerateInput(BaseModel):
     meeting_id: str = ""
     topic: str = ""
@@ -4390,6 +4414,251 @@ def _build_problem_grouping_rationale_prompt(payload: ProblemGroupingRationaleGe
         "- basis_items는 2~4개, 입력에 근거한 짧은 문장 또는 구.\n"
         "- 확실하지 않은 경우 '~로 보입니다'처럼 추정임을 드러낸다.\n"
         "- basis_items에는 입력에 없는 내용을 추가하지 않는다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _normalize_problem_structure_method(raw: Any) -> str:
+    text = _safe_text(raw).lower().replace("_", "-").strip()
+    return "card-sorting" if text in {"card-sorting", "card sorting", "cardsorting"} else "affinity"
+
+
+def _problem_structure_node_dict(item: ProblemStructureNodeInput) -> dict[str, Any]:
+    title = _normalize_problem_summary_label(item.title, "문제정의 노드", max_len=42)
+    body = _to_summary_point(item.body, max_len=120)
+    return {
+        "id": _safe_text(item.id) or f"structure-node-{_stable_short_id(title + body)}",
+        "title": title,
+        "body": body,
+        "status": _safe_text(item.status, "draft"),
+        "depth": max(0, min(8, int(item.depth or 0))),
+    }
+
+
+def _problem_structure_node_tokens(node: dict[str, Any]) -> set[str]:
+    return set(_problem_taxonomy_tokens(f"{node.get('title', '')} {node.get('body', '')}"))
+
+
+def _problem_structure_group_title(nodes: list[dict[str, Any]], index: int) -> str:
+    if len(nodes) == 1:
+        return _normalize_problem_summary_label(nodes[0].get("title"), f"구조화 그룹 {index}", max_len=38)
+    token_counts: Counter[str] = Counter()
+    for node in nodes:
+        token_counts.update(_problem_structure_node_tokens(node))
+    common_tokens = [token for token, _count in token_counts.most_common(2)]
+    if common_tokens:
+        return _normalize_problem_summary_label(f"{'·'.join(common_tokens)} 관련 논의 묶음", f"구조화 그룹 {index}", max_len=38)
+    return _normalize_problem_summary_label(nodes[0].get("title"), f"구조화 그룹 {index}", max_len=38)
+
+
+def _problem_structure_group_rationale(nodes: list[dict[str, Any]], method: str) -> str:
+    titles = [_safe_text(node.get("title")) for node in nodes if _safe_text(node.get("title"))]
+    visible_titles = ", ".join(titles[:3])
+    if len(nodes) <= 1:
+        return f"{visible_titles or '이 노드'}는 별도 검토가 필요한 단일 논의로 분리했습니다."
+    if method == "card-sorting":
+        return f"{visible_titles} 등이 같은 분류 기준으로 읽혀 하나의 카드 그룹으로 묶었습니다."
+    return f"{visible_titles} 등이 의미상 가까운 논의 흐름으로 보여 함께 묶었습니다."
+
+
+def _build_problem_structure_groups_local(payload: ProblemStructureGenerateInput) -> list[dict[str, Any]]:
+    nodes = [
+        _problem_structure_node_dict(item)
+        for item in payload.nodes or []
+        if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
+    ]
+    if not nodes:
+        return []
+
+    max_groups = max(1, min(int(payload.max_groups or 6), len(nodes)))
+    clusters: list[dict[str, Any]] = []
+    for node in nodes:
+        tokens = _problem_structure_node_tokens(node)
+        best_cluster: dict[str, Any] | None = None
+        best_score = 0
+        for cluster in clusters:
+            cluster_tokens = set(cluster.get("tokens") or [])
+            score = len(tokens & cluster_tokens)
+            if score > best_score:
+                best_score = score
+                best_cluster = cluster
+
+        if best_cluster is not None and best_score >= 2:
+            best_cluster["nodes"].append(node)
+            best_cluster["tokens"] = _dedup_preserve(
+                [*(best_cluster.get("tokens") or []), *tokens],
+                limit=24,
+            )
+            continue
+
+        if len(clusters) < max_groups:
+            clusters.append({"nodes": [node], "tokens": list(tokens)})
+            continue
+
+        fallback_cluster = min(clusters, key=lambda item: len(item.get("nodes") or []))
+        fallback_cluster["nodes"].append(node)
+        fallback_cluster["tokens"] = _dedup_preserve(
+            [*(fallback_cluster.get("tokens") or []), *tokens],
+            limit=24,
+        )
+
+    method = _normalize_problem_structure_method(payload.method)
+    output: list[dict[str, Any]] = []
+    used_group_ids: set[str] = set()
+    for index, cluster in enumerate(clusters, start=1):
+        cluster_nodes = [node for node in cluster.get("nodes") or [] if isinstance(node, dict)]
+        if not cluster_nodes:
+            continue
+        title = _problem_structure_group_title(cluster_nodes, index)
+        group_id_base = f"structure-ai-{_stable_short_id(title)}"
+        group_id = group_id_base
+        suffix = 2
+        while group_id in used_group_ids:
+            group_id = f"{group_id_base}-{suffix}"
+            suffix += 1
+        used_group_ids.add(group_id)
+        output.append(
+            {
+                "id": group_id,
+                "title": title,
+                "node_ids": [_safe_text(node.get("id")) for node in cluster_nodes if _safe_text(node.get("id"))],
+                "rationale": _problem_structure_group_rationale(cluster_nodes, method),
+                "created_by": "ai",
+            }
+        )
+    return output
+
+
+def _normalize_problem_structure_llm_groups(
+    payload: ProblemStructureGenerateInput,
+    raw_groups: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_groups, list):
+        return []
+    valid_nodes = [
+        _problem_structure_node_dict(item)
+        for item in payload.nodes or []
+        if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
+    ]
+    node_by_id = {_safe_text(node.get("id")): node for node in valid_nodes if _safe_text(node.get("id"))}
+    max_groups = max(1, min(int(payload.max_groups or 6), max(len(node_by_id), 1)))
+    used_node_ids: set[str] = set()
+    used_group_ids: set[str] = set()
+    output: list[dict[str, Any]] = []
+
+    for index, raw in enumerate(raw_groups, start=1):
+        if not isinstance(raw, dict) or len(output) >= max_groups:
+            continue
+        node_ids = [
+            _safe_text(item)
+            for item in (raw.get("node_ids") or raw.get("nodeIds") or [])
+            if _safe_text(item) in node_by_id and _safe_text(item) not in used_node_ids
+        ]
+        if not node_ids:
+            continue
+        title = _normalize_problem_summary_label(
+            raw.get("title") or raw.get("name") or raw.get("label"),
+            f"구조화 그룹 {index}",
+            max_len=40,
+        )
+        group_id_base = _safe_text(raw.get("id")) or f"structure-ai-{_stable_short_id(title)}"
+        group_id = group_id_base
+        suffix = 2
+        while group_id in used_group_ids:
+            group_id = f"{group_id_base}-{suffix}"
+            suffix += 1
+        used_group_ids.add(group_id)
+        used_node_ids.update(node_ids)
+        rationale = _to_summary_point(
+            raw.get("rationale") or raw.get("reason") or raw.get("description"),
+            max_len=140,
+        )
+        if not rationale:
+            rationale = _problem_structure_group_rationale([node_by_id[node_id] for node_id in node_ids], _normalize_problem_structure_method(payload.method))
+        output.append(
+            {
+                "id": group_id,
+                "title": title,
+                "node_ids": node_ids,
+                "rationale": rationale,
+                "created_by": "ai",
+            }
+        )
+
+    missing_nodes = [node for node_id, node in node_by_id.items() if node_id not in used_node_ids]
+    if missing_nodes:
+        if output:
+            for node in missing_nodes:
+                best_group = min(output, key=lambda group: len(group.get("node_ids") or []))
+                best_group["node_ids"] = [
+                    *(best_group.get("node_ids") or []),
+                    _safe_text(node.get("id")),
+                ]
+        else:
+            return _build_problem_structure_groups_local(payload)
+
+    return output
+
+
+def _build_problem_structure_prompt(payload: ProblemStructureGenerateInput) -> str:
+    method = _normalize_problem_structure_method(payload.method)
+    nodes = [
+        _problem_structure_node_dict(item)
+        for item in payload.nodes or []
+        if _safe_text(item.id) or _safe_text(item.title) or _safe_text(item.body)
+    ]
+    existing_groups = [
+        {
+            "id": _safe_text(group.id),
+            "title": _safe_text(group.title),
+            "node_ids": [_safe_text(item) for item in group.node_ids or [] if _safe_text(item)],
+            "rationale": _safe_text(group.rationale),
+        }
+        for group in payload.existing_groups or []
+        if _safe_text(group.title) or group.node_ids
+    ][:20]
+    input_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "structure_method": method,
+        "method_hint": (
+            "Affinity Diagram: 의미가 가까운 노드를 자연스럽게 묶고, 그룹 제목은 공통 논의 흐름을 드러낸다."
+            if method == "affinity"
+            else "Card Sorting: 사용자가 분류 기준을 이해하기 쉽게 그룹 카드 제목과 설명/이유를 만든다."
+        ),
+        "nodes": nodes,
+        "existing_groups": existing_groups,
+        "max_groups": payload.max_groups,
+    }
+    output_schema = {
+        "groups": [
+            {
+                "id": "structure-ai-1",
+                "title": "현장학습 목적지 후보 비교",
+                "node_ids": ["node-1", "node-2"],
+                "rationale": "두 노드 모두 목적지 후보를 비교하는 기준과 근거를 다룹니다.",
+            }
+        ]
+    }
+    return (
+        "너는 문제정의 2단계에서 정의 1단계 노드를 구조화하는 회의 퍼실리테이터다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 입력 nodes를 구조화 방식에 맞춰 여러 그룹으로 묶는다.\n"
+        "- 노드 내용은 이미 회의 STT에서 요약된 것이므로, 새 노드나 새 내용을 만들지 않는다.\n"
+        "- 모든 node id는 정확히 한 번만 어떤 group.node_ids에 들어가야 한다.\n"
+        "- 같은 그룹 안의 노드들은 사용자가 납득할 수 있는 공통 기준이 있어야 한다.\n"
+        "- 그룹 제목은 키워드 하나가 아니라, 묶음의 의미가 드러나는 짧은 문장/구로 쓴다.\n"
+        "- rationale은 사용자가 왜 묶였는지 이해할 수 있는 한국어 1문장으로 쓴다.\n"
+        "- existing_groups는 사용자가 이미 만든 구조의 참고 정보일 뿐이며, 입력 nodes 기준으로 새 그룹 목록을 반환한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(input_payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        f"{json.dumps(output_schema, ensure_ascii=False, indent=2)}\n\n"
+        "[규칙]\n"
+        f"- groups는 1~{payload.max_groups}개다.\n"
+        "- node_ids에는 입력 nodes에 있는 id만 사용한다.\n"
+        "- 입력된 모든 node id를 정확히 한 번 포함한다.\n"
+        "- '기타', '논의됨', '관련 내용' 같은 막연한 그룹명은 피한다.\n"
+        "- 근거가 약한 노드는 가장 가까운 의미의 그룹에 넣되 rationale에서 과장하지 않는다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 
@@ -10541,6 +10810,90 @@ def post_canvas_problem_grouping_rationale(payload: ProblemGroupingRationaleGene
         RT,
         normalized_meeting_id,
         f"problem_grouping_rationale:{group_id}",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/problem-structure")
+def post_canvas_problem_structure(payload: ProblemStructureGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    method = _normalize_problem_structure_method(payload.method)
+    signature = _canvas_llm_signature(
+        {
+            "meeting_topic": payload.meeting_topic,
+            "method": method,
+            "nodes": [_problem_structure_node_dict(item) for item in payload.nodes or []],
+            "existing_groups": [
+                {
+                    "id": _safe_text(group.id),
+                    "title": _safe_text(group.title),
+                    "node_ids": [_safe_text(item) for item in group.node_ids or [] if _safe_text(item)],
+                    "rationale": _safe_text(group.rationale),
+                }
+                for group in payload.existing_groups or []
+            ],
+            "max_groups": payload.max_groups,
+        }
+    )
+
+    def _compute() -> dict[str, Any]:
+        groups = _build_problem_structure_groups_local(payload)
+        used_llm = False
+        warning = ""
+
+        if not payload.nodes:
+            return {
+                "ok": True,
+                "used_llm": False,
+                "warning": "구조화할 노드가 없습니다.",
+                "generated_at": _now_ts(),
+                "groups": [],
+            }
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_problem_structure_prompt(payload),
+                    stage="canvas_problem_structure",
+                    temperature=0.15,
+                    max_tokens=1800,
+                )
+                parsed_groups = parsed.get("groups") if isinstance(parsed, dict) else None
+                llm_groups = _normalize_problem_structure_llm_groups(payload, parsed_groups)
+                if llm_groups:
+                    groups = llm_groups
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_problem_structure",
+                        "method": method,
+                        "groups": copy.deepcopy(groups),
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                elif isinstance(parsed_groups, list):
+                    warning = "LLM이 유효한 구조화 그룹을 만들지 못해 로컬 묶음을 사용했습니다."
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 묶음을 사용했습니다."
+            except Exception as exc:
+                warning = f"문제정의 구조화 LLM 생성 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 구조화 묶음을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "groups": groups,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        "problem_structure",
         signature,
         _compute,
     )

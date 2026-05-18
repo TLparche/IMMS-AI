@@ -292,6 +292,22 @@ export interface CanvasProblemGroupingRationaleResponse {
   basis_items: string[];
 }
 
+export interface CanvasProblemStructureGroup {
+  id: string;
+  title: string;
+  node_ids: string[];
+  rationale: string;
+  created_by?: "ai" | "user" | string;
+}
+
+export interface CanvasProblemStructureResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  groups: CanvasProblemStructureGroup[];
+}
+
 export interface CanvasIdeationSuggestion {
   id: string;
   text: string;

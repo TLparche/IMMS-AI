@@ -17,6 +17,7 @@ import type {
   CanvasProblemConclusionResponse,
   CanvasProblemDefinitionResponse,
   CanvasProblemGroupingRationaleResponse,
+  CanvasProblemStructureResponse,
   CanvasProblemTaxonomyResponse,
   CanvasSolutionStageResponse,
   CanvasWorkspaceProblemGroup,
@@ -247,6 +248,32 @@ export async function generateProblemGroupingRationale(payload: {
   }>;
 }): Promise<CanvasProblemGroupingRationaleResponse> {
   return requestJson<CanvasProblemGroupingRationaleResponse>("/api/canvas/problem-grouping-rationale", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function generateProblemStructure(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  method: "affinity" | "card-sorting" | string;
+  nodes: Array<{
+    id: string;
+    title: string;
+    body: string;
+    status?: string;
+    depth?: number;
+  }>;
+  existing_groups?: Array<{
+    id: string;
+    title: string;
+    node_ids: string[];
+    rationale?: string;
+  }>;
+  max_groups?: number;
+}): Promise<CanvasProblemStructureResponse> {
+  return requestJson<CanvasProblemStructureResponse>("/api/canvas/problem-structure", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
