@@ -541,6 +541,9 @@ def _normalize_canvas_problem_structure_state(raw: Any) -> dict[str, Any]:
         created_by = _safe_text(group.get("created_by") or group.get("createdBy"), "user")
         if created_by not in {"ai", "user"}:
             created_by = "user"
+        status = _safe_text(group.get("status"), "draft")
+        if status not in {"draft", "review", "final"}:
+            status = "draft"
         used_group_ids.add(group_id)
         groups.append(
             {
@@ -548,6 +551,7 @@ def _normalize_canvas_problem_structure_state(raw: Any) -> dict[str, Any]:
                 "title": title or f"구조화 그룹 {index + 1}",
                 "node_ids": node_ids,
                 "rationale": _safe_text(group.get("rationale")),
+                "status": status,
                 "created_by": created_by,
             }
         )
@@ -2296,6 +2300,7 @@ class CanvasWorkspaceProblemStructureGroupInput(BaseModel):
     title: str = ""
     node_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
+    status: str = "draft"
     created_by: str = "user"
 
 

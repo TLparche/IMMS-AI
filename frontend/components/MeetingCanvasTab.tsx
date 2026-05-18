@@ -152,6 +152,7 @@ type ProblemStructureGroupViewModel = {
   title: string;
   nodeIds: string[];
   rationale: string;
+  status: ProblemGroupStatus;
   createdBy: "ai" | "user";
 };
 
@@ -1529,6 +1530,7 @@ function makeProblemStructureGroup(index: number, createdBy: "ai" | "user" = "us
     title: `구조화 그룹 ${index + 1}`,
     nodeIds: [],
     rationale: "",
+    status: "draft",
     createdBy,
   };
 }
@@ -1563,6 +1565,7 @@ function normalizeProblemStructureGroupsFromResponse(
     title?: string;
     node_ids?: string[];
     rationale?: string;
+    status?: string;
     created_by?: string;
   }>,
   nodes: ProblemStructureNodeViewModel[],
@@ -1596,6 +1599,7 @@ function normalizeProblemStructureGroupsFromResponse(
         title: group.title?.trim() || `AI 구조화 그룹 ${index + 1}`,
         nodeIds,
         rationale: group.rationale?.trim() || "",
+        status: normalizeProblemGroupStatus(group.status),
         createdBy: group.created_by === "user" ? "user" : "ai",
       } satisfies ProblemStructureGroupViewModel;
     })
@@ -1626,6 +1630,7 @@ function buildProblemStructureStatePayload(input: {
       title: group.title,
       node_ids: group.nodeIds,
       rationale: group.rationale,
+      status: group.status,
       created_by: group.createdBy,
     })),
   };
@@ -1672,6 +1677,7 @@ function hydrateProblemStructureState(
       title: group.title?.trim() || "구조화 그룹",
       nodeIds: (group.node_ids || []).filter((nodeId) => validNodeIds.has(nodeId)),
       rationale: group.rationale?.trim() || "",
+      status: normalizeProblemGroupStatus(group.status),
       createdBy: group.created_by === "ai" ? ("ai" as const) : ("user" as const),
     }))
     .filter((group) => group.id && (group.title || group.nodeIds.length > 0));
@@ -7255,12 +7261,6 @@ export default function MeetingCanvasTab({
     );
   }, []);
 
-  const handleUpdateProblemStructureNodeStatus = useCallback((nodeId: string, status: ProblemGroupStatus) => {
-    setProblemStructureNodes((prev) =>
-      prev.map((node) => (node.id === nodeId ? { ...node, status } : node)),
-    );
-  }, []);
-
   const handleRemoveProblemStructureNode = useCallback((nodeId: string) => {
     setProblemStructureNodes((prev) => prev.filter((node) => node.id !== nodeId));
     setProblemStructureGroups((prev) =>
@@ -7276,6 +7276,13 @@ export default function MeetingCanvasTab({
     setProblemStructureGroups((prev) =>
       prev.map((group) => (group.id === groupId ? { ...group, title, createdBy: "user" } : group)),
     );
+  }, []);
+
+  const handleUpdateProblemStructureGroupStatus = useCallback((groupId: string, status: ProblemGroupStatus) => {
+    setProblemStructureGroups((prev) =>
+      prev.map((group) => (group.id === groupId ? { ...group, status, createdBy: "user" } : group)),
+    );
+    setActivityMessage(`구조화 그룹 상태를 ${problemGroupStatusLabel(status)}로 변경했습니다.`);
   }, []);
 
   const handleUpdateProblemStructureGroupRationale = useCallback((groupId: string, rationale: string) => {
@@ -7302,6 +7309,7 @@ export default function MeetingCanvasTab({
             title: "아직 묶지 않은 노드",
             rationale: "정의 1단계에서 가져온 모든 노드가 먼저 여기에 놓입니다.",
             nodeIds: ungroupedNodes.map((node) => node.id),
+            status: "draft" as const,
             createdBy: "user" as const,
             fixed: true,
           },
@@ -7350,6 +7358,7 @@ export default function MeetingCanvasTab({
                 column.id,
                 column.title,
                 column.rationale,
+                column.status || "",
                 columnNodes.length,
                 ...columnNodes.flatMap((node) => [node.id, node.title, node.body, node.status, node.depth]),
                 ...problemStructureGroups.map((group) => `${group.id}:${group.nodeIds.join(",")}`),
@@ -7404,10 +7413,29 @@ export default function MeetingCanvasTab({
                       ) : null}
                     </div>
                   </div>
+                  {!isUngrouped ? (
+                    <label className="mt-3 block">
+                      <span className="mb-1 block text-[11px] font-semibold text-[#777]">그룹 상태</span>
+                      <select
+                        value={column.status || "draft"}
+                        onChange={(event) =>
+                          handleUpdateProblemStructureGroupStatus(column.id, event.target.value as ProblemGroupStatus)
+                        }
+                        onPointerDown={(event) => event.stopPropagation()}
+                        className={`nodrag nopan w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2 py-1.5 text-xs font-semibold outline-none transition focus:border-[#1b59f8]/40 ${problemGroupStatusTone(column.status || "draft")}`}
+                      >
+                        {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
+                          <option key={`${column.id}-status-${status}`} value={status}>
+                            {problemGroupStatusLabel(status)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
 
                   {isUngrouped ? (
-	                    <p className="mt-3 rounded-[10px] bg-[#f5f6f8] px-3 py-2 text-xs leading-5 text-[#4d4d4d]">
-	                      그룹을 만든 뒤 노드를 드래그해 넣거나, 노드끼리 겹쳐 새 그룹을 만들 수 있습니다.
+                    <p className="mt-3 rounded-[10px] bg-[#f5f6f8] px-3 py-2 text-xs leading-5 text-[#4d4d4d]">
+                      그룹을 만든 뒤 노드를 드래그해 넣거나, 노드끼리 겹쳐 새 그룹을 만들 수 있습니다.
                     </p>
                   ) : (
                     <div className={`mt-3 rounded-[10px] ${isCardSorting ? "border border-[#1b59f8]/10 bg-[#eef4ff]" : "bg-[#f5f6f8]"} p-3`}>
@@ -7433,19 +7461,19 @@ export default function MeetingCanvasTab({
                           problemStructureDrag.overNodeId === node.id &&
                           problemStructureDrag.nodeId !== node.id;
                         return (
-                        <div
-                          key={`${column.id}-${node.id}`}
-                          draggable
-                          onDragStart={(event) => handleProblemStructureNodeDragStart(event, node.id)}
-                          onDragEnd={handleProblemStructureNodeDragEnd}
-                          onDragOver={(event) => handleProblemStructureNodeDragOver(event, node.id)}
-                          onDrop={(event) => handleProblemStructureNodeDrop(event, node.id)}
-                          className={`nodrag nopan cursor-grab rounded-[10px] border bg-white px-3 py-3 shadow-[0_1px_0_rgba(0,0,0,0.03)] transition active:cursor-grabbing ${
-                            isNodeDropTarget
-                              ? "border-[#1b59f8] ring-2 ring-[#1b59f8]/20"
-                              : "border-black/10 hover:border-[#1b59f8]/25"
-                          } ${isDraggingNode ? "opacity-55" : ""}`}
-                        >
+                          <div
+                            key={`${column.id}-${node.id}`}
+                            draggable
+                            onDragStart={(event) => handleProblemStructureNodeDragStart(event, node.id)}
+                            onDragEnd={handleProblemStructureNodeDragEnd}
+                            onDragOver={(event) => handleProblemStructureNodeDragOver(event, node.id)}
+                            onDrop={(event) => handleProblemStructureNodeDrop(event, node.id)}
+                            className={`nodrag nopan cursor-grab rounded-[10px] border bg-white px-3 py-3 shadow-[0_1px_0_rgba(0,0,0,0.03)] transition active:cursor-grabbing ${
+                              isNodeDropTarget
+                                ? "border-[#1b59f8] ring-2 ring-[#1b59f8]/20"
+                                : "border-black/10 hover:border-[#1b59f8]/25"
+                            } ${isDraggingNode ? "opacity-55" : ""}`}
+                          >
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0 flex-1">
                               <input
@@ -7472,23 +7500,8 @@ export default function MeetingCanvasTab({
                               제외
                             </button>
                           </div>
-                          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <label className="min-w-0">
-                              <span className="mb-1 block text-[11px] font-semibold text-[#777]">상태</span>
-                              <select
-                                value={node.status}
-                                onChange={(event) => handleUpdateProblemStructureNodeStatus(node.id, event.target.value as ProblemGroupStatus)}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                className={`nodrag nopan w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2 py-1.5 text-xs font-semibold outline-none transition focus:border-[#1b59f8]/40 ${problemGroupStatusTone(node.status)}`}
-                              >
-                                {(["draft", "review", "final"] as ProblemGroupStatus[]).map((status) => (
-                                  <option key={`${node.id}-status-${status}`} value={status}>
-                                    {problemGroupStatusLabel(status)}
-                                  </option>
-                                ))}
-                              </select>
-                            </label>
-                            <label className="min-w-0">
+                          <div className="mt-3">
+                            <label className="block min-w-0">
                               <span className="mb-1 block text-[11px] font-semibold text-[#777]">이동</span>
                               <select
                                 value={isUngrouped ? "" : column.id}
@@ -7505,7 +7518,7 @@ export default function MeetingCanvasTab({
                               </select>
                             </label>
                           </div>
-                        </div>
+                          </div>
                         );
                       })
                     ) : (
@@ -7531,6 +7544,7 @@ export default function MeetingCanvasTab({
               group.id,
               group.title,
               group.rationale,
+              group.status,
               group.createdBy,
               ...group.nodeIds,
             ]),
@@ -8817,9 +8831,9 @@ export default function MeetingCanvasTab({
     handleProblemStructureNodeDrop,
     handleRemoveProblemStructureNode,
     handleUpdateProblemStructureNodeBody,
-    handleUpdateProblemStructureNodeStatus,
     handleUpdateProblemStructureNodeTitle,
     handleUpdateProblemStructureGroupRationale,
+    handleUpdateProblemStructureGroupStatus,
     handleUpdateProblemStructureGroupTitle,
     handleQuickEditProblemGroup,
     handleShowProblemGroupingRationale,

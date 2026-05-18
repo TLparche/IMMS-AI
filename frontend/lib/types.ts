@@ -297,6 +297,7 @@ export interface CanvasProblemStructureGroup {
   title: string;
   node_ids: string[];
   rationale: string;
+  status?: "draft" | "review" | "final" | string;
   created_by?: "ai" | "user" | string;
 }
 
