@@ -2197,6 +2197,14 @@ class SummaryDocumentGenerateInput(BaseModel):
     nodes: list[SummaryDocumentNodeInput] = Field(default_factory=list, max_length=120)
 
 
+class CanvasQuickAskInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    stage: str = "ideation"
+    question: str = Field(default="", max_length=2000)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
 class IdeationSuggestionTopicInput(BaseModel):
     id: str = ""
     title: str = ""
@@ -4912,6 +4920,114 @@ def _build_solution_stage_prompt(meeting_topic: str, topics: list[dict[str, Any]
         "- 서로 중복되지 않게 작성한다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
+
+
+def _normalize_canvas_quick_ask_rows(raw_rows: Any, limit: int = 80) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if not isinstance(raw_rows, list):
+        return rows
+    for index, item in enumerate(raw_rows):
+        if not isinstance(item, dict):
+            continue
+        text = _strip_leading_timestamp(item.get("text"))
+        if not text:
+            continue
+        rows.append(
+            {
+                "id": _safe_text(item.get("id"), f"quick-row-{index + 1}"),
+                "speaker": _safe_text(item.get("speaker"), "참가자"),
+                "text": _truncate_text(text, 500),
+                "timestamp": _safe_text(item.get("timestamp")),
+                "canvas_stage": _normalize_canvas_stage(item.get("canvas_stage") or item.get("stage")),
+            }
+        )
+    return rows[-limit:]
+
+
+def _resolve_canvas_quick_ask_rows(payload: CanvasQuickAskInput, meeting_id: str) -> list[dict[str, str]]:
+    server_rows = _resolve_problem_taxonomy_utterance_rows(meeting_id, []) if meeting_id else []
+    context_rows = _normalize_canvas_quick_ask_rows((payload.context or {}).get("recent_utterances"))
+    if not server_rows:
+        return context_rows
+
+    merged_by_id: dict[str, dict[str, str]] = {}
+    for row in server_rows[-80:] + context_rows:
+        row_id = _safe_text(row.get("id"), f"quick-row-{len(merged_by_id) + 1}")
+        merged_by_id[row_id] = {
+            "id": row_id,
+            "speaker": _safe_text(row.get("speaker"), "참가자"),
+            "text": _truncate_text(_strip_leading_timestamp(row.get("text")), 500),
+            "timestamp": _safe_text(row.get("timestamp")),
+            "canvas_stage": _normalize_canvas_stage(row.get("canvas_stage")),
+        }
+    return list(merged_by_id.values())[-80:]
+
+
+def _compact_canvas_quick_ask_context(payload: CanvasQuickAskInput, rows: list[dict[str, str]]) -> dict[str, Any]:
+    context = dict(payload.context or {})
+    context["recent_utterances"] = rows[-32:]
+    context["question_stage"] = _normalize_canvas_stage(payload.stage)
+    if not _safe_text(context.get("meeting_topic")):
+        context["meeting_topic"] = _safe_text(payload.meeting_topic)
+    return context
+
+
+def _build_canvas_quick_ask_prompt(payload: CanvasQuickAskInput, rows: list[dict[str, str]]) -> str:
+    compact_context = _compact_canvas_quick_ask_context(payload, rows)
+    context_json = _truncate_text(json.dumps(compact_context, ensure_ascii=False, indent=2), 10000)
+    question = _truncate_text(payload.question, 2000)
+    return (
+        "너는 하단 패널에서 구글 검색처럼 던지는 질문에 즉시 답하는 범용 LLM 보조자다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[역할]\n"
+        "- 사용자의 질문에 한국어로 바로 답한다.\n"
+        "- 질문이 회의나 캔버스와 관련 있으면 제공된 회의 맥락을 참고한다.\n"
+        "- 질문이 회의와 무관하면 제공된 회의 맥락을 억지로 끌어오지 말고 일반 LLM 답변으로 처리한다.\n"
+        "- 실시간 웹 검색은 현재 연결되어 있지 않다. 최신성이나 실시간 사실 확인이 핵심이면 그 한계를 짧게 말한다.\n\n"
+        "[참고 맥락 JSON]\n"
+        f"{context_json}\n\n"
+        "[사용자 질문]\n"
+        f"{question}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "answer": "2~6문장 또는 짧은 bullet 답변"\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- answer 외 다른 최상위 필드는 만들지 않는다.\n"
+        "- Markdown bullet은 허용하지만, 코드블록은 사용하지 않는다.\n"
+        "- 질문이 단순하면 1~3문장으로 답한다.\n"
+        "- 불필요한 인사말 없이 바로 답한다."
+    )
+
+
+def _normalize_canvas_quick_ask_answer(parsed: Any, fallback: str) -> str:
+    if isinstance(parsed, dict):
+        answer = _safe_text(parsed.get("answer") or parsed.get("response") or parsed.get("text"))
+        if answer:
+            return _truncate_text(answer, 5000)
+    return _truncate_text(fallback, 5000)
+
+
+def _build_canvas_quick_ask_local_answer(question: str, rows: list[dict[str, str]]) -> str:
+    tokens = set(_keyword_tokens(question))
+    matches: list[tuple[int, int, dict[str, str]]] = []
+    if tokens:
+        for index, row in enumerate(rows):
+            row_tokens = set(_keyword_tokens(row.get("text", "")))
+            score = len(tokens & row_tokens)
+            if score > 0:
+                matches.append((score, index, row))
+    matches.sort(key=lambda item: (-item[0], -item[1]))
+    snippets = matches[:3]
+    if snippets:
+        lines = [
+            "LLM 연결이 없어 자동 답변 대신 회의 기록에서 관련 발언 후보를 찾았습니다.",
+            *[
+                f"- {_safe_text(row.get('speaker'), '참가자')}: {_truncate_text(row.get('text'), 180)}"
+                for _score, _index, row in snippets
+            ],
+        ]
+        return "\n".join(lines)
+    return "LLM 연결이 없어 지금은 답변을 생성하지 못했습니다. 회의 기록 검색에 쓸 만한 관련 발언도 찾지 못했습니다."
 
 
 def _summary_document_status_label(status: str) -> str:
@@ -11655,6 +11771,53 @@ def post_canvas_summary_document(payload: SummaryDocumentGenerateInput):
         signature,
         _compute,
     )
+
+
+@app.post("/api/canvas/quick-ask")
+def post_canvas_quick_ask(payload: CanvasQuickAskInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    question = _safe_text(payload.question)
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+
+    rows = _resolve_canvas_quick_ask_rows(payload, normalized_meeting_id)
+    fallback_answer = _build_canvas_quick_ask_local_answer(question, rows)
+    used_llm = False
+    warning = ""
+    answer = fallback_answer
+
+    client, llm_ready, llm_note = _ensure_llm_ready(RT)
+    if llm_ready and client is not None:
+        try:
+            parsed = _call_llm_json(
+                RT,
+                client,
+                prompt=_build_canvas_quick_ask_prompt(payload, rows),
+                stage="canvas_quick_ask",
+                temperature=0.2,
+                max_tokens=1200,
+            )
+            answer = _normalize_canvas_quick_ask_answer(parsed, fallback_answer)
+            used_llm = True
+            RT.last_llm_parsed_json = {
+                "stage": "canvas_quick_ask",
+                "question": question,
+                "answer": answer,
+            }
+            RT.last_llm_parsed_at = _now_ts()
+        except Exception as exc:
+            warning = f"LLM 질문 응답 실패: {exc}"
+            answer = fallback_answer
+    else:
+        warning = llm_note or "LLM 미연결 상태라 로컬 회의 기록 검색 결과를 표시했습니다."
+
+    return {
+        "ok": True,
+        "used_llm": used_llm,
+        "warning": warning,
+        "generated_at": _now_ts(),
+        "answer": answer,
+    }
 
 
 @app.post("/api/canvas/ideation-suggestions")

@@ -632,6 +632,14 @@ export interface CanvasSummaryDocumentResponse {
   sections: CanvasSummaryDocumentSection[];
 }
 
+export interface CanvasQuickAskResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  answer: string;
+}
+
 export interface MeetingGoalSuggestionResponse {
   ok: boolean;
   used_llm: boolean;

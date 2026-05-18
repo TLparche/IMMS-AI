@@ -20,6 +20,7 @@ import type {
   CanvasProblemGroupingRationaleResponse,
   CanvasProblemStructureResponse,
   CanvasProblemTaxonomyResponse,
+  CanvasQuickAskResponse,
   CanvasSummaryDocumentResponse,
   CanvasSolutionStageResponse,
   CanvasWorkspaceProblemGroup,
@@ -332,6 +333,20 @@ export async function generateCanvasSummaryDocument(payload: {
   }>;
 }): Promise<CanvasSummaryDocumentResponse> {
   return requestJson<CanvasSummaryDocumentResponse>("/api/canvas/summary-document", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function askCanvasQuickQuestion(payload: {
+  meeting_id: string;
+  meeting_topic: string;
+  stage: "ideation" | "problem-definition" | "solution";
+  question: string;
+  context?: Record<string, unknown>;
+}): Promise<CanvasQuickAskResponse> {
+  return requestJson<CanvasQuickAskResponse>("/api/canvas/quick-ask", {
     method: "POST",
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),

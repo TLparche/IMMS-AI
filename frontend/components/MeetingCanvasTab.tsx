@@ -19,7 +19,7 @@ import {
   type NodeChange,
   type ReactFlowInstance,
 } from "@xyflow/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type RefObject, type ReactNode } from "react";
 import {
   getCanvasWorkspaceState,
   getCanvasPersonalNotes,
@@ -39,6 +39,7 @@ import {
   saveCanvasWorkspacePatch,
   startCanvasProblemDiscussionWorkspace,
   startCanvasTopicSummaryWorkspace,
+  askCanvasQuickQuestion,
 } from "@/lib/api";
 import type {
   AgendaActionItemDetail,
@@ -116,6 +117,12 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function clipClientText(value: unknown, limit: number) {
+  const text = String(value || "").trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1))}…`;
+}
+
 type PersonalNote = {
   id: string;
   projectId: string;
@@ -163,6 +170,15 @@ type ProblemStructureDragState = {
   overGroupId: string;
   overNodeId: string;
   mode: "group" | "node" | "";
+};
+
+type CanvasQuickAskMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: string;
+  status: "pending" | "done" | "error";
+  warning?: string;
 };
 
 type ProblemDiscussionViewModel = CanvasProblemDiscussionItem;
@@ -4102,6 +4118,10 @@ export default function MeetingCanvasTab({
   );
   const [summaryDocumentEditMode, setSummaryDocumentEditMode] = useState(false);
   const [summaryEvidenceOpenGroupIds, setSummaryEvidenceOpenGroupIds] = useState<Set<string>>(() => new Set());
+  const [quickAskOpen, setQuickAskOpen] = useState(false);
+  const [quickAskDraft, setQuickAskDraft] = useState("");
+  const [quickAskMessages, setQuickAskMessages] = useState<CanvasQuickAskMessage[]>([]);
+  const [quickAskUnreadCount, setQuickAskUnreadCount] = useState(0);
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
   const [editingSolutionTopicId, setEditingSolutionTopicId] = useState("");
   const [solutionTopicDraftTitle, setSolutionTopicDraftTitle] = useState("");
@@ -4227,6 +4247,8 @@ export default function MeetingCanvasTab({
   const ideationLeftPaneRef = useRef<HTMLDivElement | null>(null);
   const ideationRightPaneRef = useRef<HTMLDivElement | null>(null);
   const solutionRightPaneRef = useRef<HTMLDivElement | null>(null);
+  const quickAskOpenRef = useRef(quickAskOpen);
+  const quickAskScrollRef = useRef<HTMLDivElement | null>(null);
   const resizeStateRef = useRef<{ side: "left" | "right"; startX: number; startRatio: number } | null>(null);
   const autoProblemDefinitionRef = useRef(false);
   const problemConclusionEntryHandledRef = useRef(false);
@@ -4243,6 +4265,23 @@ export default function MeetingCanvasTab({
   const previousCanvasItemSignaturesRef = useRef<Record<string, string>>({});
   const pendingNodePlacementsRef = useRef<Record<string, { x: number; y: number }>>({});
   const hoveredProblemDropTargetElementRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    quickAskOpenRef.current = quickAskOpen;
+    if (quickAskOpen) {
+      setQuickAskUnreadCount(0);
+    }
+  }, [quickAskOpen]);
+
+  useEffect(() => {
+    if (!quickAskOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (quickAskScrollRef.current) {
+        quickAskScrollRef.current.scrollTop = quickAskScrollRef.current.scrollHeight;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [quickAskMessages.length, quickAskOpen]);
   const agendaDragPreviewRef = useRef<AgendaDragPreviewState | null>(null);
   const ideationDropPreviewRef = useRef<IdeationDropPreviewState | null>(null);
   const stableIdeationDragRef = useRef<StableIdeationDragState | null>(null);
@@ -4344,6 +4383,176 @@ export default function MeetingCanvasTab({
       problemStructureMethod,
       problemStructureNodes,
     ],
+  );
+  const quickAskPendingCount = useMemo(
+    () => quickAskMessages.filter((message) => message.status === "pending").length,
+    [quickAskMessages],
+  );
+  const buildQuickAskContext = useCallback((): Record<string, unknown> => {
+    const sourceTranscriptRows = normalizeTranscriptRows(
+      (effectiveState?.transcript?.length ? effectiveState.transcript : transcripts) || [],
+    );
+    const problemStructureNodeById = new Map(problemStructureNodes.map((node) => [node.id, node]));
+    const selectedCanvasNode = nodes.find((node) => node.id === selectedNodeId);
+
+    return {
+      current_stage: stageLabel(stage),
+      meeting_topic: meetingTopicForAi,
+      meeting_goal: clipClientText(activeMeetingGoal || meetingGoalDraft || effectiveState?.meeting_goal || "", 600),
+      meeting_goal_context: clipClientText(meetingGoalContextDraft || effectiveState?.initial_context || "", 900),
+      selected_node_id: selectedNodeId,
+      selected_node_label:
+        selectedCanvasNode && typeof selectedCanvasNode.data === "object"
+          ? clipClientText((selectedCanvasNode.data as { label?: unknown; contentSignature?: unknown }).label || selectedCanvasNode.id, 160)
+          : selectedNodeId,
+      recent_utterances: sourceTranscriptRows.slice(-32).map((row) => ({
+        id: row.id,
+        speaker: row.speaker || "참가자",
+        text: clipClientText(stripLeadingTimestamp(row.text), 420),
+        timestamp: row.timestamp || "",
+        canvas_stage: row.canvas_stage || "ideation",
+      })),
+      canvas_items: canvasItems.slice(0, 30).map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        title: clipClientText(item.title, 120),
+        body: clipClientText(item.body, 360),
+        status: item.status,
+        parent_id: item.parent_topic_id || "",
+      })),
+      problem_groups: problemGroups.slice(0, 24).map((group) => ({
+        id: group.group_id,
+        parent_id: group.parent_group_id || "",
+        depth: group.depth || 0,
+        topic: clipClientText(group.topic, 140),
+        conclusion: clipClientText(group.conclusion, 420),
+        status: group.status,
+        source_summary_items: (group.source_summary_items || []).slice(0, 4).map((item) => clipClientText(item, 180)),
+      })),
+      problem_structure: {
+        phase: problemDefinitionPhase,
+        method: problemStructureMethod,
+        mode: problemDefinitionMode || "unset",
+        groups: problemStructureGroups.slice(0, 20).map((group) => ({
+          id: group.id,
+          title: clipClientText(group.title, 140),
+          status: group.status,
+          rationale: clipClientText(group.rationale, 360),
+          node_titles: group.nodeIds
+            .map((nodeId) => problemStructureNodeById.get(nodeId)?.title || "")
+            .filter(Boolean)
+            .slice(0, 10),
+        })),
+      },
+      solution_topics: solutionTopics.slice(0, 18).map((topic) => ({
+        id: topic.group_id,
+        topic: clipClientText(topic.topic, 140),
+        conclusion: clipClientText(topic.conclusion, 420),
+        status: topic.status,
+      })),
+      summary_markdown: clipClientText(finalSummaryDocument.markdown, 5000),
+    };
+  }, [
+    activeMeetingGoal,
+    canvasItems,
+    effectiveState,
+    finalSummaryDocument.markdown,
+    meetingGoalContextDraft,
+    meetingGoalDraft,
+    meetingTopicForAi,
+    nodes,
+    problemDefinitionMode,
+    problemDefinitionPhase,
+    problemGroups,
+    problemStructureGroups,
+    problemStructureMethod,
+    problemStructureNodes,
+    selectedNodeId,
+    solutionTopics,
+    stage,
+    transcripts,
+  ]);
+  const handleToggleQuickAsk = useCallback(() => {
+    setQuickAskOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setQuickAskUnreadCount(0);
+      }
+      return next;
+    });
+  }, []);
+  const handleSubmitQuickAsk = useCallback(
+    (event?: FormEvent<HTMLFormElement>) => {
+      event?.preventDefault();
+      const question = quickAskDraft.trim();
+      if (!question || !meetingId) return;
+
+      const now = new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+      const requestId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      const userMessageId = `quick-user-${requestId}`;
+      const assistantMessageId = `quick-assistant-${requestId}`;
+      setQuickAskMessages((prev) => [
+        ...prev,
+        {
+          id: userMessageId,
+          role: "user",
+          text: question,
+          createdAt: now,
+          status: "done",
+        },
+        {
+          id: assistantMessageId,
+          role: "assistant",
+          text: "응답 생성 중...",
+          createdAt: now,
+          status: "pending",
+        },
+      ]);
+      setQuickAskDraft("");
+
+      void askCanvasQuickQuestion({
+        meeting_id: meetingId,
+        meeting_topic: meetingTopicForAi,
+        stage,
+        question,
+        context: buildQuickAskContext(),
+      })
+        .then((result) => {
+          setQuickAskMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    text: result.answer || "응답이 비어 있습니다.",
+                    status: "done",
+                    warning: result.warning || "",
+                  }
+                : message,
+            ),
+          );
+          if (!quickAskOpenRef.current) {
+            setQuickAskUnreadCount((prev) => prev + 1);
+          }
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setQuickAskMessages((prev) =>
+            prev.map((item) =>
+              item.id === assistantMessageId
+                ? {
+                    ...item,
+                    text: `응답을 가져오지 못했습니다. ${message}`,
+                    status: "error",
+                  }
+                : item,
+            ),
+          );
+          if (!quickAskOpenRef.current) {
+            setQuickAskUnreadCount((prev) => prev + 1);
+          }
+        });
+    },
+    [buildQuickAskContext, meetingId, meetingTopicForAi, quickAskDraft, stage],
   );
   const transcriptStripItems = useMemo(() => {
     const stageSummaries = sttFlowSummaries.filter((item) => !item.stage || item.stage === stage);
@@ -12818,6 +13027,12 @@ export default function MeetingCanvasTab({
       ? "hidden pointer-events-none -translate-x-8 px-0 py-0 opacity-0"
       : `${rightDrawerShowsDetailPanel ? "border-t-4 border-[#d5d5d5]" : ""} translate-x-0 opacity-100`
   }`;
+  const quickAskLauncherClassName = rightDrawerCollapsed
+    ? "absolute bottom-4 left-1/2 z-50 flex h-12 w-12 -translate-x-1/2 items-center justify-center rounded-[14px] border border-black/10 bg-[#111827] text-sm font-semibold text-white shadow-[0_10px_28px_rgba(15,23,42,0.22)] transition hover:bg-black"
+    : "absolute bottom-4 left-4 right-4 z-50 flex min-h-[46px] items-center justify-between gap-3 rounded-[14px] border border-black/10 bg-[#111827] px-4 py-2.5 text-sm font-semibold text-white shadow-[0_10px_28px_rgba(15,23,42,0.18)] transition hover:bg-black";
+  const quickAskPanelClassName = rightDrawerCollapsed
+    ? "absolute bottom-20 right-2 z-50 flex w-[min(26rem,calc(100vw-1.5rem))] max-h-[min(620px,72vh)] flex-col overflow-hidden rounded-[18px] border border-black/10 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.24)]"
+    : "absolute bottom-20 right-4 z-50 flex w-[min(28rem,calc(100vw-2rem))] max-h-[min(620px,72vh)] flex-col overflow-hidden rounded-[18px] border border-black/10 bg-white shadow-[0_24px_70px_rgba(15,23,42,0.24)]";
   const workspaceGridColumns = rightDrawerCollapsed
     ? "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
@@ -15388,6 +15603,116 @@ export default function MeetingCanvasTab({
             )}
             </RightDrawerPanel>
             </div>
+            {quickAskOpen ? (
+              <div className={quickAskPanelClassName}>
+                <div className="flex items-start justify-between gap-4 border-b border-black/10 px-4 py-3.5">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">LLM Search</p>
+                    <h4 className="mt-1 text-base font-semibold leading-tight text-black">LLM 및 검색</h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setQuickAskOpen(false)}
+                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#eff0f6] text-lg leading-none text-[#4d4d4d] transition hover:bg-[#e3e5ee]"
+                    aria-label="LLM 및 검색 닫기"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div ref={quickAskScrollRef} className="imms-overlay-scroll flex-1 space-y-3 overflow-y-auto bg-[#f7f8fb] px-4 py-4">
+                  {quickAskMessages.length === 0 ? (
+                    <div className="rounded-[14px] border border-dashed border-black/10 bg-white px-4 py-5 text-sm leading-6 text-[#6f6f6f]">
+                      아직 질문이 없습니다.
+                    </div>
+                  ) : (
+                    quickAskMessages.map((message) => (
+                      <div
+                        key={message.id}
+                        className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                      >
+                        <div
+                          className={`max-w-[86%] rounded-[14px] px-3.5 py-3 text-sm leading-6 shadow-sm ${
+                            message.role === "user"
+                              ? "bg-[#1b59f8] text-white"
+                              : message.status === "error"
+                              ? "border border-red-100 bg-red-50 text-red-700"
+                              : "border border-black/10 bg-white text-[#2f3440]"
+                          }`}
+                        >
+                          <div className="whitespace-pre-wrap">{message.text}</div>
+                          <div
+                            className={`mt-2 flex items-center gap-2 text-[11px] ${
+                              message.role === "user" ? "text-white/70" : "text-[#8b8f9a]"
+                            }`}
+                          >
+                            <span>{message.createdAt}</span>
+                            {message.status === "pending" ? <span>처리 중</span> : null}
+                            {message.warning && message.status === "done" ? <span>주의 있음</span> : null}
+                          </div>
+                          {message.warning && message.status === "done" ? (
+                            <p className="mt-2 rounded-[10px] bg-[#fff8e8] px-2.5 py-2 text-xs leading-5 text-[#8a6516]">
+                              {message.warning}
+                            </p>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <form onSubmit={handleSubmitQuickAsk} className="border-t border-black/10 bg-white p-3">
+                  <textarea
+                    value={quickAskDraft}
+                    onChange={(event) => setQuickAskDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        handleSubmitQuickAsk();
+                      }
+                    }}
+                    placeholder="질문 입력"
+                    className="min-h-[78px] w-full resize-none rounded-[12px] border border-black/10 bg-[#f9f9f9] px-3.5 py-3 text-sm leading-6 text-black outline-none transition placeholder:text-black/30 focus:border-[#1b59f8]/30 focus:bg-white focus:ring-2 focus:ring-[#1b59f8]/10"
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    <span className="text-[11px] font-medium text-[#8b8f9a]">
+                      {quickAskPendingCount > 0 ? `${quickAskPendingCount}개 응답 대기 중` : "LLM 응답"}
+                    </span>
+                    <button
+                      type="submit"
+                      disabled={!quickAskDraft.trim()}
+                      className="rounded-[10px] bg-[#1b59f8] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#164be0] disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      보내기
+                    </button>
+                  </div>
+                </form>
+              </div>
+            ) : null}
+            <button
+              type="button"
+              onClick={handleToggleQuickAsk}
+              className={quickAskLauncherClassName}
+              title="LLM 및 검색"
+            >
+              {rightDrawerCollapsed ? (
+                <span className="relative">
+                  AI
+                  {quickAskUnreadCount > 0 || quickAskPendingCount > 0 ? (
+                    <span className="absolute -right-2 -top-2 h-2.5 w-2.5 rounded-full bg-[#ffd166]" />
+                  ) : null}
+                </span>
+              ) : (
+                <>
+                  <span>LLM 및 검색</span>
+                  <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-semibold text-white/85">
+                    {quickAskPendingCount > 0
+                      ? `${quickAskPendingCount}개 처리 중`
+                      : quickAskUnreadCount > 0
+                      ? `새 응답 ${quickAskUnreadCount}`
+                      : "바로 질문"}
+                  </span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </section>
