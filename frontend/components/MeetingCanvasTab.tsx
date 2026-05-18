@@ -92,6 +92,7 @@ type ProblemCanvasToolbarAction =
   | "note"
   | "problem-idea"
   | "adopt";
+type IdeationCanvasToolbarPane = "ideation-left" | "ideation-right";
 type LeftPanelTab = "detail";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type CanvasItemStatus = "discussion" | "confirmed" | "closed";
@@ -100,6 +101,7 @@ type SolutionNoteSource = "ai" | "user";
 type ProblemDefinitionMode = "" | "manual" | "ai";
 type ProblemDefinitionPhase = "explore" | "structure";
 type ProblemStructureMethod = "affinity" | "card-sorting";
+type AiTaskPanelMode = "all" | "active" | "issues";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
 const CANVAS_LLM_FAILURE_RETRY_DELAY_MS = 60_000;
 const CANVAS_LLM_SILENCE_FLUSH_MS = 8_000;
@@ -113,6 +115,25 @@ const COMPOSER_PERSONAL_NOTE_LINK_ID = "__composer_personal_note__";
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function isCanvasJobErrorStatus(status: string) {
+  return status === "error" || status.startsWith("error_") || status === "missing";
+}
+
+function isCanvasJobStaleStatus(status: string) {
+  return status === "stale" || status.startsWith("stale_");
+}
+
+function isStaleAiTaskResponse(response?: { status?: string } | null) {
+  return isCanvasJobStaleStatus(response?.status || "");
+}
+
+function staleAiTaskResponseMessage(
+  response: { activity_line?: string; warning?: string; detail?: string },
+  fallback: string,
+) {
+  return response.activity_line || response.warning || response.detail || fallback;
 }
 
 type PersonalNote = {
@@ -838,6 +859,88 @@ function syncModeLabel(enabled: boolean) {
   return enabled ? "공유 ON" : "공유 OFF";
 }
 
+const ACTIVE_AI_TASK_STATUSES = new Set(["processing", "queued"]);
+const FAILED_AI_TASK_STATUSES = new Set(["error", "error_retryable", "error_final"]);
+const STALE_AI_TASK_STATUSES = new Set(["stale_superseded", "stale_obsolete", "stale_rebasable"]);
+
+function aiTaskLabel(taskType?: string) {
+  switch (taskType) {
+    case "ideation.assimilate":
+      return "아이디어 정리";
+    case "ideation.assimilate_preview":
+      return "아이디어 미리보기";
+    case "ideation.topic_summary":
+      return "토픽 요약";
+    case "ideation.topic_clustering":
+      return "토픽 분류";
+    case "ideation.recommend":
+      return "아이디어 추천";
+    case "problem.discussion":
+      return "문제 의견 정리";
+    case "problem.definition":
+      return "문제정의 생성";
+    case "problem.conclusion":
+      return "문제 결론";
+    case "meeting.goal":
+      return "회의 목표";
+    case "solution.stage":
+      return "해결책 생성";
+    default:
+      return taskType || "AI 작업";
+  }
+}
+
+function aiTaskStatusLabel(status?: string) {
+  switch (status) {
+    case "processing":
+      return "진행 중";
+    case "queued":
+      return "대기";
+    case "completed":
+      return "완료";
+    case "idle":
+      return "대기";
+    case "missing":
+      return "없음";
+    case "stale_superseded":
+      return "대체됨";
+    case "stale_obsolete":
+      return "종료됨";
+    case "stale_rebasable":
+      return "재시도 가능";
+    case "error_retryable":
+      return "재시도 가능";
+    case "error_final":
+    case "error":
+      return "실패";
+    default:
+      return status || "상태 없음";
+  }
+}
+
+function aiTaskStatusClassName(status?: string) {
+  if (ACTIVE_AI_TASK_STATUSES.has(status || "")) return "border-blue-100 bg-blue-50 text-blue-700";
+  if (FAILED_AI_TASK_STATUSES.has(status || "")) return "border-rose-100 bg-rose-50 text-rose-700";
+  if (STALE_AI_TASK_STATUSES.has(status || "")) return "border-amber-100 bg-amber-50 text-amber-700";
+  if (status === "completed") return "border-emerald-100 bg-emerald-50 text-emerald-700";
+  return "border-slate-200 bg-slate-50 text-slate-600";
+}
+
+function formatAiTaskTime(raw?: string) {
+  if (!raw) return "";
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function aiTaskActivityLine(task: AiTaskRecord) {
+  return task.activity_line || task.detail || aiTaskLabel(task.task_type);
+}
+
+function aiTaskActivityEvents(task: AiTaskRecord) {
+  return (task.activity_events || []).filter((event) => event.summary).slice(0, 6);
+}
+
 function KeyboardDoubleArrowLeftIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -1533,6 +1636,21 @@ function remapProblemSummaryDiscussionTargets(
   });
 }
 
+function orderProblemDefinitionChildren(
+  parent: CanvasItemViewModel,
+  childItemsByParentId: Map<string, CanvasItemViewModel[]>,
+) {
+  const children = childItemsByParentId.get(parent.id) || [];
+  const orderById = new Map((parent.child_item_ids || []).map((id, index) => [id, index]));
+
+  return [...children].sort((left, right) => {
+    const leftOrder = orderById.get(left.id) ?? Number.MAX_SAFE_INTEGER;
+    const rightOrder = orderById.get(right.id) ?? Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return left.id.localeCompare(right.id);
+  });
+}
+
 function buildProblemGroupDisplayCards(
   group: ProblemGroupViewModel,
   canvasItems?: CanvasItemViewModel[],
@@ -2119,6 +2237,7 @@ const CANVAS_TOP_LEVEL_GAP_Y = 16;
 const CANVAS_AGENDA_TO_ITEMS_GAP_Y = 18;
 const CANVAS_AGENDA_BLOCK_GAP_X = 1080;
 const CANVAS_AGENDA_BLOCK_GAP_Y = 56;
+const IDEATION_RIGHT_CLUSTER_CHILD_PREVIEW_LIMIT = 6;
 
 function shouldUseCompactViewport() {
   if (typeof window === "undefined") return false;
@@ -2604,6 +2723,33 @@ function getCanvasItemMergedSourceCount(item: CanvasItemViewModel): number {
 
 function isTopicCanvasItem(item: CanvasItemViewModel) {
   return item.kind === "topic";
+}
+
+function normalizeIdeationExpansionText(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function makeIdeationTopicExpansionKeys(item: CanvasItemViewModel) {
+  const title = normalizeIdeationExpansionText(item.title || "");
+  const childSignature = (item.child_item_ids || [])
+    .map((childId) => childId.trim())
+    .filter(Boolean)
+    .slice(0, 12)
+    .join("|");
+
+  return [
+    item.id ? `id:${item.id}` : "",
+    title ? `title:${item.agenda_id || ""}:${title}` : "",
+    title ? `parent-title:${item.agenda_id || ""}:${item.parent_topic_id || ""}:${title}` : "",
+    childSignature ? `children:${item.agenda_id || ""}:${childSignature}` : "",
+  ].filter(Boolean);
+}
+
+function sameBooleanRecord(left: Record<string, boolean>, right: Record<string, boolean>) {
+  const leftKeys = Object.keys(left).filter((key) => left[key]);
+  const rightKeys = Object.keys(right).filter((key) => right[key]);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Boolean(right[key]));
 }
 
 function getTopicChildCount(item: CanvasItemViewModel) {
@@ -3578,7 +3724,6 @@ function serializeSharedProblemGroups(groups: ProblemGroupViewModel[]) {
     evidence_utterance_ids: group.evidence_utterance_ids || [],
     source_summary_items: group.source_summary_items,
     discussion_items: group.discussion_items || [],
-    linked_group_ids: group.linked_group_ids || [],
     conclusion: group.conclusion,
     conclusion_user_edited: group.conclusion_user_edited,
     status: group.status,
@@ -4215,6 +4360,13 @@ export default function MeetingCanvasTab({
   const [liveFlowHint, setLiveFlowHint] = useState("");
   const [ideaAssimilationStatus, setIdeaAssimilationStatus] = useState("");
   const [problemDiscussionStatus, setProblemDiscussionStatus] = useState("");
+  const [aiTaskPanelOpen, setAiTaskPanelOpen] = useState(false);
+  const [aiTaskPanelMode, setAiTaskPanelMode] = useState<AiTaskPanelMode>("all");
+  const [aiTasks, setAiTasks] = useState<AiTaskRecord[]>([]);
+  const [aiTaskQueues, setAiTaskQueues] = useState<Record<string, Record<string, number>>>({});
+  const [aiTaskLoading, setAiTaskLoading] = useState(false);
+  const [aiTaskError, setAiTaskError] = useState("");
+  const [expandedAiTaskIds, setExpandedAiTaskIds] = useState<Record<string, boolean>>({});
   const [, setIdeaCreateStack] = useState(0);
   const [rightDrawerCollapsed, setRightDrawerCollapsed] = useState(true);
   const [rightDrawerContentVisible, setRightDrawerContentVisible] = useState(false);
@@ -10287,6 +10439,8 @@ export default function MeetingCanvasTab({
     problemDefinitionPhase === "structure"
       ? ["structure-back", "structure-ai-group", "structure-add-group", "structure-refresh"]
       : ["group", "problem-link", "debug-regenerate", "debug-refresh-chunks", "structure-start"];
+  const ideationLeftCanvasToolbarActions: CanvasTool[] = ["group", "topic"];
+  const ideationRightCanvasToolbarActions: CanvasTool[] = ["topic", "comment"];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
     if (action === "group") return "문제정의 그룹 추가";
@@ -12448,6 +12602,41 @@ export default function MeetingCanvasTab({
       return;
     }
 
+    const nextCanvasItemsSnapshot = canvasItems.map((item) =>
+      item.id === itemId
+        ? {
+            ...item,
+            keywords: nextKeywords,
+          }
+        : item,
+    );
+
+    setCanvasItems(nextCanvasItemsSnapshot);
+    setSelectedCanvasItemId(itemId);
+    setSelectedNodeId(`canvas-item-${itemId}`);
+    setActivityMessage("공용 canvas 아이템의 키워드를 추출했습니다.");
+
+    if (sharedSyncEnabled) {
+      latestSharedWorkspaceRef.current = {
+        ...latestSharedWorkspaceRef.current,
+        canvasItems: nextCanvasItemsSnapshot,
+        importedState: persistedSharedImportedState,
+      };
+      forceBroadcastSharedCanvas({ canvasItems: nextCanvasItemsSnapshot });
+      if (meetingId) {
+        void saveCanvasWorkspacePatch({
+          meeting_id: meetingId,
+          canvas_items: serializeSharedCanvasItems(nextCanvasItemsSnapshot),
+        }).catch((error) => {
+          console.error("Failed to save shared canvas item keywords:", error);
+        });
+      }
+    }
+  };
+
+  const handleToggleCanvasItemAutoSummaryLock = () => {
+    if (!selectedCanvasItem) return;
+
     const nextLocked = !Boolean(selectedCanvasItem.auto_summary_disabled);
     const nextCanvasItemsSnapshot = canvasItems.map((item) =>
       item.id === selectedCanvasItem.id
@@ -13275,6 +13464,29 @@ export default function MeetingCanvasTab({
       ? "minmax(0, 1fr) clamp(3rem, 3.6vw, 3.75rem)"
       : "minmax(0, 1fr) clamp(3.5rem, 4.2vw, 4.5rem)"
     : `minmax(0, 1fr) ${rightDrawerExpandedWidth}`;
+  const canvasDefaultZoom = isCompactLayout ? 0.86 : 1;
+  const canvasDefaultViewport = useMemo(
+    () => ({ x: 0, y: 0, zoom: canvasDefaultZoom }),
+    [canvasDefaultZoom],
+  );
+  const applyInitialCanvasViewport = useCallback((instance: ReactFlowInstance<Node, Edge>) => {
+    if (!shouldUseCompactViewport()) return;
+    window.requestAnimationFrame(() => {
+      void instance.setViewport({ x: 0, y: 0, zoom: 0.86 });
+    });
+  }, []);
+  const selectedAgendaForIdeationCanvas = selectedAgendaId || agendaModels[0]?.id || "";
+  const selectedRootItemForIdeationCanvas = useMemo(() => {
+    const focusItemId = ideationFocusItemId || selectedCanvasItemId;
+    if (stage !== "ideation" || !focusItemId) return null;
+
+    const selectedItem = canvasItems.find((item) => item.id === focusItemId) || null;
+    if (!selectedItem) return null;
+
+    const rootId = getCanvasItemTopLevelAncestorId(canvasItems, selectedItem.id);
+    const rootItem = canvasItems.find((item) => item.id === rootId) || selectedItem;
+    return rootItem.agenda_id === selectedAgendaForIdeationCanvas ? rootItem : null;
+  }, [canvasItems, ideationFocusItemId, selectedAgendaForIdeationCanvas, selectedCanvasItemId, stage]);
   const latestDiscussionRootItem = useMemo(() => {
     if (!latestHighlightedTopicId) return null;
     const latestItem = canvasItems.find((item) => item.id === latestHighlightedTopicId) || null;
@@ -13604,6 +13816,7 @@ export default function MeetingCanvasTab({
     setSelectedEdgeId("");
     setSelectedNodeId(node.id);
     setLeftPanelTab("detail");
+    const paneRole = typeof node.data?.paneRole === "string" ? node.data.paneRole : "";
     if (stage !== "problem-definition") {
       openRightDrawer();
     }

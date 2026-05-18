@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -63,7 +63,60 @@ CANVAS_TOPIC_CLUSTER_MAX_PARENT_DEPTH = CANVAS_IDEATION_LEFT_VISIBLE_LEVELS - 2
 RUNTIME_SHARED_STATE_TABLE = "meeting_runtime_states"
 RUNTIME_USER_STATE_TABLE = "meeting_user_states"
 IP_WHITELIST = parse_ip_whitelist(os.environ.get("IP_WHITELIST"))
+CORS_ALLOWED_METHODS = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+CORS_BUILTIN_ALLOWED_ORIGINS = {"https://imms-ai.vercel.app"}
+CORS_BUILTIN_ORIGIN_RE = re.compile(r"https://.*\.vercel\.app")
+CORS_ORIGIN_RE = re.compile(os.environ.get("CORS_ORIGIN_REGEX", "")) if os.environ.get("CORS_ORIGIN_REGEX") else None
 AUDIO_IMPORT_ALLOWED_SUFFIXES = {".wav", ".mp3", ".m4a", ".webm"}
+
+
+def _parse_cors_origins(raw: str | None) -> set[str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return set()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return {str(item).strip() for item in parsed if str(item).strip()}
+    except Exception:
+        pass
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+CORS_ALLOWED_ORIGINS = _parse_cors_origins(os.environ.get("CORS_ORIGINS"))
+
+
+def _resolve_cors_origin(origin: str | None) -> str:
+    normalized = (origin or "").strip()
+    if not normalized:
+        return ""
+    if "*" in CORS_ALLOWED_ORIGINS:
+        return normalized
+    if normalized in CORS_ALLOWED_ORIGINS:
+        return normalized
+    if normalized in CORS_BUILTIN_ALLOWED_ORIGINS:
+        return normalized
+    if CORS_ORIGIN_RE and CORS_ORIGIN_RE.fullmatch(normalized):
+        return normalized
+    if CORS_BUILTIN_ORIGIN_RE.fullmatch(normalized):
+        return normalized
+    if normalized.startswith("http://localhost:") or normalized.startswith("http://127.0.0.1:"):
+        return normalized
+    return normalized
+
+
+def _attach_cors_headers(request: Request, response: Response) -> Response:
+    allowed_origin = _resolve_cors_origin(request.headers.get("origin"))
+    if not allowed_origin:
+        return response
+    response.headers["Access-Control-Allow-Origin"] = allowed_origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = CORS_ALLOWED_METHODS
+    response.headers["Access-Control-Allow-Headers"] = request.headers.get("access-control-request-headers") or "*"
+    response.headers["Access-Control-Max-Age"] = "600"
+    response.headers["Vary"] = "Origin"
+    return response
+
 
 _SUPABASE_CLIENT: Client | None = None
 _SUPABASE_CLIENT_INITIALIZED = False
@@ -9164,11 +9217,16 @@ _ensure_analysis_worker_started()
 
 
 @app.middleware("http")
-async def enforce_ip_whitelist(request, call_next):
+async def enforce_ip_whitelist(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return _attach_cors_headers(request, Response(status_code=204))
+
     client_ip = extract_client_ip(request.headers, request.client.host if request.client else None)
     if not is_ip_allowed(client_ip, IP_WHITELIST):
-        return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
-    return await call_next(request)
+        return _attach_cors_headers(request, JSONResponse(status_code=403, content={"detail": "IP not allowed"}))
+
+    response = await call_next(request)
+    return _attach_cors_headers(request, response)
 
 
 @app.get("/api/health")

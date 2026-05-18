@@ -528,7 +528,6 @@ export interface CanvasWorkspaceProblemGroup {
   source_child_item_ids?: string[];
   linked_group_ids?: string[];
   discussion_items?: CanvasProblemDiscussionItem[];
-  linked_group_ids?: string[];
   evidence_utterance_ids?: string[];
   source_summary_items: string[];
   conclusion: string;
