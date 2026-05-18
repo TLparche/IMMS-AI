@@ -4472,9 +4472,8 @@ export default function MeetingCanvasTab({
           insight_lens: item.insight_lens || "",
           conclusion: item.conclusion || "",
         })),
-      utterances: buildProblemTaxonomyUtterances(transcripts),
     }),
-    [meetingId, meetingTopicForAi, problemGroups, transcripts],
+    [meetingId, meetingTopicForAi, problemGroups],
   );
 
   const forceBroadcastSharedCanvas = useCallback(
@@ -6456,11 +6455,6 @@ export default function MeetingCanvasTab({
   const handleGenerateProblemChildren = useCallback(
     async (group: ProblemGroupViewModel) => {
       if (!meetingId || problemChildGenerationPendingId) return;
-      const utterances = buildProblemTaxonomyUtterances(transcripts);
-      if (utterances.length === 0) {
-        setActivityMessage("세부 분류를 만들 STT 발화가 아직 없습니다.");
-        return;
-      }
 
       setProblemChildGenerationPendingId(group.group_id);
       try {
@@ -6473,7 +6467,6 @@ export default function MeetingCanvasTab({
           parent_evidence_utterance_ids: group.evidence_utterance_ids || [],
           existing_group_ids: problemGroups.map((item) => item.group_id),
           existing_groups: buildProblemTaxonomyExistingGroupsPayload(problemGroups),
-          utterances,
           max_groups: 5,
         });
         const existingIds = new Set(problemGroups.map((item) => item.group_id));
@@ -6522,7 +6515,6 @@ export default function MeetingCanvasTab({
       meetingTopicForAi,
       problemChildGenerationPendingId,
       problemGroups,
-      transcripts,
     ],
   );
 

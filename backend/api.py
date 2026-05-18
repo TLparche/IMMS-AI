@@ -39,6 +39,10 @@ SUMMARY_POINT_TARGET_LEN = None
 REALTIME_MIN_SHIFT_SPAN = 6
 LLM_IO_LOG_MAX = 160
 LLM_IO_PREVIEW_MAX = 6000
+PROBLEM_TAXONOMY_RAW_CONTEXT_CHAR_BUDGET = 5200
+PROBLEM_TAXONOMY_CHUNK_CHAR_BUDGET = 2800
+PROBLEM_TAXONOMY_CHUNK_MAX_ROWS = 18
+PROBLEM_TAXONOMY_SUMMARY_TRIGGER_CHARS = 2200
 CANVAS_IDEA_FAILURE_RETRY_DELAY_SECONDS = 60
 CANVAS_IDEA_COMPACTION_MIN_VISIBLE = 6
 CANVAS_IDEA_COMPACTION_MAX_MERGES_PER_JOB = 4
@@ -1867,7 +1871,7 @@ class ProblemTaxonomyGenerateInput(BaseModel):
     parent_evidence_utterance_ids: list[str] = Field(default_factory=list)
     existing_group_ids: list[str] = Field(default_factory=list)
     existing_groups: list[ProblemTaxonomyExistingGroupInput] = Field(default_factory=list)
-    utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, min_length=1, max_length=300)
+    utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, max_length=300)
     max_groups: int = Field(default=6, ge=1, le=12)
 
 
@@ -2533,6 +2537,80 @@ def _problem_taxonomy_utterance_dict(item: ProblemTaxonomyUtteranceInput) -> dic
     }
 
 
+def _problem_taxonomy_utterance_row(raw: Any) -> dict[str, str]:
+    if isinstance(raw, ProblemTaxonomyUtteranceInput):
+        return _problem_taxonomy_utterance_dict(raw)
+    if isinstance(raw, dict):
+        text = _strip_leading_timestamp(raw.get("text"))
+        return {
+            "id": _safe_text(raw.get("id")) or f"utterance-{_stable_short_id(text)}",
+            "speaker": _safe_text(raw.get("speaker"), "참가자"),
+            "text": text,
+            "timestamp": _safe_text(raw.get("timestamp")),
+        }
+    text = _strip_leading_timestamp(raw)
+    return {
+        "id": f"utterance-{_stable_short_id(text)}",
+        "speaker": "참가자",
+        "text": text,
+        "timestamp": "",
+    }
+
+
+def _normalize_problem_taxonomy_utterance_rows(raw_items: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_items, list):
+        return []
+    rows = [_problem_taxonomy_utterance_row(item) for item in raw_items]
+    return [row for row in rows if _safe_text(row.get("text"))]
+
+
+def _get_problem_taxonomy_utterance_snapshot(rt: RuntimeStore, meeting_id: str) -> list[dict[str, str]]:
+    normalized_meeting_id = _safe_text(meeting_id)
+    if not normalized_meeting_id:
+        return []
+    workspace = _ensure_canvas_workspace_entry(rt, normalized_meeting_id)
+    llm_cache = workspace.get("llm_cache") if isinstance(workspace, dict) else {}
+    if not isinstance(llm_cache, dict):
+        return []
+    cached = llm_cache.get("problem_taxonomy_utterance_snapshot")
+    if not isinstance(cached, dict):
+        return []
+    result = cached.get("result")
+    utterances = result.get("utterances") if isinstance(result, dict) else []
+    return _normalize_problem_taxonomy_utterance_rows(utterances)
+
+
+def _set_problem_taxonomy_utterance_snapshot(rt: RuntimeStore, meeting_id: str, rows: list[dict[str, str]]) -> None:
+    normalized_meeting_id = _safe_text(meeting_id)
+    normalized_rows = _normalize_problem_taxonomy_utterance_rows(rows)
+    if not normalized_meeting_id or not normalized_rows:
+        return
+    workspace = _ensure_canvas_workspace_entry(rt, normalized_meeting_id)
+    llm_cache = workspace.get("llm_cache")
+    if not isinstance(llm_cache, dict):
+        llm_cache = {}
+        workspace["llm_cache"] = llm_cache
+    llm_cache["problem_taxonomy_utterance_snapshot"] = {
+        "signature": _canvas_llm_signature(normalized_rows),
+        "generated_at": _now_ts(),
+        "result": {
+            "utterances": copy.deepcopy(normalized_rows),
+            "utterance_count": len(normalized_rows),
+        },
+    }
+
+
+def _resolve_problem_taxonomy_utterance_rows(
+    meeting_id: str,
+    utterances: list[ProblemTaxonomyUtteranceInput] | list[dict[str, str]] | None,
+) -> list[dict[str, str]]:
+    rows = _normalize_problem_taxonomy_utterance_rows(list(utterances or []))
+    if rows:
+        _set_problem_taxonomy_utterance_snapshot(RT, meeting_id, rows)
+        return rows
+    return _get_problem_taxonomy_utterance_snapshot(RT, meeting_id)
+
+
 def _problem_taxonomy_existing_group_dict(item: ProblemTaxonomyExistingGroupInput) -> dict[str, Any]:
     return {
         "group_id": _safe_text(item.group_id),
@@ -2717,7 +2795,7 @@ def _problem_taxonomy_relevance(row: dict[str, str], parent_topic: str, parent_t
 def _select_problem_taxonomy_rows(payload: ProblemTaxonomyGenerateInput) -> list[dict[str, str]]:
     rows = [
         row
-        for row in (_problem_taxonomy_utterance_dict(item) for item in (payload.utterances or []))
+        for row in _resolve_problem_taxonomy_utterance_rows(payload.meeting_id, payload.utterances)
         if _safe_text(row.get("text"))
     ]
     parent_ids = {_safe_text(item) for item in (payload.parent_evidence_utterance_ids or []) if _safe_text(item)}
@@ -2922,13 +3000,270 @@ def _normalize_problem_taxonomy_llm_groups(
     return groups
 
 
-def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str:
+def _problem_taxonomy_rows_char_count(rows: list[dict[str, str]]) -> int:
+    return sum(len(_safe_text(row.get("text"))) + len(_safe_text(row.get("speaker"))) + 18 for row in rows)
+
+
+def _chunk_problem_taxonomy_rows(rows: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    chunks: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    current_chars = 0
+    for row in rows:
+        row_chars = len(_safe_text(row.get("text"))) + len(_safe_text(row.get("speaker"))) + 18
+        if current and (
+            len(current) >= PROBLEM_TAXONOMY_CHUNK_MAX_ROWS
+            or current_chars + row_chars > PROBLEM_TAXONOMY_CHUNK_CHAR_BUDGET
+        ):
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(row)
+        current_chars += row_chars
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _problem_taxonomy_prompt_rows(rows: list[dict[str, str]], max_text_chars: int = 900) -> list[dict[str, str]]:
+    return [
+        {
+            "id": _safe_text(row.get("id")),
+            "speaker": _safe_text(row.get("speaker"), "참가자"),
+            "text": _truncate_text(row.get("text"), max_text_chars),
+            "timestamp": _safe_text(row.get("timestamp")),
+        }
+        for row in rows
+        if _safe_text(row.get("text"))
+    ]
+
+
+def _select_problem_taxonomy_raw_context_rows(payload: ProblemTaxonomyGenerateInput, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    if _problem_taxonomy_rows_char_count(rows) <= PROBLEM_TAXONOMY_RAW_CONTEXT_CHAR_BUDGET:
+        return rows
+
+    parent_topic = _safe_text(payload.parent_topic)
+    parent_tokens = set(_problem_taxonomy_tokens(parent_topic))
+    scored = [
+        (index, row, _problem_taxonomy_relevance(row, parent_topic, parent_tokens))
+        for index, row in enumerate(rows)
+    ]
+    if parent_topic or parent_tokens:
+        selected = sorted(
+            [entry for entry in scored if entry[2] > 0],
+            key=lambda entry: (-entry[2], entry[0]),
+        )
+    else:
+        selected = scored
+
+    picked: list[tuple[int, dict[str, str]]] = []
+    total_chars = 0
+    seen_ids: set[str] = set()
+    for index, row, _score in selected:
+        row_id = _safe_text(row.get("id"))
+        if row_id and row_id in seen_ids:
+            continue
+        row_chars = len(_safe_text(row.get("text"))) + len(_safe_text(row.get("speaker"))) + 18
+        if picked and total_chars + row_chars > PROBLEM_TAXONOMY_RAW_CONTEXT_CHAR_BUDGET:
+            break
+        picked.append((index, row))
+        total_chars += row_chars
+        if row_id:
+            seen_ids.add(row_id)
+
+    if not picked:
+        picked = [(index, row) for index, row, _score in scored[:12]]
+
+    return [row for _index, row in sorted(picked, key=lambda item: item[0])]
+
+
+def _build_problem_taxonomy_chunk_summary_prompt(
+    payload: ProblemTaxonomyGenerateInput,
+    rows: list[dict[str, str]],
+    chunk_index: int,
+    chunk_count: int,
+) -> str:
+    input_payload = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "parent_topic": _safe_text(payload.parent_topic),
+        "chunk_index": chunk_index,
+        "chunk_count": chunk_count,
+        "utterances": _problem_taxonomy_prompt_rows(rows),
+    }
+    return (
+        "너는 회의 전문 chunk를 문제정의 요약 트리에 쓰기 좋게 압축하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- 입력 utterances에서 실제로 말한 논의 포인트만 요약한다.\n"
+        "- 문서 제목 구조로 확장할 수 있도록, 서로 겹치지 않는 핵심 포인트를 뽑는다.\n"
+        "- 새로운 사실, 장소, 이유, 해결책을 발명하지 않는다.\n"
+        "- 각 summary_items 항목은 반드시 evidence_utterance_ids를 가진다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(input_payload, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "chunk_title": "경복궁 후보와 선택 근거",\n'
+        '  "summary_items": [\n'
+        '    {"text": "경복궁은 역사 학습에 유용한 목적지로 제안됐다.", "evidence_utterance_ids": ["utt-1"]},\n'
+        '    {"text": "교통과 식당 접근성도 경복궁 선택 근거로 언급됐다.", "evidence_utterance_ids": ["utt-1", "utt-2"]}\n'
+        "  ],\n"
+        '  "keywords": ["경복궁", "역사 학습", "교통", "식당"]\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- summary_items는 2~6개다.\n"
+        "- 각 text는 한국어 1문장, 20~70자 정도다.\n"
+        "- 같은 의미를 반복하지 말고 MECE에 가깝게 분리한다.\n"
+        "- evidence_utterance_ids는 입력 utterances에 있는 id만 사용한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _normalize_problem_taxonomy_chunk_summary(
+    parsed: Any,
+    rows: list[dict[str, str]],
+    chunk_index: int,
+) -> dict[str, Any]:
+    row_ids = {_safe_text(row.get("id")) for row in rows if _safe_text(row.get("id"))}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    raw_items = parsed.get("summary_items") or parsed.get("summaryItems") or []
+    summary_items: list[dict[str, Any]] = []
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            if isinstance(item, dict):
+                text = _safe_text(item.get("text") or item.get("summary"))
+                evidence_ids = [
+                    _safe_text(value)
+                    for value in (item.get("evidence_utterance_ids") or item.get("evidenceUtteranceIds") or [])
+                    if _safe_text(value) in row_ids
+                ]
+            else:
+                text = _safe_text(item)
+                evidence_ids = []
+            if not text:
+                continue
+            if not evidence_ids:
+                evidence_ids = [_safe_text(row.get("id")) for row in rows[:2] if _safe_text(row.get("id"))]
+            summary_items.append(
+                {
+                    "text": _to_summary_point(text, max_len=90),
+                    "evidence_utterance_ids": _dedup_preserve(evidence_ids, limit=12),
+                }
+            )
+            if len(summary_items) >= 6:
+                break
+
+    keywords = [
+        _safe_text(item)
+        for item in (parsed.get("keywords") if isinstance(parsed.get("keywords"), list) else [])
+        if _safe_text(item)
+    ][:10]
+    return {
+        "chunk_id": f"chunk-{chunk_index}",
+        "chunk_title": _normalize_problem_summary_label(parsed.get("chunk_title") or parsed.get("title"), f"구간 {chunk_index}", max_len=32),
+        "summary_items": summary_items,
+        "keywords": keywords,
+        "utterance_ids": [_safe_text(row.get("id")) for row in rows if _safe_text(row.get("id"))],
+    }
+
+
+def _get_or_create_problem_taxonomy_chunk_summary(
+    rt: RuntimeStore,
+    meeting_id: str,
+    client: Any,
+    payload: ProblemTaxonomyGenerateInput,
+    rows: list[dict[str, str]],
+    chunk_index: int,
+    chunk_count: int,
+) -> dict[str, Any]:
+    signature = _canvas_llm_signature(
+        {
+            "version": 1,
+            "meeting_topic": _safe_text(payload.meeting_topic),
+            "rows": rows,
+        }
+    )
+    cache_key = f"problem_taxonomy_chunk_summary:{_stable_short_id(signature)}"
+    with rt.lock:
+        cached = _get_canvas_llm_cached_result(rt, meeting_id, cache_key, signature)
+    if cached:
+        return cached
+
+    parsed = _call_llm_json(
+        rt,
+        client,
+        prompt=_build_problem_taxonomy_chunk_summary_prompt(payload, rows, chunk_index, chunk_count),
+        stage="canvas_problem_taxonomy_chunk_summary",
+        temperature=0.12,
+        max_tokens=650,
+    )
+    result = _normalize_problem_taxonomy_chunk_summary(parsed, rows, chunk_index)
+    with rt.lock:
+        _set_canvas_llm_cached_result(rt, meeting_id, cache_key, signature, result)
+    return result
+
+
+def _build_problem_taxonomy_context(
+    rt: RuntimeStore,
+    payload: ProblemTaxonomyGenerateInput,
+    client: Any | None,
+    llm_ready: bool,
+) -> tuple[dict[str, Any], str]:
     rows = _select_problem_taxonomy_rows(payload)
+    selected_rows = _select_problem_taxonomy_raw_context_rows(payload, rows)
+    warning = ""
+    chunk_summaries: list[dict[str, Any]] = []
+    should_summarize = (
+        llm_ready
+        and bool(_safe_text(payload.meeting_id))
+        and _problem_taxonomy_rows_char_count(rows) > PROBLEM_TAXONOMY_SUMMARY_TRIGGER_CHARS
+    )
+
+    if should_summarize and client is not None:
+        chunks = _chunk_problem_taxonomy_rows(rows)
+        for index, chunk_rows in enumerate(chunks, start=1):
+            try:
+                chunk_summaries.append(
+                    _get_or_create_problem_taxonomy_chunk_summary(
+                        rt,
+                        _safe_text(payload.meeting_id),
+                        client,
+                        payload,
+                        chunk_rows,
+                        index,
+                        len(chunks),
+                    )
+                )
+            except Exception as exc:
+                warning = f"chunk 요약 생성 실패: {exc}"
+                chunk_summaries = []
+                break
+    elif _problem_taxonomy_rows_char_count(rows) > PROBLEM_TAXONOMY_RAW_CONTEXT_CHAR_BUDGET:
+        warning = "LLM chunk 요약을 사용할 수 없어 관련 원문 일부만 사용했습니다."
+
+    return {
+        "rows": selected_rows,
+        "chunk_summaries": chunk_summaries,
+        "total_utterance_count": len(rows),
+        "included_utterance_count": len(selected_rows),
+        "raw_context_char_count": _problem_taxonomy_rows_char_count(selected_rows),
+        "chunk_summary_count": len(chunk_summaries),
+    }, warning
+
+
+def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput, context: dict[str, Any] | None = None) -> str:
+    context = context or {}
+    rows = context.get("rows") if isinstance(context.get("rows"), list) else _select_problem_taxonomy_rows(payload)
+    chunk_summaries = context.get("chunk_summaries") if isinstance(context.get("chunk_summaries"), list) else []
     parent_topic = _safe_text(payload.parent_topic)
     input_payload = {
         "meeting_topic": _safe_text(payload.meeting_topic),
         "parent_topic": parent_topic,
         "parent_group_id": _safe_text(payload.parent_group_id),
+        "context_policy": {
+            "total_utterance_count": int(context.get("total_utterance_count") or len(rows)),
+            "included_raw_utterance_count": int(context.get("included_utterance_count") or len(rows)),
+            "chunk_summary_count": len(chunk_summaries),
+            "note": "chunk_summaries는 LLM이 만든 중간 요약이며, raw_utterances는 근거 확인용으로 선별된 원문이다.",
+        },
         "existing_groups_in_scope": [
             {
                 "group_id": group.get("group_id", ""),
@@ -2937,7 +3272,8 @@ def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str
             }
             for group in _problem_taxonomy_scope_existing_groups(payload)
         ],
-        "utterances": rows[:160],
+        "chunk_summaries": chunk_summaries,
+        "raw_utterances": _problem_taxonomy_prompt_rows(rows[:80]),
         "max_groups": payload.max_groups,
     }
     scope = (
@@ -2987,6 +3323,7 @@ def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str
         "- 같은 레벨의 groups는 서로 겹치지 않게 분리한다. 한 근거를 같은 의미의 노드로 반복하지 않는다.\n"
         "- source_summary_items는 실제 발화를 1~3문장으로 압축한 근거 요약이다.\n"
         "- evidence_utterance_ids에는 그 분류를 뒷받침하는 utterance id만 넣는다.\n"
+        "- chunk_summaries가 있으면 전체 흐름은 chunk_summaries에서 파악하고, raw_utterances는 근거 확인과 세부 뉘앙스 확인에만 사용한다.\n"
         "- existing_groups_in_scope와 같은 topic 또는 같은 근거의 분류는 다시 만들지 않는다.\n"
         "- 근거가 부족하면 groups를 빈 배열로 둔다.\n\n"
         "[입력 JSON]\n"
@@ -3591,7 +3928,7 @@ def _problem_grouping_rationale_basis_items(payload: ProblemGroupingRationaleGen
         ),
     )
     scored_rows: list[tuple[int, str]] = []
-    for row in (_problem_taxonomy_utterance_dict(item) for item in payload.utterances or []):
+    for row in _resolve_problem_taxonomy_utterance_rows(payload.meeting_id, payload.utterances):
         text = _safe_text(row.get("text"))
         if not text:
             continue
@@ -3648,17 +3985,14 @@ def _build_problem_grouping_rationale_local(payload: ProblemGroupingRationaleGen
 
 def _build_problem_grouping_rationale_prompt(payload: ProblemGroupingRationaleGenerateInput) -> str:
     evidence_ids = {_safe_text(item) for item in payload.group.evidence_utterance_ids or [] if _safe_text(item)}
+    rows = _resolve_problem_taxonomy_utterance_rows(payload.meeting_id, payload.utterances)
     evidence_rows = [
-        _problem_taxonomy_utterance_dict(item)
-        for item in payload.utterances or []
-        if _safe_text(item.text) and (not evidence_ids or _safe_text(item.id) in evidence_ids)
+        row
+        for row in rows
+        if _safe_text(row.get("text")) and (not evidence_ids or _safe_text(row.get("id")) in evidence_ids)
     ][:24]
     if not evidence_rows:
-        evidence_rows = [
-            _problem_taxonomy_utterance_dict(item)
-            for item in (payload.utterances or [])[:24]
-            if _safe_text(item.text)
-        ]
+        evidence_rows = [row for row in rows[:24] if _safe_text(row.get("text"))]
     serialized = {
         "meeting_topic": _safe_text(payload.meeting_topic),
         "group": {
@@ -9650,7 +9984,16 @@ def post_canvas_problem_definition(payload: ProblemDefinitionGenerateInput):
 @app.post("/api/canvas/problem-taxonomy")
 def post_canvas_problem_taxonomy(payload: ProblemTaxonomyGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
-    signature = _canvas_llm_signature(payload)
+    snapshot_rows = _resolve_problem_taxonomy_utterance_rows(payload.meeting_id, payload.utterances)
+    signature_payload = _payload_to_primitive(payload)
+    if isinstance(signature_payload, dict):
+        signature_payload["utterances"] = []
+    signature = _canvas_llm_signature(
+        {
+            "payload": signature_payload,
+            "utterance_snapshot_signature": _canvas_llm_signature(snapshot_rows),
+        }
+    )
 
     def _compute() -> dict[str, Any]:
         groups = _build_problem_taxonomy_groups_local(payload)
@@ -9660,14 +10003,17 @@ def post_canvas_problem_taxonomy(payload: ProblemTaxonomyGenerateInput):
         client, llm_ready, llm_note = _ensure_llm_ready(RT)
         if llm_ready:
             try:
+                taxonomy_context, context_warning = _build_problem_taxonomy_context(RT, payload, client, llm_ready)
                 parsed = _call_llm_json(
                     RT,
                     client,
-                    prompt=_build_problem_taxonomy_prompt(payload),
+                    prompt=_build_problem_taxonomy_prompt(payload, taxonomy_context),
                     stage="canvas_problem_taxonomy",
                     temperature=0.15,
                     max_tokens=1800,
                 )
+                if context_warning:
+                    warning = context_warning
                 parsed_groups = parsed.get("groups") if isinstance(parsed, dict) else None
                 llm_groups = _normalize_problem_taxonomy_llm_groups(payload, parsed_groups)
                 if llm_groups:
@@ -9682,7 +10028,7 @@ def post_canvas_problem_taxonomy(payload: ProblemTaxonomyGenerateInput):
                     groups = []
                     used_llm = True
                 else:
-                    warning = "LLM JSON 형식이 예상과 달라 로컬 분류를 사용했습니다."
+                    warning = f"{warning} LLM JSON 형식이 예상과 달라 로컬 분류를 사용했습니다.".strip()
             except Exception as exc:
                 warning = f"문제정의 분류 LLM 생성 실패: {exc}"
         elif not groups:
@@ -9780,7 +10126,16 @@ def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
 def post_canvas_problem_grouping_rationale(payload: ProblemGroupingRationaleGenerateInput):
     normalized_meeting_id = _safe_text(payload.meeting_id)
     group_id = _safe_text(payload.group.group_id)
-    signature = _canvas_llm_signature(payload)
+    snapshot_rows = _resolve_problem_taxonomy_utterance_rows(payload.meeting_id, payload.utterances)
+    signature_payload = _payload_to_primitive(payload)
+    if isinstance(signature_payload, dict):
+        signature_payload["utterances"] = []
+    signature = _canvas_llm_signature(
+        {
+            "payload": signature_payload,
+            "utterance_snapshot_signature": _canvas_llm_signature(snapshot_rows),
+        }
+    )
 
     def _compute() -> dict[str, Any]:
         local_result = _build_problem_grouping_rationale_local(payload)

@@ -176,7 +176,7 @@ export async function generateCanvasProblemTaxonomy(payload: {
     source_summary_items?: string[];
   }>;
   max_groups?: number;
-  utterances: Array<{
+  utterances?: Array<{
     id: string;
     speaker: string;
     text: string;
