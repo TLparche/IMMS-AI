@@ -1892,6 +1892,32 @@ class ProblemConclusionGenerateInput(BaseModel):
     group: ProblemConclusionGroupInput
 
 
+class ProblemGroupingRationaleChildInput(BaseModel):
+    group_id: str = ""
+    topic: str = ""
+    insight_lens: str = ""
+    conclusion: str = ""
+
+
+class ProblemGroupingRationaleGroupInput(BaseModel):
+    group_id: str = ""
+    topic: str = ""
+    insight_lens: str = ""
+    conclusion: str = ""
+    agenda_titles: list[str] = Field(default_factory=list)
+    source_summary_items: list[str] = Field(default_factory=list)
+    evidence_utterance_ids: list[str] = Field(default_factory=list)
+    ideas: list[ProblemConclusionIdeaInput] = Field(default_factory=list)
+
+
+class ProblemGroupingRationaleGenerateInput(BaseModel):
+    meeting_id: str = ""
+    meeting_topic: str = ""
+    group: ProblemGroupingRationaleGroupInput
+    child_groups: list[ProblemGroupingRationaleChildInput] = Field(default_factory=list, max_length=24)
+    utterances: list[ProblemTaxonomyUtteranceInput] = Field(default_factory=list, max_length=300)
+
+
 class MeetingGoalGenerateInput(BaseModel):
     meeting_id: str = ""
     topic: str = ""
@@ -3442,6 +3468,159 @@ def _build_problem_group_conclusion_prompt(payload: ProblemConclusionGenerateInp
         "- conclusion은 '이 그룹에서는', '~에서는', '~정리된다', '~필요가 있다' 같은 틀을 쓰지 않는다.\n"
         "- conclusion은 바로 핵심 결과 문장만 쓴다.\n"
         "- topic을 반복만 하지 말고, 근거를 종합한 결과를 써야 한다.\n"
+        "- 불필요한 설명 없이 JSON만 반환한다."
+    )
+
+
+def _problem_grouping_rationale_basis_items(payload: ProblemGroupingRationaleGenerateInput) -> list[str]:
+    basis: list[str] = []
+
+    for item in payload.group.source_summary_items or []:
+        text = _safe_text(item)
+        if text:
+            basis.append(_to_summary_point(text, max_len=72))
+
+    for idea in payload.group.ideas or []:
+        text = _safe_text(idea.body) or _safe_text(idea.title)
+        if text:
+            basis.append(_to_summary_point(text, max_len=72))
+
+    evidence_ids = {_safe_text(item) for item in payload.group.evidence_utterance_ids or [] if _safe_text(item)}
+    topic_tokens = set(
+        _problem_taxonomy_tokens(
+            " ".join(
+                [
+                    _safe_text(payload.group.topic),
+                    _safe_text(payload.group.insight_lens),
+                    _safe_text(payload.group.conclusion),
+                    " ".join(_safe_text(item) for item in payload.group.source_summary_items or []),
+                ],
+            ),
+        ),
+    )
+    scored_rows: list[tuple[int, str]] = []
+    for row in (_problem_taxonomy_utterance_dict(item) for item in payload.utterances or []):
+        text = _safe_text(row.get("text"))
+        if not text:
+            continue
+        row_id = _safe_text(row.get("id"))
+        score = 3 if row_id and row_id in evidence_ids else 0
+        if topic_tokens:
+            score += len(topic_tokens & set(_problem_taxonomy_tokens(text)))
+        if score > 0:
+            scored_rows.append((score, _to_summary_point(text, max_len=72)))
+
+    for _, text in sorted(scored_rows, key=lambda item: item[0], reverse=True):
+        basis.append(text)
+
+    for child in payload.child_groups or []:
+        child_topic = _safe_text(child.topic)
+        child_summary = _safe_text(child.conclusion) or _safe_text(child.insight_lens)
+        if child_topic and child_summary:
+            basis.append(f"{child_topic}: {_to_summary_point(child_summary, max_len=56)}")
+        elif child_topic:
+            basis.append(child_topic)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in basis:
+        key = re.sub(r"\s+", " ", _safe_text(item)).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(_safe_text(item))
+        if len(deduped) >= 5:
+            break
+
+    return deduped
+
+
+def _build_problem_grouping_rationale_local(payload: ProblemGroupingRationaleGenerateInput) -> dict[str, Any]:
+    topic = _safe_text(payload.group.topic, "이 분류")
+    child_topics = [_safe_text(item.topic) for item in payload.child_groups or [] if _safe_text(item.topic)]
+    basis_items = _problem_grouping_rationale_basis_items(payload)
+
+    if child_topics:
+        visible_children = ", ".join(child_topics[:4])
+        rationale = f"{topic}은 {visible_children}처럼 세부 논의가 나뉘는 흐름을 기준으로 묶은 것으로 보입니다."
+    elif basis_items:
+        rationale = f"{topic}은 '{basis_items[0]}' 흐름이 반복되어 하나의 분류로 묶은 것으로 보입니다."
+    else:
+        rationale = f"{topic}은 현재 노드 제목과 연결된 요약을 기준으로 임시 분류한 것으로 보입니다."
+
+    return {
+        "rationale": rationale,
+        "basis_items": basis_items,
+    }
+
+
+def _build_problem_grouping_rationale_prompt(payload: ProblemGroupingRationaleGenerateInput) -> str:
+    evidence_ids = {_safe_text(item) for item in payload.group.evidence_utterance_ids or [] if _safe_text(item)}
+    evidence_rows = [
+        _problem_taxonomy_utterance_dict(item)
+        for item in payload.utterances or []
+        if _safe_text(item.text) and (not evidence_ids or _safe_text(item.id) in evidence_ids)
+    ][:24]
+    if not evidence_rows:
+        evidence_rows = [
+            _problem_taxonomy_utterance_dict(item)
+            for item in (payload.utterances or [])[:24]
+            if _safe_text(item.text)
+        ]
+    serialized = {
+        "meeting_topic": _safe_text(payload.meeting_topic),
+        "group": {
+            "group_id": _safe_text(payload.group.group_id),
+            "topic": _safe_text(payload.group.topic),
+            "insight_lens": _safe_text(payload.group.insight_lens),
+            "conclusion": _safe_text(payload.group.conclusion),
+            "agenda_titles": [_safe_text(item) for item in payload.group.agenda_titles or [] if _safe_text(item)],
+            "source_summary_items": [
+                _safe_text(item) for item in payload.group.source_summary_items or [] if _safe_text(item)
+            ][:12],
+            "ideas": [
+                {
+                    "id": _safe_text(item.id),
+                    "kind": _safe_text(item.kind, "note"),
+                    "title": _safe_text(item.title),
+                    "body": _safe_text(item.body),
+                }
+                for item in payload.group.ideas or []
+                if _safe_text(item.title) or _safe_text(item.body)
+            ][:12],
+        },
+        "child_groups": [
+            {
+                "group_id": _safe_text(item.group_id),
+                "topic": _safe_text(item.topic),
+                "insight_lens": _safe_text(item.insight_lens),
+                "conclusion": _safe_text(item.conclusion),
+            }
+            for item in payload.child_groups or []
+            if _safe_text(item.topic)
+        ][:12],
+        "evidence_utterances": evidence_rows,
+    }
+    return (
+        "너는 문제정의 캔버스에서 AI가 어떤 기준으로 노드를 묶었는지 설명하는 분석기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "[목표]\n"
+        "- group, child_groups, evidence_utterances를 보고 이 분류가 어떤 공통 기준으로 묶였는지 추정한다.\n"
+        "- 회의에 없던 새로운 사실을 만들지 않는다.\n"
+        "- 사용자가 회의 효율화를 위해 AI가 한 일을 이해할 수 있게 짧고 투명하게 설명한다.\n\n"
+        "[입력 JSON]\n"
+        f"{json.dumps(serialized, ensure_ascii=False, indent=2)}\n\n"
+        "[출력 JSON 스키마]\n"
+        "{\n"
+        '  "group_id": "problem-group-1",\n'
+        '  "rationale": "반복적으로 나온 장소 후보와 이동 조건을 함께 다뤄 하나의 분류로 묶은 것으로 보입니다.",\n'
+        '  "basis_items": ["서울과 경주가 현장학습 후보로 반복 언급됨", "이동 시간과 교육성이 함께 비교됨"]\n'
+        "}\n\n"
+        "[규칙]\n"
+        "- group_id는 입력값을 그대로 유지한다.\n"
+        "- rationale은 한국어 1~2문장, 90자 이내.\n"
+        "- basis_items는 2~4개, 입력에 근거한 짧은 문장 또는 구.\n"
+        "- 확실하지 않은 경우 '~로 보입니다'처럼 추정임을 드러낸다.\n"
+        "- basis_items에는 입력에 없는 내용을 추가하지 않는다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 
@@ -9500,6 +9679,78 @@ def post_canvas_problem_conclusion(payload: ProblemConclusionGenerateInput):
         RT,
         normalized_meeting_id,
         f"problem_conclusion:{group_id}",
+        signature,
+        _compute,
+    )
+
+
+@app.post("/api/canvas/problem-grouping-rationale")
+def post_canvas_problem_grouping_rationale(payload: ProblemGroupingRationaleGenerateInput):
+    normalized_meeting_id = _safe_text(payload.meeting_id)
+    group_id = _safe_text(payload.group.group_id)
+    signature = _canvas_llm_signature(payload)
+
+    def _compute() -> dict[str, Any]:
+        local_result = _build_problem_grouping_rationale_local(payload)
+        rationale = _safe_text(local_result.get("rationale"))
+        basis_items = [
+            _safe_text(item)
+            for item in local_result.get("basis_items", [])
+            if _safe_text(item)
+        ][:5]
+        used_llm = False
+        warning = ""
+
+        client, llm_ready, llm_note = _ensure_llm_ready(RT)
+        if llm_ready:
+            try:
+                parsed = _call_llm_json(
+                    RT,
+                    client,
+                    prompt=_build_problem_grouping_rationale_prompt(payload),
+                    stage="canvas_problem_grouping_rationale",
+                    temperature=0.15,
+                    max_tokens=420,
+                )
+                candidate = _safe_text(parsed.get("rationale")) if isinstance(parsed, dict) else ""
+                candidate_basis = parsed.get("basis_items") if isinstance(parsed, dict) else []
+                parsed_basis = [
+                    _safe_text(item)
+                    for item in (candidate_basis if isinstance(candidate_basis, list) else [])
+                    if _safe_text(item)
+                ][:5]
+                if candidate:
+                    rationale = candidate
+                    basis_items = parsed_basis or basis_items
+                    used_llm = True
+                    RT.last_llm_parsed_json = {
+                        "stage": "canvas_problem_grouping_rationale",
+                        "group_id": group_id,
+                        "rationale": rationale,
+                        "basis_items": basis_items,
+                    }
+                    RT.last_llm_parsed_at = _now_ts()
+                else:
+                    warning = "LLM JSON 형식이 예상과 달라 로컬 분류 기준을 사용했습니다."
+            except Exception as exc:
+                warning = f"분류 기준 LLM 생성 실패: {exc}"
+        else:
+            warning = llm_note or "LLM 미연결 상태로 로컬 분류 기준을 사용했습니다."
+
+        return {
+            "ok": True,
+            "used_llm": used_llm,
+            "warning": warning,
+            "generated_at": _now_ts(),
+            "group_id": group_id,
+            "rationale": rationale,
+            "basis_items": basis_items,
+        }
+
+    return _run_canvas_llm_cached_request(
+        RT,
+        normalized_meeting_id,
+        f"problem_grouping_rationale:{group_id}",
         signature,
         _compute,
     )

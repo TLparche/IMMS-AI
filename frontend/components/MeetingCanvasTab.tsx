@@ -27,6 +27,7 @@ import {
   getCanvasIdeaAssimilationWorkspaceJob,
   getCanvasProblemDiscussionWorkspaceJob,
   generateProblemGroupConclusion,
+  generateProblemGroupingRationale,
   generateCanvasProblemTaxonomy,
   generateCanvasSolutionStage,
   flushCanvasPersonalNotes,
@@ -109,6 +110,15 @@ type PersonalNote = {
 
 type ProblemGroupViewModel = CanvasProblemDefinitionGroup & {
   status: ProblemGroupStatus;
+};
+
+type ProblemGroupingRationaleViewModel = {
+  groupId: string;
+  rationale: string;
+  basisItems: string[];
+  usedLlm: boolean;
+  warning?: string;
+  generatedAt?: string;
 };
 
 type ProblemDiscussionViewModel = CanvasProblemDiscussionItem;
@@ -2743,6 +2753,9 @@ function makeProblemTopicNodeLabel(
   childCount: number,
   childCollapsed: boolean,
   childLoading: boolean,
+  criteriaLoading: boolean,
+  hasGroupingRationale: boolean,
+  onShowGroupingRationale: (event: React.MouseEvent<HTMLButtonElement>) => void,
   onGenerateChildren: (event: React.MouseEvent<HTMLButtonElement>) => void,
   onToggleChildren: (event: React.MouseEvent<HTMLButtonElement>) => void,
   onEdit: (event: React.MouseEvent<HTMLButtonElement>) => void,
@@ -2804,6 +2817,15 @@ function makeProblemTopicNodeLabel(
         ) : null}
       </div>
       <div className="mt-4 flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          className="nodrag nopan rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2.5 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:border-[#1b59f8]/20 hover:bg-[#eef4ff] hover:text-[#1b59f8] disabled:cursor-wait disabled:opacity-60"
+          disabled={criteriaLoading}
+          onClick={onShowGroupingRationale}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {criteriaLoading ? "확인 중" : hasGroupingRationale ? "기준 보기" : "묶은 기준"}
+        </button>
         <button
           type="button"
           className="nodrag nopan rounded-[8px] border border-[#1b59f8]/20 bg-[#eef4ff] px-2.5 py-1.5 text-xs font-semibold text-[#1b59f8] transition hover:bg-[#e1ebff] disabled:cursor-wait disabled:opacity-60"
@@ -3530,6 +3552,9 @@ export default function MeetingCanvasTab({
   const [selectedProblemGroupId, setSelectedProblemGroupId] = useState("");
   const [selectedProblemSourceNodeId, setSelectedProblemSourceNodeId] = useState("");
   const [collapsedProblemGroupIds, setCollapsedProblemGroupIds] = useState<Set<string>>(() => new Set());
+  const [problemGroupingRationaleById, setProblemGroupingRationaleById] = useState<Record<string, ProblemGroupingRationaleViewModel>>({});
+  const [problemGroupingRationalePendingId, setProblemGroupingRationalePendingId] = useState("");
+  const [problemGroupingRationaleOpenGroupId, setProblemGroupingRationaleOpenGroupId] = useState("");
   const [pendingProblemGroupLinkId, setPendingProblemGroupLinkId] = useState("");
   const [editingProblemGroupId, setEditingProblemGroupId] = useState("");
   const [problemGroupDraftTopic, setProblemGroupDraftTopic] = useState("");
@@ -4009,6 +4034,9 @@ export default function MeetingCanvasTab({
     setEditingSolutionTopicId("");
     setLoadingProblemGroupIds([]);
     setCollapsedProblemGroupIds(new Set());
+    setProblemGroupingRationaleById({});
+    setProblemGroupingRationalePendingId("");
+    setProblemGroupingRationaleOpenGroupId("");
 
     if (!meetingId) {
       workspaceHydratingRef.current = false;
@@ -4211,6 +4239,9 @@ export default function MeetingCanvasTab({
         setEditingProblemGroupId("");
         setEditingSolutionTopicId("");
         setCollapsedProblemGroupIds(new Set());
+        setProblemGroupingRationaleById({});
+        setProblemGroupingRationalePendingId("");
+        setProblemGroupingRationaleOpenGroupId("");
       })
       .finally(() => {
         if (cancelled) return;
@@ -4244,6 +4275,9 @@ export default function MeetingCanvasTab({
     setEditingProblemGroupId("");
     setEditingSolutionTopicId("");
     setCollapsedProblemGroupIds(new Set());
+    setProblemGroupingRationaleById({});
+    setProblemGroupingRationalePendingId("");
+    setProblemGroupingRationaleOpenGroupId("");
     setAgendaOverrides({});
     setEditingAgendaId("");
     setEditingCanvasItemId("");
@@ -4278,6 +4312,13 @@ export default function MeetingCanvasTab({
       });
       return changed ? next : prev;
     });
+    setProblemGroupingRationaleById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([groupId]) => validGroupIds.has(groupId));
+      if (nextEntries.length === Object.keys(prev).length) return prev;
+      return Object.fromEntries(nextEntries);
+    });
+    setProblemGroupingRationaleOpenGroupId((prev) => (prev && !validGroupIds.has(prev) ? "" : prev));
+    setProblemGroupingRationalePendingId((prev) => (prev && !validGroupIds.has(prev) ? "" : prev));
   }, [problemGroups]);
 
   useEffect(() => {
@@ -4397,6 +4438,38 @@ export default function MeetingCanvasTab({
       },
     }),
     [meetingId, meetingTopicForAi],
+  );
+
+  const buildProblemGroupingRationalePayload = useCallback(
+    (group: ProblemGroupViewModel) => ({
+      meeting_id: meetingId,
+      meeting_topic: meetingTopicForAi,
+      group: {
+        group_id: group.group_id,
+        topic: group.topic,
+        insight_lens: group.insight_lens || "",
+        conclusion: group.conclusion || "",
+        agenda_titles: group.agenda_titles || [],
+        source_summary_items: group.source_summary_items || [],
+        evidence_utterance_ids: group.evidence_utterance_ids || [],
+        ideas: (group.ideas || []).map((idea) => ({
+          id: idea.id,
+          kind: idea.kind,
+          title: idea.title,
+          body: idea.body,
+        })),
+      },
+      child_groups: problemGroups
+        .filter((item) => item.parent_group_id === group.group_id)
+        .map((item) => ({
+          group_id: item.group_id,
+          topic: item.topic,
+          insight_lens: item.insight_lens || "",
+          conclusion: item.conclusion || "",
+        })),
+      utterances: buildProblemTaxonomyUtterances(transcripts),
+    }),
+    [meetingId, meetingTopicForAi, problemGroups, transcripts],
   );
 
   const forceBroadcastSharedCanvas = useCallback(
@@ -4757,6 +4830,42 @@ export default function MeetingCanvasTab({
       setProblemGroupsLoading,
       sharedSyncEnabled,
     ],
+  );
+
+  const handleShowProblemGroupingRationale = useCallback(
+    async (group: ProblemGroupViewModel) => {
+      if (!meetingId) return;
+      const cached = problemGroupingRationaleById[group.group_id];
+      if (cached) {
+        setProblemGroupingRationaleOpenGroupId(group.group_id);
+        return;
+      }
+
+      setProblemGroupingRationalePendingId(group.group_id);
+      try {
+        const result = await generateProblemGroupingRationale(buildProblemGroupingRationalePayload(group));
+        const nextRationale: ProblemGroupingRationaleViewModel = {
+          groupId: result.group_id || group.group_id,
+          rationale: result.rationale || "이 분류를 묶은 기준을 찾지 못했습니다.",
+          basisItems: result.basis_items || [],
+          usedLlm: result.used_llm,
+          warning: result.warning || "",
+          generatedAt: result.generated_at,
+        };
+        setProblemGroupingRationaleById((prev) => ({
+          ...prev,
+          [group.group_id]: nextRationale,
+        }));
+        setProblemGroupingRationaleOpenGroupId(group.group_id);
+        setActivityMessage(result.warning || "문제정의 그룹의 묶은 기준을 확인했습니다.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setActivityMessage(`묶은 기준 생성 실패: ${message}`);
+      } finally {
+        setProblemGroupingRationalePendingId("");
+      }
+    },
+    [buildProblemGroupingRationalePayload, meetingId, problemGroupingRationaleById],
   );
 
   const handleAttachPersonalNoteToProblemGroup = useCallback((groupId: string, noteId: string) => {
@@ -6580,6 +6689,8 @@ export default function MeetingCanvasTab({
           const savedPosition = nodePositions["problem-definition"]?.[nodeId];
           const childCount = problemGroups.filter((item) => item.parent_group_id === group.group_id).length;
           const childCollapsed = collapsedProblemGroupIds.has(group.group_id);
+          const criteriaLoading = problemGroupingRationalePendingId === group.group_id;
+          const hasGroupingRationale = Boolean(problemGroupingRationaleById[group.group_id]);
 
           return {
             id: nodeId,
@@ -6610,6 +6721,8 @@ export default function MeetingCanvasTab({
                 childCount,
                 childCollapsed,
                 problemChildGenerationPendingId === group.group_id,
+                criteriaLoading,
+                hasGroupingRationale,
               ]),
               label: makeProblemTopicNodeLabel(
                 group,
@@ -6622,6 +6735,12 @@ export default function MeetingCanvasTab({
                 childCount,
                 childCollapsed,
                 problemChildGenerationPendingId === group.group_id,
+                criteriaLoading,
+                hasGroupingRationale,
+                (event) => {
+                  event.stopPropagation();
+                  void handleShowProblemGroupingRationale(group);
+                },
                 (event) => {
                   event.stopPropagation();
                   void handleGenerateProblemChildren(group);
@@ -7739,6 +7858,7 @@ export default function MeetingCanvasTab({
     handleDeleteProblemGroup,
     handleGenerateProblemChildren,
     handleQuickEditProblemGroup,
+    handleShowProblemGroupingRationale,
     handleToggleProblemChildren,
     ideationDropPreview,
     latestHighlightedTopicId,
@@ -7747,6 +7867,8 @@ export default function MeetingCanvasTab({
     pendingProblemGroupLinkId,
     persistedSharedImportedState,
     problemChildGenerationPendingId,
+    problemGroupingRationaleById,
+    problemGroupingRationalePendingId,
     problemGroups,
     selectedCanvasItemId,
     selectedProblemGroupId,
@@ -11141,6 +11263,12 @@ export default function MeetingCanvasTab({
   };
 
   const canvasStatusMessage = activityMessage || audioImportStatusText || recordingStatusText;
+  const activeProblemGroupingRationale = problemGroupingRationaleOpenGroupId
+    ? problemGroupingRationaleById[problemGroupingRationaleOpenGroupId] || null
+    : null;
+  const activeProblemGroupingRationaleGroup = problemGroupingRationaleOpenGroupId
+    ? problemGroups.find((group) => group.group_id === problemGroupingRationaleOpenGroupId) || null
+    : null;
   const rightDrawerShowsDetailPanel = false;
   const rightDrawerExpandedWidth = `clamp(17.5rem, ${(rightPanelRatio * 100).toFixed(2)}vw, 23.75rem)`;
   const rightDrawerBodyClassName = rightDrawerContentVisible
@@ -13176,6 +13304,48 @@ export default function MeetingCanvasTab({
                       </span>
                     </button>
                   </div>
+                </div>
+              </div>
+            ) : null}
+
+            {stage === "problem-definition" && activeProblemGroupingRationale && activeProblemGroupingRationaleGroup ? (
+              <div className="absolute right-4 top-4 z-[8] w-[min(26rem,calc(100%-2rem))] rounded-[16px] border border-black/10 bg-white/95 p-4 text-left shadow-[0_18px_46px_rgba(15,23,42,0.14)] backdrop-blur">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Grouping Rationale</p>
+                    <h4 className="mt-1 line-clamp-2 text-[17px] font-semibold leading-6 text-black">
+                      {activeProblemGroupingRationaleGroup.topic || "문제정의 그룹"}
+                    </h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setProblemGroupingRationaleOpenGroupId("")}
+                    className="shrink-0 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2.5 py-1.5 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#eef4ff] hover:text-[#1b59f8]"
+                  >
+                    닫기
+                  </button>
+                </div>
+                <p className="mt-3 text-sm leading-6 text-[#333]">
+                  {activeProblemGroupingRationale.rationale}
+                </p>
+                {activeProblemGroupingRationale.basisItems.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    {activeProblemGroupingRationale.basisItems.map((item, index) => (
+                      <p key={`${activeProblemGroupingRationale.groupId}-basis-${index}`} className="rounded-[10px] bg-[#f5f6f8] px-3 py-2 text-xs leading-5 text-[#4d4d4d]">
+                        {item}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-medium text-[#777]">
+                  <span className="rounded-full bg-[#eef4ff] px-2.5 py-1 text-[#1b59f8]">
+                    {activeProblemGroupingRationale.usedLlm ? "AI 추정" : "로컬 추정"}
+                  </span>
+                  {activeProblemGroupingRationale.warning ? (
+                    <span className="rounded-full bg-amber-50 px-2.5 py-1 text-amber-700">
+                      {activeProblemGroupingRationale.warning}
+                    </span>
+                  ) : null}
                 </div>
               </div>
             ) : null}

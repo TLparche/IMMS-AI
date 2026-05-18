@@ -282,6 +282,16 @@ export interface CanvasProblemConclusionResponse {
   conclusion: string;
 }
 
+export interface CanvasProblemGroupingRationaleResponse {
+  ok: boolean;
+  used_llm: boolean;
+  warning?: string;
+  generated_at: string;
+  group_id: string;
+  rationale: string;
+  basis_items: string[];
+}
+
 export interface CanvasIdeationSuggestion {
   id: string;
   text: string;
