@@ -161,6 +161,7 @@ export async function generateCanvasProblemDefinition(payload: {
 export async function generateCanvasProblemTaxonomy(payload: {
   meeting_id: string;
   meeting_topic: string;
+  debug_nonce?: string;
   parent_group_id?: string;
   parent_topic?: string;
   parent_depth?: number;

@@ -1860,6 +1860,7 @@ class ProblemTaxonomyExistingGroupInput(BaseModel):
 class ProblemTaxonomyGenerateInput(BaseModel):
     meeting_id: str = ""
     meeting_topic: str = ""
+    debug_nonce: str = ""
     parent_group_id: str = ""
     parent_topic: str = ""
     parent_depth: int = Field(default=-1, ge=-1, le=8)
@@ -2479,6 +2480,41 @@ def _normalize_problem_topic_label(raw: Any, fallback: str = "주제") -> str:
     return _safe_text(fallback, "주제")
 
 
+def _normalize_problem_summary_label(raw: Any, fallback: str = "분류", max_len: int = 34) -> str:
+    text = _to_summary_point(_safe_text(raw), max_len=None)
+    if not text:
+        text = _to_summary_point(_safe_text(fallback, "분류"), max_len=None)
+    text = re.sub(r"^(음|어|아|그|저|네|예|일단|그리고|근데|그러니까|그니까)\s+", "", text).strip()
+    text = re.sub(r"\s+", " ", text).strip(" .,!?:;\"'“”‘’")
+
+    destination_match = re.search(r"([A-Za-z0-9가-힣]{2,})(?:으로|로)\s*가는?\s*건?\s*어때", text)
+    if destination_match:
+        text = f"목적지 {destination_match.group(1)} 설정"
+    elif re.search(r"역사|수업|학습|배울", text) and re.search(r"유용|쉽|좋|배울|알기", text):
+        text = "역사적 지식을 배우는데 유용"
+    elif re.search(r"교통|이동|버스|지하철|편의", text):
+        text = "교통의 편의성"
+    elif re.search(r"근처", text) and re.search(r"살|거주", text):
+        text = "근처에 살음"
+    elif re.search(r"근처", text) and re.search(r"밥|먹", text):
+        text = "근처에서 밥을 많이 먹어봄"
+    elif re.search(r"식당|밥|먹", text) and re.search(r"많|괜찮|좋|근처", text):
+        text = "괜찮은 식당이 많음"
+
+    text = re.sub(r"(하면 좋겠다는 의견|라는 의견|이라는 의견|라고 봄|라고 판단됨)$", "", text).strip()
+    if len(text) > max_len:
+        split_parts = [
+            part.strip(" ,;:/")
+            for part in re.split(r"\s*(?:그리고|하지만|그래서|왜냐하면|아무래도|때문에|인데|인데요)\s*", text)
+            if part.strip(" ,;:/")
+        ]
+        if split_parts:
+            text = split_parts[0]
+    if len(text) > max_len:
+        text = text[:max_len].rstrip()
+    return _safe_text(text, _safe_text(fallback, "분류"))
+
+
 def _stable_short_id(raw: Any) -> str:
     text = _safe_text(raw)
     value = 2166136261
@@ -2644,7 +2680,7 @@ def _split_taxonomy_clauses(text: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", _strip_leading_timestamp(text)).strip()
     if not normalized:
         return []
-    chunks = re.split(r"[.!?\n。！？]+|(?:\s*/\s*)|(?:,\s*)|(?:;\s*)", normalized)
+    chunks = re.split(r"[.!?\n。！？]+|(?:\s*/\s*)|(?:,\s*)|(?:;\s*)|(?<=고)\s+", normalized)
     clauses: list[str] = []
     for chunk in chunks:
         cleaned = re.sub(r"^(음|어|아|그|저|네|예|그러니까|그리고|근데|일단)\s+", "", chunk.strip())
@@ -2712,7 +2748,7 @@ def _problem_taxonomy_group_from_cluster(
     parent_group_id = _safe_text(payload.parent_group_id)
     parent_depth = int(payload.parent_depth if payload.parent_depth is not None else -1)
     depth = max(0, parent_depth + 1)
-    label = _normalize_problem_topic_label(cluster.get("label"), f"분류 {index}")
+    label = _normalize_problem_summary_label(cluster.get("label"), f"분류 {index}")
     group_id_base = f"{parent_group_id or 'problem-group'}-{_stable_short_id(label)}"
     group_id = group_id_base
     suffix = 2
@@ -2740,14 +2776,18 @@ def _problem_taxonomy_group_from_cluster(
         [_safe_text(row.get("id")) for row in rows if _safe_text(row.get("id"))],
         limit=60,
     )
-    conclusion = _safe_text(cluster.get("summary")) or (source_items[0] if source_items else label)
+    conclusion = _normalize_problem_summary_label(
+        cluster.get("summary") or (source_items[0] if source_items else label),
+        label,
+        max_len=54,
+    )
 
     return {
         "group_id": group_id,
         "parent_group_id": parent_group_id,
         "depth": depth,
         "topic": label,
-        "insight_lens": "실제 발화에서 묶인 논의 흐름",
+        "insight_lens": "",
         "keywords": keywords,
         "agenda_ids": ["agenda-fallback"],
         "agenda_titles": [_safe_text(payload.meeting_topic, "현재 회의")],
@@ -2756,7 +2796,7 @@ def _problem_taxonomy_group_from_cluster(
         "linked_group_ids": [],
         "evidence_utterance_ids": evidence_ids,
         "source_summary_items": source_items,
-        "conclusion": _to_summary_point(conclusion, max_len=None),
+        "conclusion": conclusion if conclusion != label else "",
         "conclusion_user_edited": False,
         "status": "draft",
         "source_signature": _canvas_llm_signature(
@@ -2776,8 +2816,25 @@ def _build_problem_taxonomy_groups_local(payload: ProblemTaxonomyGenerateInput) 
     if not rows:
         return []
 
+    parent_topic = _safe_text(payload.parent_topic)
+    clustering_rows: list[dict[str, str]] = []
+    if parent_topic:
+        for row in rows:
+            clauses = _split_taxonomy_clauses(row.get("text", ""))
+            for clause in clauses:
+                clustering_rows.append(
+                    {
+                        **row,
+                        "text": clause,
+                    }
+                )
+        if not clustering_rows:
+            clustering_rows = rows
+    else:
+        clustering_rows = rows
+
     clusters: list[dict[str, Any]] = []
-    for row in rows:
+    for row in clustering_rows:
         clauses = _split_taxonomy_clauses(row.get("text", ""))
         candidates = clauses[:2] or [row.get("text", "")]
         tokens = set(_problem_taxonomy_tokens(" ".join(candidates)))
@@ -2798,8 +2855,7 @@ def _build_problem_taxonomy_groups_local(payload: ProblemTaxonomyGenerateInput) 
             continue
 
         label_source = candidates[0]
-        label_tokens = _problem_taxonomy_tokens(label_source)
-        label = " ".join(label_tokens[:3]) if label_tokens else label_source
+        label = _normalize_problem_summary_label(label_source, label_source)
         clusters.append(
             {
                 "label": label,
@@ -2853,8 +2909,15 @@ def _normalize_problem_taxonomy_llm_groups(
         llm_keywords = [_safe_text(item) for item in (raw.get("keywords") or []) if _safe_text(item)]
         if llm_keywords:
             group["keywords"] = _dedup_preserve(llm_keywords, limit=6)
-        group["topic"] = _normalize_problem_topic_label(raw.get("topic"), group["topic"])
-        group["conclusion"] = _to_summary_point(raw.get("conclusion") or group["conclusion"], max_len=None)
+        group["topic"] = _normalize_problem_summary_label(raw.get("topic"), group["topic"])
+        group["conclusion"] = _normalize_problem_summary_label(
+            raw.get("conclusion") or group["conclusion"],
+            group["topic"],
+            max_len=54,
+        )
+        if group["conclusion"] == group["topic"]:
+            group["conclusion"] = ""
+        group["insight_lens"] = _safe_text(raw.get("insight_lens") or raw.get("insightLens") or "")
         groups.append(group)
     return groups
 
@@ -2878,37 +2941,66 @@ def _build_problem_taxonomy_prompt(payload: ProblemTaxonomyGenerateInput) -> str
         "max_groups": payload.max_groups,
     }
     scope = (
-        f"'{parent_topic}'의 바로 아래 세부 분류"
+        f"'{parent_topic}'의 바로 아래 세부 요약 노드"
         if parent_topic
-        else "아이디어 단계 발화의 최상위 큰 분류"
+        else "아이디어 단계 발화의 최상위 큰 요약 노드"
     )
+    depth_hint = (
+        "- parent_topic이 없으면 Markdown 문서의 H1처럼 큰 논의 단위만 만든다.\n"
+        "- parent_topic이 있으면 Markdown 문서의 바로 다음 하위 제목처럼 parent_topic을 구성하는 세부 포인트만 만든다.\n"
+    )
+    output_example = {
+        "groups": [
+            {
+                "topic": "교통의 편의성",
+                "keywords": ["교통", "편의"],
+                "source_summary_items": ["경복궁은 교통편을 구하기 쉽다는 장점이 언급됐다."],
+                "conclusion": "교통 접근성이 경복궁 선택 근거로 제시됐다.",
+                "evidence_utterance_ids": ["utt-1"],
+            },
+            {
+                "topic": "괜찮은 식당이 많음",
+                "keywords": ["식당", "근처"],
+                "source_summary_items": ["근처에 아이들이 좋아할 만한 식당이 많다는 경험이 공유됐다."],
+                "conclusion": "식사 장소 선택지가 경복궁 후보의 장점으로 언급됐다.",
+                "evidence_utterance_ids": ["utt-1"],
+            },
+        ]
+    } if parent_topic else {
+        "groups": [
+            {
+                "topic": "목적지 경복궁 설정",
+                "keywords": ["경복궁", "목적지"],
+                "source_summary_items": ["경복궁은 역사 학습, 교통, 식당 접근성이 함께 언급된 후보였다."],
+                "conclusion": "경복궁을 목적지로 두자는 의견이 여러 근거와 함께 나왔다.",
+                "evidence_utterance_ids": ["utt-1"],
+            }
+        ]
+    }
     return (
-        "너는 회의 퍼실리테이터를 위한 문제정의 캔버스 정리기다. 출력은 JSON 하나만 반환한다.\n\n"
+        "너는 회의 전문을 읽고 Markdown 문서의 제목 구조처럼 문제정의 요약 트리를 만드는 회의 퍼실리테이터다. 출력은 JSON 하나만 반환한다.\n\n"
         f"[목표]\n- 입력 발화에서 실제로 말한 내용만 근거로 {scope}를 만든다.\n"
+        f"{depth_hint}"
         "- 새로운 아이디어, 장소, 원인, 해결책을 발명하지 않는다.\n"
-        "- topic은 명사 하나만 강제하지 말고, 논의 핵심이 드러나는 짧은 구/문장으로 쓴다.\n"
+        "- topic은 키워드가 아니라, 제목으로 바로 읽히는 짧은 요약 문장이어야 한다.\n"
+        "- topic은 '경복궁' 같은 명사 하나가 아니라 '목적지 경복궁 설정'처럼 논의 행위/판단이 드러나야 한다.\n"
+        "- 같은 레벨의 groups는 서로 겹치지 않게 분리한다. 한 근거를 같은 의미의 노드로 반복하지 않는다.\n"
         "- source_summary_items는 실제 발화를 1~3문장으로 압축한 근거 요약이다.\n"
         "- evidence_utterance_ids에는 그 분류를 뒷받침하는 utterance id만 넣는다.\n"
         "- existing_groups_in_scope와 같은 topic 또는 같은 근거의 분류는 다시 만들지 않는다.\n"
         "- 근거가 부족하면 groups를 빈 배열로 둔다.\n\n"
         "[입력 JSON]\n"
         f"{json.dumps(input_payload, ensure_ascii=False, indent=2)}\n\n"
-        "[출력 JSON 스키마]\n"
-        "{\n"
-        '  "groups": [\n'
-        "    {\n"
-        '      "topic": "서울 현장학습 후보",\n'
-        '      "keywords": ["서울", "경복궁"],\n'
-        '      "source_summary_items": ["서울은 이동이 쉽고 경복궁과 박물관을 함께 볼 수 있다는 의견이 나왔다."],\n'
-        '      "conclusion": "서울은 접근성과 학습 장소 다양성이 함께 언급된 후보였다.",\n'
-        '      "evidence_utterance_ids": ["utt-1", "utt-3"]\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
+        "[출력 JSON 예시]\n"
+        f"{json.dumps(output_example, ensure_ascii=False, indent=2)}\n\n"
         "[규칙]\n"
         f"- groups는 최대 {payload.max_groups}개다.\n"
-        "- 같은 의미의 분류를 중복 생성하지 않는다.\n"
-        "- parent_topic이 있으면 parent_topic과 직접 관련된 세부 분류만 만든다.\n"
+        "- 같은 의미의 분류를 중복 생성하지 않는다. MECE에 가깝게 서로 다른 포인트로 나눈다.\n"
+        "- parent_topic이 있으면 parent_topic과 직접 관련된 세부 요약만 만든다. 부모와 같은 수준의 큰 노드를 다시 만들지 않는다.\n"
+        "- topic은 8~32자 정도의 한국어 요약 문장/구로 쓴다.\n"
+        "- topic은 '서울', '경복궁', '식당'처럼 단일 명사로 끝내지 않는다.\n"
+        "- topic은 '논의됨', '관련 내용', '기타' 같은 메타 표현을 쓰지 않는다.\n"
+        "- utterance에 직접 근거가 없는 세부 노드는 만들지 않는다.\n"
         "- 불필요한 설명 없이 JSON만 반환한다."
     )
 

@@ -75,7 +75,7 @@ export type MeetingAgenda = {
 type CanvasStage = "ideation" | "problem-definition" | "solution";
 type ComposerTool = "note" | "comment" | "topic";
 type CanvasTool = ComposerTool | "group" | "problem-idea";
-type ProblemCanvasToolbarAction = "group" | "problem-link" | "note" | "problem-idea" | "adopt";
+type ProblemCanvasToolbarAction = "group" | "problem-link" | "debug-regenerate" | "note" | "problem-idea" | "adopt";
 type LeftPanelTab = "detail";
 type ProblemGroupStatus = "draft" | "review" | "final";
 type CanvasItemStatus = "discussion" | "confirmed" | "closed";
@@ -2766,6 +2766,9 @@ function makeProblemTopicNodeLabel(
 ) {
   const depth = Math.max(0, group.depth || 0);
   const depthLabel = depth > 0 ? `${depth + 1}차` : `분류 ${index + 1}`;
+  const detailText = loading
+    ? "인사이트를 정리하는 중입니다."
+    : group.insight_lens || (group.conclusion && group.conclusion !== group.topic ? group.conclusion : "");
 
   return (
     <div
@@ -2802,9 +2805,11 @@ function makeProblemTopicNodeLabel(
       <strong className="mt-3 block line-clamp-2 text-[18px] font-semibold leading-6 text-black">
         {group.topic || "문제정의 토픽"}
       </strong>
-      <p className="mt-2 line-clamp-3 text-[13px] leading-5 text-[#4d4d4d]">
-        {loading ? "인사이트를 정리하는 중입니다." : group.insight_lens || group.conclusion || "아직 정리된 인사이트가 없습니다."}
-      </p>
+      {detailText ? (
+        <p className="mt-2 line-clamp-3 text-[13px] leading-5 text-[#4d4d4d]">
+          {detailText}
+        </p>
+      ) : null}
       <div className="mt-4 flex flex-wrap gap-1.5 text-[11px] font-semibold">
         <span className="rounded-full bg-[#eef4ff] px-2.5 py-1 text-[#1b59f8]">근거 {sourceCount}</span>
         {opinionCount > 0 ? (
@@ -8325,7 +8330,8 @@ export default function MeetingCanvasTab({
     };
   }, [agendaModels, canvasItems, selectedAgenda, selectedCanvasItem, selectedNodeId, selectedProblemGroup, selectedProblemSourceCard, selectedProblemSourceCards, selectedProblemSourceOpinions, selectedSolutionTopic, stage]);
 
-  const handleGenerateProblemDefinition = useCallback(async () => {
+  const handleGenerateProblemDefinition = useCallback(async (options?: { force?: boolean }) => {
+    const forceRegenerate = Boolean(options?.force);
     setProblemDefinitionStagePending(true);
     setBusy(true);
     try {
@@ -8334,7 +8340,7 @@ export default function MeetingCanvasTab({
       setEditingProblemGroupId("");
       setEditingSolutionTopicId("");
 
-      if (problemGroups.length > 0) {
+      if (problemGroups.length > 0 && !forceRegenerate) {
         const firstGroupId = selectedProblemGroupId || problemGroups[0]?.group_id || "";
         setSelectedProblemGroupId(firstGroupId);
         setSelectedNodeId(firstGroupId ? `problem-${firstGroupId}` : "");
@@ -8344,6 +8350,12 @@ export default function MeetingCanvasTab({
 
       const utterances = buildProblemTaxonomyUtterances(transcripts);
       if (utterances.length === 0) {
+        if (forceRegenerate) {
+          setProblemGroups([]);
+          setProblemGroupingRationaleById({});
+          setProblemGroupingRationaleOpenGroupId("");
+          setProblemGroupingRationalePendingId("");
+        }
         setProblemDefinitionMode("");
         setSelectedProblemGroupId("");
         setSelectedNodeId("");
@@ -8351,12 +8363,33 @@ export default function MeetingCanvasTab({
         return;
       }
 
+      const nextNodePositionsSnapshot = forceRegenerate
+        ? {
+            ...nodePositions,
+            "problem-definition": {},
+            solution: {},
+          }
+        : nodePositions;
+      if (forceRegenerate) {
+        setProblemGroups([]);
+        setSolutionTopics([]);
+        setNodePositions(nextNodePositionsSnapshot);
+        setSelectedProblemGroupId("");
+        setSelectedProblemSourceNodeId("");
+        setSelectedNodeId("");
+        setCollapsedProblemGroupIds(new Set());
+        setProblemGroupingRationaleById({});
+        setProblemGroupingRationaleOpenGroupId("");
+        setProblemGroupingRationalePendingId("");
+      }
+
       const result = await generateCanvasProblemTaxonomy({
         meeting_id: meetingId,
         meeting_topic: meetingTopicForAi,
+        debug_nonce: forceRegenerate ? `debug-${Date.now()}` : undefined,
         utterances,
         existing_group_ids: [],
-        existing_groups: buildProblemTaxonomyExistingGroupsPayload(problemGroups),
+        existing_groups: forceRegenerate ? [] : buildProblemTaxonomyExistingGroupsPayload(problemGroups),
         max_groups: 6,
       });
       const nextGroups = hydrateProblemGroups(result.groups || [], []).map((group) => ({
@@ -8374,6 +8407,8 @@ export default function MeetingCanvasTab({
         ...latestSharedWorkspaceRef.current,
         stage: "problem-definition",
         problemGroups: nextGroups,
+        solutionTopics: forceRegenerate ? [] : latestSharedWorkspaceRef.current.solutionTopics,
+        nodePositions: nextNodePositionsSnapshot,
         importedState: persistedSharedImportedState,
       };
 
@@ -8381,12 +8416,16 @@ export default function MeetingCanvasTab({
         forceBroadcastSharedCanvas({
           stage: "problem-definition",
           problemGroups: nextGroups,
+          solutionTopics: forceRegenerate ? [] : undefined,
+          nodePositions: nextNodePositionsSnapshot,
         });
         if (meetingId) {
           void saveCanvasWorkspacePatch({
             meeting_id: meetingId,
             stage: "problem-definition",
             problem_groups: serializeSharedProblemGroups(nextGroups),
+            solution_topics: forceRegenerate ? [] : undefined,
+            node_positions: nextNodePositionsSnapshot,
             imported_state: persistedSharedImportedState,
           }).catch((error) => {
             console.error("Failed to save problem taxonomy:", error);
@@ -8397,7 +8436,9 @@ export default function MeetingCanvasTab({
       setActivityMessage(
         result.warning ||
           (nextGroups.length > 0
-            ? `STT 발화에서 큰 분류 ${nextGroups.length}개를 만들었습니다.`
+            ? forceRegenerate
+              ? `문제정의를 다시 생성했습니다. 큰 분류 ${nextGroups.length}개를 만들었습니다.`
+              : `STT 발화에서 큰 분류 ${nextGroups.length}개를 만들었습니다.`
             : "분류할 만큼 뚜렷한 STT 발화를 찾지 못했습니다."),
       );
     } catch (error) {
@@ -8411,12 +8452,23 @@ export default function MeetingCanvasTab({
     forceBroadcastSharedCanvas,
     meetingId,
     meetingTopicForAi,
+    nodePositions,
     persistedSharedImportedState,
     problemGroups,
     selectedProblemGroupId,
     sharedSyncEnabled,
     transcripts,
   ]);
+
+  const handleDebugRegenerateProblemDefinition = useCallback(async () => {
+    if (busy || problemDefinitionStagePending) {
+      setActivityMessage("문제정의 생성 작업이 이미 진행 중입니다.");
+      return;
+    }
+    const ok = window.confirm("디버깅용으로 기존 문제정의 노드와 해결책 결과를 비우고 STT 기반으로 다시 생성할까요?");
+    if (!ok) return;
+    await handleGenerateProblemDefinition({ force: true });
+  }, [busy, handleGenerateProblemDefinition, problemDefinitionStagePending]);
 
   const handleGenerateSolutionStage = useCallback(async () => {
     const finalizedGroups = problemGroups.filter((group) => group.status === "final");
@@ -8563,17 +8615,19 @@ export default function MeetingCanvasTab({
         : ["note", "comment", "topic", "group"],
     [stage],
   );
-  const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] = ["group", "problem-link"];
+  const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] = ["group", "problem-link", "debug-regenerate"];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
     if (action === "group") return "문제정의 그룹 추가";
     if (action === "problem-link") return "문제정의 그룹 연결";
+    if (action === "debug-regenerate") return "디버그 재생성";
     if (action === "note") return "의견추가";
     if (action === "problem-idea") return "아이디어 추가";
     return "채택";
   };
 
   const isProblemToolbarActionActive = (action: ProblemCanvasToolbarAction) => {
+    if (action === "debug-regenerate") return problemDefinitionStagePending;
     if (action === "problem-link") return Boolean(pendingProblemGroupLinkId);
     if (action === "adopt") return selectedProblemGroup?.status === "final";
     return armedCanvasTool === action;
@@ -11756,6 +11810,14 @@ export default function MeetingCanvasTab({
   };
 
   const handleProblemToolbarAction = (action: ProblemCanvasToolbarAction) => {
+    if (action === "debug-regenerate") {
+      setArmedCanvasTool(null);
+      setCanvasPlacementPreview(null);
+      setPendingProblemGroupLinkId("");
+      void handleDebugRegenerateProblemDefinition();
+      return;
+    }
+
     if (action === "problem-link") {
       setArmedCanvasTool(null);
       setCanvasPlacementPreview(null);
@@ -13395,13 +13457,18 @@ export default function MeetingCanvasTab({
             {stage === "problem-definition" ? (
               <>
                 <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
-                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(420px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
+                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(620px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
                     {problemCanvasToolbarActions.map((item) => (
                       <button
                         key={item}
                         type="button"
                         onClick={() => handleProblemToolbarAction(item)}
-                        disabled={!canUseCanvasToolbar || (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)}
+                        disabled={
+                          !canUseCanvasToolbar ||
+                          problemDefinitionStagePending ||
+                          (item === "debug-regenerate" && busy) ||
+                          (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)
+                        }
                         className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(110px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
                           isProblemToolbarActionActive(item)
                             ? "bg-[#1b59f8]/10 text-[#1b59f8]"
