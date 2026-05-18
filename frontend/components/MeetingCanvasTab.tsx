@@ -80,6 +80,10 @@ type ProblemCanvasToolbarAction =
   | "problem-link"
   | "debug-regenerate"
   | "debug-refresh-chunks"
+  | "structure-start"
+  | "structure-back"
+  | "structure-add-group"
+  | "structure-refresh"
   | "note"
   | "problem-idea"
   | "adopt";
@@ -89,6 +93,8 @@ type CanvasItemStatus = "discussion" | "confirmed" | "closed";
 type SolutionAiSuggestionStatus = "draft" | "selected" | "dismissed";
 type SolutionNoteSource = "ai" | "user";
 type ProblemDefinitionMode = "" | "manual" | "ai";
+type ProblemDefinitionPhase = "explore" | "structure";
+type ProblemStructureMethod = "affinity" | "card-sorting";
 const CANVAS_STAGES: CanvasStage[] = ["ideation", "problem-definition", "solution"];
 const CANVAS_LLM_FAILURE_RETRY_DELAY_MS = 60_000;
 const CANVAS_LLM_SILENCE_FLUSH_MS = 8_000;
@@ -126,6 +132,23 @@ type ProblemGroupingRationaleViewModel = {
   usedLlm: boolean;
   warning?: string;
   generatedAt?: string;
+};
+
+type ProblemStructureNodeViewModel = {
+  id: string;
+  sourceGroupId: string;
+  title: string;
+  body: string;
+  status: ProblemGroupStatus;
+  depth: number;
+};
+
+type ProblemStructureGroupViewModel = {
+  id: string;
+  title: string;
+  nodeIds: string[];
+  rationale: string;
+  createdBy: "ai" | "user";
 };
 
 type ProblemDiscussionViewModel = CanvasProblemDiscussionItem;
@@ -1292,6 +1315,16 @@ function problemGroupStatusTone(status: ProblemGroupStatus) {
   return "bg-slate-100 text-slate-600";
 }
 
+function problemStructureMethodLabel(method: ProblemStructureMethod) {
+  return method === "card-sorting" ? "Card Sorting" : "Affinity Diagram";
+}
+
+function problemDefinitionModeLabel(mode: ProblemDefinitionMode) {
+  if (mode === "ai") return "AI 초안";
+  if (mode === "manual") return "직접 구성";
+  return "미선택";
+}
+
 function normalizeCanvasItemStatus(raw: string | undefined): CanvasItemStatus {
   if (raw === "confirmed" || raw === "final") return "confirmed";
   if (raw === "closed") return "closed";
@@ -1445,6 +1478,48 @@ function buildProblemGroupDisplayCards(group: ProblemGroupViewModel): ProblemGro
   }
 
   return [...summaryCards, ...personalCards];
+}
+
+function makeProblemStructureNode(group: ProblemGroupViewModel): ProblemStructureNodeViewModel {
+  const body =
+    group.conclusion ||
+    group.insight_lens ||
+    (group.source_summary_items || []).find(Boolean) ||
+    "정의 1단계에서 가져온 노드입니다.";
+  return {
+    id: group.group_id,
+    sourceGroupId: group.group_id,
+    title: group.topic || "문제정의 노드",
+    body: stripLeadingTimestamp(body),
+    status: group.status,
+    depth: Math.max(0, group.depth || 0),
+  };
+}
+
+function buildProblemStructureNodesFromGroups(groups: ProblemGroupViewModel[]) {
+  return groups.map(makeProblemStructureNode);
+}
+
+function makeProblemStructureGroup(index: number, createdBy: "ai" | "user" = "user"): ProblemStructureGroupViewModel {
+  const id = `structure-group-${Date.now()}-${index}-${Math.random().toString(16).slice(2, 6)}`;
+  return {
+    id,
+    title: `구조화 그룹 ${index + 1}`,
+    nodeIds: [],
+    rationale: "",
+    createdBy,
+  };
+}
+
+function pruneProblemStructureGroups(
+  groups: ProblemStructureGroupViewModel[],
+  nodes: ProblemStructureNodeViewModel[],
+) {
+  const validNodeIds = new Set(nodes.map((node) => node.id));
+  return groups.map((group) => ({
+    ...group,
+    nodeIds: group.nodeIds.filter((nodeId) => validNodeIds.has(nodeId)),
+  }));
 }
 
 function hydrateProblemGroups(
@@ -3548,6 +3623,13 @@ export default function MeetingCanvasTab({
   const [personalNoteDraftBody, setPersonalNoteDraftBody] = useState("");
   const [problemGroups, setProblemGroups] = useState<ProblemGroupViewModel[]>([]);
   const [problemDefinitionMode, setProblemDefinitionMode] = useState<ProblemDefinitionMode>("");
+  const [problemDefinitionPhase, setProblemDefinitionPhase] = useState<ProblemDefinitionPhase>("explore");
+  const [problemStructureMethod, setProblemStructureMethod] = useState<ProblemStructureMethod>("affinity");
+  const [problemStructureDraftMethod, setProblemStructureDraftMethod] = useState<ProblemStructureMethod>("affinity");
+  const [problemStructureDraftMode, setProblemStructureDraftMode] = useState<ProblemDefinitionMode>("ai");
+  const [problemStructureSetupOpen, setProblemStructureSetupOpen] = useState(false);
+  const [problemStructureNodes, setProblemStructureNodes] = useState<ProblemStructureNodeViewModel[]>([]);
+  const [problemStructureGroups, setProblemStructureGroups] = useState<ProblemStructureGroupViewModel[]>([]);
   const [solutionTopics, setSolutionTopics] = useState<SolutionTopicViewModel[]>([]);
   const [selectedSolutionTopicId, setSelectedSolutionTopicId] = useState("");
   const [editingSolutionTopicId, setEditingSolutionTopicId] = useState("");
@@ -4026,6 +4108,11 @@ export default function MeetingCanvasTab({
     workspaceLoadedRef.current = false;
     workspaceHydratingRef.current = true;
     setProblemGroups([]);
+    setProblemDefinitionMode("");
+    setProblemDefinitionPhase("explore");
+    setProblemStructureSetupOpen(false);
+    setProblemStructureNodes([]);
+    setProblemStructureGroups([]);
     setSolutionTopics([]);
     setPersonalNotes([]);
     setAgendaOverrides({});
@@ -4037,6 +4124,10 @@ export default function MeetingCanvasTab({
     setImportedState(null);
     setStage("ideation");
     setProblemDefinitionMode("");
+    setProblemDefinitionPhase("explore");
+    setProblemStructureSetupOpen(false);
+    setProblemStructureNodes([]);
+    setProblemStructureGroups([]);
     setProblemDefinitionStagePending(false);
     setSolutionStagePending(false);
     setSelectedProblemGroupId("");
@@ -4148,6 +4239,10 @@ export default function MeetingCanvasTab({
         setNodePositions(nextNodePositions);
         setImportedState(nextImportedState);
         setProblemDefinitionMode("");
+        setProblemDefinitionPhase("explore");
+        setProblemStructureSetupOpen(false);
+        setProblemStructureNodes([]);
+        setProblemStructureGroups([]);
         analysisSignatureAtImportRef.current = nextImportedState
           ? buildMeetingStateSignature(nextImportedState)
           : "";
@@ -4219,6 +4314,10 @@ export default function MeetingCanvasTab({
         setImportedState(null);
         setStage("ideation");
         setProblemDefinitionMode("");
+        setProblemDefinitionPhase("explore");
+        setProblemStructureSetupOpen(false);
+        setProblemStructureNodes([]);
+        setProblemStructureGroups([]);
         lastSharedSyncSignatureRef.current = buildSharedCanvasSignature({
           meeting_goal: "",
           meeting_goal_context: "",
@@ -4305,10 +4404,14 @@ export default function MeetingCanvasTab({
       return;
     }
 
+    if (problemDefinitionPhase === "structure") {
+      return;
+    }
+
     if (!selectedProblemGroupId || !problemGroups.some((group) => group.group_id === selectedProblemGroupId)) {
       setSelectedProblemGroupId(problemGroups[0].group_id);
     }
-  }, [problemGroups, selectedProblemGroupId]);
+  }, [problemDefinitionPhase, problemGroups, selectedProblemGroupId]);
 
   useEffect(() => {
     const validGroupIds = new Set(problemGroups.map((group) => group.group_id));
@@ -6591,8 +6694,282 @@ export default function MeetingCanvasTab({
     });
   }, []);
 
+  const syncProblemStructureNodesFromDefinition = useCallback(() => {
+    const nextNodes = buildProblemStructureNodesFromGroups(problemGroups);
+    setProblemStructureNodes(nextNodes);
+    setProblemStructureGroups((prev) => pruneProblemStructureGroups(prev, nextNodes));
+    return nextNodes;
+  }, [problemGroups]);
+
+  const handleOpenProblemStructureSetup = useCallback(() => {
+    if (problemGroups.length === 0) {
+      setActivityMessage("구조화할 문제정의 노드가 아직 없습니다.");
+      return;
+    }
+    setProblemStructureDraftMethod(problemStructureMethod);
+    setProblemStructureDraftMode(problemDefinitionMode || "ai");
+    setProblemStructureSetupOpen(true);
+  }, [problemDefinitionMode, problemGroups.length, problemStructureMethod]);
+
+  const handleStartProblemStructure = useCallback(() => {
+    if (problemGroups.length === 0) {
+      setActivityMessage("구조화할 문제정의 노드가 아직 없습니다.");
+      return;
+    }
+    const nextMode = problemStructureDraftMode || "manual";
+    setProblemStructureMethod(problemStructureDraftMethod);
+    setProblemDefinitionMode(nextMode);
+    const nextNodes = syncProblemStructureNodesFromDefinition();
+    setProblemDefinitionPhase("structure");
+    setProblemStructureSetupOpen(false);
+    setArmedCanvasTool(null);
+    setCanvasPlacementPreview(null);
+    setPendingProblemGroupLinkId("");
+    setSelectedNodeId("");
+    setSelectedProblemGroupId("");
+    setProblemGroupingRationaleOpenGroupId("");
+    setActivityMessage(
+      `${problemStructureMethodLabel(problemStructureDraftMethod)} · ${problemDefinitionModeLabel(nextMode)} 방식으로 정의 2단계를 시작했습니다. 노드 ${nextNodes.length}개를 가져왔습니다.`,
+    );
+  }, [
+    problemGroups.length,
+    problemStructureDraftMethod,
+    problemStructureDraftMode,
+    syncProblemStructureNodesFromDefinition,
+  ]);
+
+  const handleBackToProblemDefinitionExplore = useCallback(() => {
+    setProblemDefinitionPhase("explore");
+    const nextGroupId = selectedProblemGroupId || problemGroups[0]?.group_id || "";
+    setSelectedProblemGroupId(nextGroupId);
+    setSelectedNodeId(nextGroupId ? `problem-${nextGroupId}` : "");
+    setActivityMessage("정의 1단계 캔버스로 돌아왔습니다.");
+  }, [problemGroups, selectedProblemGroupId]);
+
+  const handleRefreshProblemStructureNodes = useCallback(() => {
+    const nextNodes = syncProblemStructureNodesFromDefinition();
+    setActivityMessage(`정의 1단계의 현재 노드 ${nextNodes.length}개를 다시 가져왔습니다.`);
+  }, [syncProblemStructureNodesFromDefinition]);
+
+  const handleAddProblemStructureGroup = useCallback(() => {
+    setProblemStructureGroups((prev) => [...prev, makeProblemStructureGroup(prev.length)]);
+    setActivityMessage("정의 2단계 구조화 그룹을 추가했습니다.");
+  }, []);
+
+  const handleAssignProblemStructureNode = useCallback((nodeId: string, groupId: string) => {
+    setProblemStructureGroups((prev) =>
+      prev.map((group) => {
+        const withoutNode = group.nodeIds.filter((item) => item !== nodeId);
+        if (group.id !== groupId) {
+          return {
+            ...group,
+            nodeIds: withoutNode,
+          };
+        }
+        return {
+          ...group,
+          nodeIds: [...withoutNode, nodeId],
+        };
+      }),
+    );
+  }, []);
+
+  const handleUpdateProblemStructureGroupTitle = useCallback((groupId: string, title: string) => {
+    setProblemStructureGroups((prev) =>
+      prev.map((group) => (group.id === groupId ? { ...group, title } : group)),
+    );
+  }, []);
+
+  const handleUpdateProblemStructureGroupRationale = useCallback((groupId: string, rationale: string) => {
+    setProblemStructureGroups((prev) =>
+      prev.map((group) => (group.id === groupId ? { ...group, rationale } : group)),
+    );
+  }, []);
+
   const graphBlueprint = useMemo(() => {
     if (stage === "problem-definition") {
+      if (problemDefinitionPhase === "structure") {
+        const structureNodes =
+          problemStructureNodes.length > 0
+            ? problemStructureNodes
+            : buildProblemStructureNodesFromGroups(problemGroups);
+        const nodeById = new Map(structureNodes.map((node) => [node.id, node]));
+        const assignedNodeIds = new Set(
+          problemStructureGroups.flatMap((group) => group.nodeIds.filter((nodeId) => nodeById.has(nodeId))),
+        );
+        const ungroupedNodes = structureNodes.filter((node) => !assignedNodeIds.has(node.id));
+        const columns = [
+          {
+            id: "__ungrouped__",
+            title: "아직 묶지 않은 노드",
+            rationale: "정의 1단계에서 가져온 모든 노드가 먼저 여기에 놓입니다.",
+            nodeIds: ungroupedNodes.map((node) => node.id),
+            createdBy: "user" as const,
+            fixed: true,
+          },
+          ...problemStructureGroups.map((group) => ({
+            ...group,
+            fixed: false,
+          })),
+        ];
+        const isCardSorting = problemStructureMethod === "card-sorting";
+        const columnWidth = isCardSorting ? 344 : 376;
+        const columnGap = isCardSorting ? 28 : 44;
+        const baseX = 44;
+        const baseY = isCardSorting ? 48 : 64;
+        const structureDescriptors: CanvasNodeDescriptor[] = columns.map((column, index) => {
+          const isUngrouped = column.id === "__ungrouped__";
+          const columnNodes = column.nodeIds
+            .map((nodeId) => nodeById.get(nodeId))
+            .filter((node): node is ProblemStructureNodeViewModel => Boolean(node));
+          const nodeId = isUngrouped ? "problem-structure-ungrouped" : `problem-structure-${column.id}`;
+          const savedPosition = !isCardSorting ? nodePositions["problem-definition"]?.[nodeId] : undefined;
+          const nodeHeight = Math.max(260, 164 + Math.max(1, columnNodes.length) * 104);
+          const position = savedPosition || {
+            x: baseX + index * (columnWidth + columnGap),
+            y: baseY + (!isCardSorting && index % 2 === 1 ? 34 : 0),
+          };
+          const rationaleLabel = isCardSorting ? "그룹 설명 / 이유 카드" : "묶은 이유";
+
+          return {
+            id: nodeId,
+            position,
+            positionSource: savedPosition ? "persisted" : "computed",
+            sourcePosition: Position.Right,
+            targetPosition: Position.Left,
+            className: "!border-0 !bg-transparent !p-0 !shadow-none",
+            style: { width: columnWidth, minHeight: nodeHeight, padding: 0 },
+            draggable: !isCardSorting,
+            data: {
+              contentSignature: buildNodeContentSignature([
+                "problem-structure",
+                problemStructureMethod,
+                problemDefinitionMode,
+                column.id,
+                column.title,
+                column.rationale,
+                columnNodes.length,
+                ...columnNodes.flatMap((node) => [node.id, node.title, node.body, node.status, node.depth]),
+                ...problemStructureGroups.map((group) => `${group.id}:${group.nodeIds.join(",")}`),
+              ]),
+              label: (
+                <div
+                  className={`nopan box-border min-w-0 rounded-[14px] border bg-white p-4 text-left font-['Inter','Noto_Sans_KR',sans-serif] shadow-[0_1px_0_rgba(0,0,0,0.04)] ${
+                    isUngrouped
+                      ? "border-dashed border-black/20"
+                      : isCardSorting
+                        ? "border-[#1b59f8]/20"
+                        : "border-black/10"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <span className="inline-flex items-center rounded-[8px] bg-[#eef4ff] px-2.5 py-1 text-[11px] font-semibold text-[#1b59f8]">
+                        {isUngrouped ? "Pool" : problemStructureMethodLabel(problemStructureMethod)}
+                      </span>
+                      {isUngrouped ? (
+                        <strong className="mt-3 block text-[17px] font-semibold leading-6 text-black">
+                          {column.title}
+                        </strong>
+                      ) : (
+                        <input
+                          value={column.title}
+                          onChange={(event) => handleUpdateProblemStructureGroupTitle(column.id, event.target.value)}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          className="nodrag nopan mt-3 block w-full rounded-[8px] border border-black/10 bg-[#f9f9f9] px-3 py-2 text-[17px] font-semibold leading-6 text-black outline-none transition focus:border-[#1b59f8]/40 focus:bg-white"
+                        />
+                      )}
+                    </div>
+                    <span className="shrink-0 rounded-[8px] bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
+                      {columnNodes.length}개
+                    </span>
+                  </div>
+
+                  {isUngrouped ? (
+                    <p className="mt-3 rounded-[10px] bg-[#f5f6f8] px-3 py-2 text-xs leading-5 text-[#4d4d4d]">
+                      그룹을 만든 뒤 각 노드의 이동 메뉴에서 넣을 그룹을 선택해 주세요.
+                    </p>
+                  ) : (
+                    <div className={`mt-3 rounded-[10px] ${isCardSorting ? "border border-[#1b59f8]/10 bg-[#eef4ff]" : "bg-[#f5f6f8]"} p-3`}>
+                      <label className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#1b59f8]">
+                        {rationaleLabel}
+                      </label>
+                      <textarea
+                        value={column.rationale}
+                        onChange={(event) => handleUpdateProblemStructureGroupRationale(column.id, event.target.value)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        placeholder={column.createdBy === "ai" ? "AI가 왜 묶었는지 나중에 여기에 표시합니다." : "이 그룹으로 묶은 이유를 적어둘 수 있습니다."}
+                        className="nodrag nopan mt-2 min-h-[68px] w-full resize-none rounded-[8px] border border-black/10 bg-white px-3 py-2 text-xs leading-5 text-[#333] outline-none transition focus:border-[#1b59f8]/40"
+                      />
+                    </div>
+                  )}
+
+                  <div className="mt-3 space-y-2">
+                    {columnNodes.length > 0 ? (
+                      columnNodes.map((node) => (
+                        <div key={`${column.id}-${node.id}`} className="rounded-[10px] border border-black/10 bg-white px-3 py-3 shadow-[0_1px_0_rgba(0,0,0,0.03)]">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="line-clamp-2 text-sm font-semibold leading-5 text-black">
+                                {node.title}
+                              </p>
+                              <p className="mt-1 line-clamp-2 text-xs leading-5 text-[#4d4d4d]">
+                                {node.body}
+                              </p>
+                            </div>
+                            <span className={`shrink-0 rounded-[8px] px-2 py-1 text-[10px] font-semibold ${problemGroupStatusTone(node.status)}`}>
+                              {problemGroupStatusLabel(node.status)}
+                            </span>
+                          </div>
+                          <div className="mt-3 flex items-center gap-2">
+                            <span className="text-[11px] font-semibold text-[#777]">이동</span>
+                            <select
+                              value={isUngrouped ? "" : column.id}
+                              onChange={(event) => handleAssignProblemStructureNode(node.id, event.target.value)}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              className="nodrag nopan min-w-0 flex-1 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-2 py-1.5 text-xs font-medium text-[#333] outline-none transition focus:border-[#1b59f8]/40"
+                            >
+                              <option value="">아직 묶지 않음</option>
+                              {problemStructureGroups.map((group) => (
+                                <option key={`${node.id}-${group.id}`} value={group.id}>
+                                  {group.title || "이름 없는 그룹"}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="rounded-[10px] border border-dashed border-black/10 bg-[#f9f9f9] px-3 py-4 text-center text-xs leading-5 text-[#777]">
+                        {isUngrouped ? "모든 노드가 그룹에 들어갔습니다." : "아직 이 그룹에 들어온 노드가 없습니다."}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ),
+            },
+          };
+        });
+
+        return {
+          layoutSignature: buildNodeContentSignature([
+            stage,
+            problemDefinitionPhase,
+            problemStructureMethod,
+            problemDefinitionMode,
+            ...structureNodes.flatMap((node) => [node.id, node.title, node.body, node.status, node.depth]),
+            ...problemStructureGroups.flatMap((group) => [
+              group.id,
+              group.title,
+              group.rationale,
+              group.createdBy,
+              ...group.nodeIds,
+            ]),
+          ]),
+          nodeDescriptors: structureDescriptors,
+        };
+      }
+
       const activeGroup =
         problemGroups.find((group) => group.group_id === selectedProblemGroupId) ||
         problemGroups[0] ||
@@ -7861,6 +8238,9 @@ export default function MeetingCanvasTab({
     handleAttachPersonalNoteToProblemGroup,
     handleDeleteProblemGroup,
     handleGenerateProblemChildren,
+    handleAssignProblemStructureNode,
+    handleUpdateProblemStructureGroupRationale,
+    handleUpdateProblemStructureGroupTitle,
     handleQuickEditProblemGroup,
     handleShowProblemGroupingRationale,
     handleToggleProblemChildren,
@@ -7871,9 +8251,14 @@ export default function MeetingCanvasTab({
     pendingProblemGroupLinkId,
     persistedSharedImportedState,
     problemChildGenerationPendingId,
+    problemDefinitionMode,
+    problemDefinitionPhase,
     problemGroupingRationaleById,
     problemGroupingRationalePendingId,
     problemGroups,
+    problemStructureGroups,
+    problemStructureMethod,
+    problemStructureNodes,
     selectedCanvasItemId,
     selectedProblemGroupId,
     selectedSolutionTopicId,
@@ -8023,8 +8408,11 @@ export default function MeetingCanvasTab({
     }
   }, [displayEdges, selectedEdgeId]);
   const selectedProblemGroup = useMemo(
-    () => problemGroups.find((group) => group.group_id === selectedProblemGroupId) || problemGroups[0] || null,
-    [problemGroups, selectedProblemGroupId],
+    () =>
+      problemDefinitionPhase === "structure"
+        ? null
+        : problemGroups.find((group) => group.group_id === selectedProblemGroupId) || problemGroups[0] || null,
+    [problemDefinitionPhase, problemGroups, selectedProblemGroupId],
   );
   const selectedProblemSourceCards = useMemo(
     () => (selectedProblemGroup ? buildProblemGroupDisplayCards(selectedProblemGroup).filter((card) => card.attachable) : []),
@@ -8355,6 +8743,10 @@ export default function MeetingCanvasTab({
           setProblemGroupingRationaleById({});
           setProblemGroupingRationaleOpenGroupId("");
           setProblemGroupingRationalePendingId("");
+          setProblemDefinitionPhase("explore");
+          setProblemStructureSetupOpen(false);
+          setProblemStructureNodes([]);
+          setProblemStructureGroups([]);
         }
         setProblemDefinitionMode("");
         setSelectedProblemGroupId("");
@@ -8374,6 +8766,10 @@ export default function MeetingCanvasTab({
         setProblemGroups([]);
         setSolutionTopics([]);
         setNodePositions(nextNodePositionsSnapshot);
+        setProblemDefinitionPhase("explore");
+        setProblemStructureSetupOpen(false);
+        setProblemStructureNodes([]);
+        setProblemStructureGroups([]);
         setSelectedProblemGroupId("");
         setSelectedProblemSourceNodeId("");
         setSelectedNodeId("");
@@ -8401,6 +8797,8 @@ export default function MeetingCanvasTab({
       }));
 
       setProblemGroups(nextGroups);
+      setProblemDefinitionPhase("explore");
+      setProblemStructureSetupOpen(false);
       const nextSelectedGroupId = nextGroups[0]?.group_id || "";
       setSelectedProblemGroupId(nextSelectedGroupId);
       setSelectedNodeId(nextSelectedGroupId ? `problem-${nextSelectedGroupId}` : "");
@@ -8569,6 +8967,7 @@ export default function MeetingCanvasTab({
       }
 
       if (nextStage !== "problem-definition") {
+        setProblemStructureSetupOpen(false);
         setStage(nextStage);
         return;
       }
@@ -8583,6 +8982,8 @@ export default function MeetingCanvasTab({
       }
 
       setProblemDefinitionMode("");
+      setProblemDefinitionPhase("explore");
+      setProblemStructureSetupOpen(false);
       await handleGenerateProblemDefinition();
       setLeftPanelTab("detail");
       return;
@@ -8630,18 +9031,20 @@ export default function MeetingCanvasTab({
         : ["note", "comment", "topic", "group"],
     [stage],
   );
-  const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] = [
-    "group",
-    "problem-link",
-    "debug-regenerate",
-    "debug-refresh-chunks",
-  ];
+  const problemCanvasToolbarActions: ProblemCanvasToolbarAction[] =
+    problemDefinitionPhase === "structure"
+      ? ["structure-back", "structure-add-group", "structure-refresh"]
+      : ["group", "problem-link", "debug-regenerate", "debug-refresh-chunks", "structure-start"];
 
   const problemToolbarActionLabel = (action: ProblemCanvasToolbarAction) => {
     if (action === "group") return "문제정의 그룹 추가";
     if (action === "problem-link") return "문제정의 그룹 연결";
     if (action === "debug-regenerate") return "디버그 재생성";
     if (action === "debug-refresh-chunks") return "요약 캐시 재생성";
+    if (action === "structure-start") return "구조화 시작";
+    if (action === "structure-back") return "정의 1단계";
+    if (action === "structure-add-group") return "그룹 추가";
+    if (action === "structure-refresh") return "다시 가져오기";
     if (action === "note") return "의견추가";
     if (action === "problem-idea") return "아이디어 추가";
     return "채택";
@@ -8649,6 +9052,7 @@ export default function MeetingCanvasTab({
 
   const isProblemToolbarActionActive = (action: ProblemCanvasToolbarAction) => {
     if (action === "debug-regenerate" || action === "debug-refresh-chunks") return problemDefinitionStagePending;
+    if (action === "structure-start") return problemDefinitionPhase === "structure" || problemStructureSetupOpen;
     if (action === "problem-link") return Boolean(pendingProblemGroupLinkId);
     if (action === "adopt") return selectedProblemGroup?.status === "final";
     return armedCanvasTool === action;
@@ -11380,7 +11784,7 @@ export default function MeetingCanvasTab({
     return canvasItems.find((item) => item.id === rootId) || latestItem;
   }, [canvasItems, latestHighlightedTopicId]);
   const problemSplitEdges = useMemo(() => {
-    if (stage !== "problem-definition") {
+    if (stage !== "problem-definition" || problemDefinitionPhase === "structure") {
       return { left: [] as Edge[], right: [] as Edge[] };
     }
 
@@ -11453,7 +11857,7 @@ export default function MeetingCanvasTab({
       left: [...hierarchyEdges, ...groupLinkEdges],
       right: [] as Edge[],
     };
-  }, [collapsedProblemGroupIds, problemGroups, stage]);
+  }, [collapsedProblemGroupIds, problemDefinitionPhase, problemGroups, stage]);
   const solutionSplitNodes = useMemo(() => {
     if (stage !== "solution") {
       return { left: [] as Node[], right: [] as Node[] };
@@ -11726,6 +12130,14 @@ export default function MeetingCanvasTab({
     } else {
       setSelectedCanvasItemId("");
     }
+    if (stage === "problem-definition" && problemDefinitionPhase === "structure") {
+      setSelectedProblemGroupId("");
+      setSelectedProblemSourceNodeId("");
+      setSelectedSolutionTopicId("");
+      setEditingProblemGroupId("");
+      setEditingSolutionTopicId("");
+      return;
+    }
     const problemSourceInfo = extractProblemSourceCanvasNodeInfo(node.id);
     const clickedProblemGroupId =
       node.id.startsWith("problem-") && !node.id.startsWith("problem-discussion-")
@@ -11844,6 +12256,32 @@ export default function MeetingCanvasTab({
       setCanvasPlacementPreview(null);
       setPendingProblemGroupLinkId("");
       void handleRefreshProblemChunkSummaries();
+      return;
+    }
+
+    if (action === "structure-start") {
+      setArmedCanvasTool(null);
+      setCanvasPlacementPreview(null);
+      setPendingProblemGroupLinkId("");
+      handleOpenProblemStructureSetup();
+      return;
+    }
+
+    if (action === "structure-back") {
+      setArmedCanvasTool(null);
+      setCanvasPlacementPreview(null);
+      setPendingProblemGroupLinkId("");
+      handleBackToProblemDefinitionExplore();
+      return;
+    }
+
+    if (action === "structure-add-group") {
+      handleAddProblemStructureGroup();
+      return;
+    }
+
+    if (action === "structure-refresh") {
+      handleRefreshProblemStructureNodes();
       return;
     }
 
@@ -12955,6 +13393,10 @@ export default function MeetingCanvasTab({
                         setNodePositions({});
                         setStage("ideation");
                         setProblemDefinitionMode("");
+                        setProblemDefinitionPhase("explore");
+                        setProblemStructureSetupOpen(false);
+                        setProblemStructureNodes([]);
+                        setProblemStructureGroups([]);
                         setSelectedProblemGroupId("");
                         setSelectedSolutionTopicId("");
                         setSelectedNodeId("");
@@ -13362,44 +13804,161 @@ export default function MeetingCanvasTab({
               </div>
             ) : null}
 
-            {stage === "problem-definition" && !problemDefinitionStagePending && !problemDefinitionMode && problemGroups.length > 0 ? (
+            {stage === "problem-definition" && !problemDefinitionStagePending && problemStructureSetupOpen ? (
               <div className="absolute inset-0 z-[7] flex items-center justify-center bg-white/82 px-4 backdrop-blur-[2px]">
-                <div className="w-[min(720px,94%)] rounded-[20px] border border-black/10 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.14)]">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Problem Definition</p>
-                  <h3 className="mt-2 text-2xl font-semibold text-black">문제정의 정리 방식을 선택해 주세요</h3>
-                  <div className="mt-5 grid gap-3 md:grid-cols-2">
+                <div className="w-[min(820px,94%)] rounded-[20px] border border-black/10 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.14)]">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">Problem Structure</p>
+                      <h3 className="mt-2 text-2xl font-semibold text-black">정의 2단계 시작 설정</h3>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => {
-                        setProblemDefinitionMode("manual");
-                        setActivityMessage("직접 정리 모드로 문제정의 캔버스를 열었습니다.");
-                      }}
-                      className="rounded-[14px] border border-black/10 bg-[#f9f9f9] px-5 py-5 text-left transition hover:border-[#1b59f8]/30 hover:bg-[#eef4ff]"
+                      onClick={() => setProblemStructureSetupOpen(false)}
+                      className="shrink-0 rounded-[8px] border border-black/10 bg-[#f9f9f9] px-3 py-2 text-xs font-semibold text-[#4d4d4d] transition hover:bg-[#eef4ff] hover:text-[#1b59f8]"
                     >
-                      <span className="text-lg font-semibold text-black">직접 정리할래요</span>
-                      <span className="mt-2 block text-sm leading-6 text-[#4d4d4d]">
-                        STT에서 만든 첫 분류를 보면서 사용자가 직접 수정하고 확장합니다.
-                      </span>
+                      닫기
                     </button>
+                  </div>
+
+                  <div className="mt-5 grid gap-4 md:grid-cols-2">
+                    <div>
+                      <p className="text-sm font-semibold text-black">구조화 방식</p>
+                      <div className="mt-3 grid gap-3">
+                        {(["affinity", "card-sorting"] as ProblemStructureMethod[]).map((method) => {
+                          const active = problemStructureDraftMethod === method;
+                          return (
+                            <button
+                              key={method}
+                              type="button"
+                              onClick={() => setProblemStructureDraftMethod(method)}
+                              className={`rounded-[14px] border px-5 py-4 text-left transition ${
+                                active
+                                  ? "border-[#1b59f8]/30 bg-[#eef4ff] text-[#1b59f8]"
+                                  : "border-black/10 bg-[#f9f9f9] text-[#333] hover:border-[#1b59f8]/30 hover:bg-[#eef4ff]"
+                              }`}
+                            >
+                              <span className="text-base font-semibold">{problemStructureMethodLabel(method)}</span>
+                              <span className="mt-1 block text-sm leading-6 text-[#4d4d4d]">
+                                {method === "affinity"
+                                  ? "비슷한 의미의 노드를 자유로운 그룹으로 묶습니다."
+                                  : "그룹 컬럼 위에 설명 카드를 두고 노드를 분류합니다."}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-semibold text-black">시작 방식</p>
+                      <div className="mt-3 grid gap-3">
+                        {(["ai", "manual"] as Exclude<ProblemDefinitionMode, "">[]).map((mode) => {
+                          const active = problemStructureDraftMode === mode;
+                          return (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => setProblemStructureDraftMode(mode)}
+                              className={`rounded-[14px] border px-5 py-4 text-left transition ${
+                                active
+                                  ? "border-[#1b59f8]/30 bg-[#eef4ff] text-[#1b59f8]"
+                                  : "border-black/10 bg-[#f9f9f9] text-[#333] hover:border-[#1b59f8]/30 hover:bg-[#eef4ff]"
+                              }`}
+                            >
+                              <span className="text-base font-semibold">
+                                {mode === "ai" ? "AI가 초안을 만들기" : "직접 구성하기"}
+                              </span>
+                              <span className="mt-1 block text-sm leading-6 text-[#4d4d4d]">
+                                {mode === "ai"
+                                  ? "이번 버전에서는 빈 구조화 캔버스로 진입하고, 자동 묶기는 다음 작업에서 연결합니다."
+                                  : "사용자가 그룹을 만들고 노드를 옮기며 구조화합니다."}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-black/10 pt-4">
+                    <p className="text-sm leading-6 text-[#4d4d4d]">
+                      정의 1단계 캔버스의 현재 노드 {problemGroups.length}개를 모두 가져옵니다.
+                    </p>
                     <button
                       type="button"
-                      onClick={() => {
-                        setProblemDefinitionMode("ai");
-                        setActivityMessage("AI 첫 틀 정리 모드로 문제정의 캔버스를 열었습니다.");
-                      }}
-                      className="rounded-[14px] border border-[#1b59f8]/20 bg-[#eef4ff] px-5 py-5 text-left transition hover:border-[#1b59f8]/40 hover:bg-[#e1ebff]"
+                      onClick={handleStartProblemStructure}
+                      className="rounded-[10px] bg-[#1b59f8] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#164be0]"
                     >
-                      <span className="text-lg font-semibold text-[#1b59f8]">AI가 첫 틀을 정해줘요</span>
-                      <span className="mt-2 block text-sm leading-6 text-[#4d4d4d]">
-                        생성된 큰 분류를 기반으로 필요한 노드만 세부 확장합니다.
-                      </span>
+                      정의 2단계로 이동
                     </button>
                   </div>
                 </div>
               </div>
             ) : null}
 
-            {stage === "problem-definition" && activeProblemGroupingRationale && activeProblemGroupingRationaleGroup ? (
+            {stage === "problem-definition" && problemDefinitionPhase === "structure" && !problemDefinitionStagePending ? (
+              <div className="pointer-events-none absolute left-4 top-4 z-[8] w-[min(38rem,calc(100%-2rem))]">
+                <div className="pointer-events-auto rounded-[16px] border border-black/10 bg-white/95 p-3 shadow-[0_14px_38px_rgba(15,23,42,0.12)] backdrop-blur">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="min-w-[12rem] flex-1">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#1b59f8]">
+                        정의 2단계
+                      </p>
+                      <p className="mt-1 text-sm font-semibold text-black">
+                        {problemStructureMethodLabel(problemStructureMethod)} · {problemDefinitionModeLabel(problemDefinitionMode)}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(["affinity", "card-sorting"] as ProblemStructureMethod[]).map((method) => {
+                        const active = problemStructureMethod === method;
+                        return (
+                          <button
+                            key={`structure-method-${method}`}
+                            type="button"
+                            onClick={() => {
+                              setProblemStructureMethod(method);
+                              setActivityMessage(`${problemStructureMethodLabel(method)} 방식으로 시각 표현을 바꿨습니다. 기존 그룹은 유지됩니다.`);
+                            }}
+                            className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
+                              active ? "bg-[#1b59f8] text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-[#eef4ff] hover:text-[#1b59f8]"
+                            }`}
+                          >
+                            {problemStructureMethodLabel(method)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(["ai", "manual"] as Exclude<ProblemDefinitionMode, "">[]).map((mode) => {
+                        const active = problemDefinitionMode === mode;
+                        return (
+                          <button
+                            key={`structure-mode-${mode}`}
+                            type="button"
+                            onClick={() => {
+                              setProblemDefinitionMode(mode);
+                              setActivityMessage(
+                                mode === "ai"
+                                  ? "AI 초안 모드로 표시했습니다. 자동 묶기는 다음 작업에서 연결합니다."
+                                  : "직접 구성 모드로 표시했습니다.",
+                              );
+                            }}
+                            className={`rounded-[9px] px-3 py-1.5 text-xs font-semibold transition ${
+                              active ? "bg-black text-white" : "bg-[#f5f6f8] text-[#4d4d4d] hover:bg-black/5 hover:text-black"
+                            }`}
+                          >
+                            {problemDefinitionModeLabel(mode)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {stage === "problem-definition" && problemDefinitionPhase !== "structure" && activeProblemGroupingRationale && activeProblemGroupingRationaleGroup ? (
               <div className="absolute right-4 top-4 z-[8] w-[min(26rem,calc(100%-2rem))] rounded-[16px] border border-black/10 bg-white/95 p-4 text-left shadow-[0_18px_46px_rgba(15,23,42,0.14)] backdrop-blur">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -13486,7 +14045,7 @@ export default function MeetingCanvasTab({
             {stage === "problem-definition" ? (
               <>
                 <div className="pointer-events-none absolute inset-x-0 bottom-[clamp(16px,3vh,32px)] z-10 flex justify-center px-3">
-                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(620px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
+                  <div className="pointer-events-auto flex min-h-[clamp(48px,6.4vh,56px)] w-auto max-w-[min(860px,calc(100vw-24px))] flex-wrap items-center justify-center gap-2 rounded-[16px] border border-black/10 bg-white px-[clamp(10px,1.2vw,12px)] py-2 text-[#4d4d4d] shadow-[0_5.64px_22.56px_rgba(0,0,0,0.05)]">
                     {problemCanvasToolbarActions.map((item) => (
                       <button
                         key={item}
@@ -13496,6 +14055,8 @@ export default function MeetingCanvasTab({
                           !canUseCanvasToolbar ||
                           problemDefinitionStagePending ||
                           ((item === "debug-regenerate" || item === "debug-refresh-chunks") && busy) ||
+                          (item === "structure-start" && problemGroups.length === 0) ||
+                          ((item === "structure-add-group" || item === "structure-refresh") && problemDefinitionPhase !== "structure") ||
                           (item === "problem-link" && !selectedProblemGroup && !pendingProblemGroupLinkId)
                         }
                         className={`flex h-[clamp(34px,4vh,38px)] min-w-[clamp(110px,10vw,150px)] shrink-0 items-center justify-center rounded-[12px] px-[clamp(10px,1vw,14px)] text-[clamp(12px,0.92vw,14px)] font-medium transition-all duration-150 ease-out ${
