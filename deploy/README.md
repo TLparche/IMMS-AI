@@ -62,7 +62,6 @@ notepad .env.production
 - `NEXT_PUBLIC_GATEWAY_URL`
 - `NEXT_PUBLIC_GATEWAY_WS_URL`
 - `CORS_ORIGINS`
-- `CORS_ORIGIN_REGEX`
 
 예시:
 
@@ -70,8 +69,7 @@ notepad .env.production
 NEXT_PUBLIC_API_BASE_URL=http://123.123.123.123:8000
 NEXT_PUBLIC_GATEWAY_URL=http://123.123.123.123:8001/gateway
 NEXT_PUBLIC_GATEWAY_WS_URL=ws://123.123.123.123:8001/gateway/ws
-CORS_ORIGINS=["http://123.123.123.123:3000","https://imms-ai.vercel.app"]
-CORS_ORIGIN_REGEX=https://.*\.vercel\.app
+CORS_ORIGINS=["http://123.123.123.123:3000"]
 ```
 
 HTTPS 도메인을 쓰면:

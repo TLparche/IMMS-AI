@@ -28,11 +28,7 @@ export default function LoginPage() {
     setLoading(true)
 
     try {
-      const { error } = await signIn(email, password)
-      if (error) {
-        setError(getErrorMessage(error, '로그인에 실패했습니다.'))
-        return
-      }
+      await signIn(email, password)
       router.push('/dashboard')
     } catch (err) {
       setError(getErrorMessage(err, '로그인에 실패했습니다.'))

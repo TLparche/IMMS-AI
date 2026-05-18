@@ -121,8 +121,7 @@ JWT_SECRET=your_jwt_secret_here
 JWT_ALGORITHM=HS256
 
 # CORS
-CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000","https://imms-ai.vercel.app"]
-CORS_ORIGIN_REGEX=https://.*\.vercel\.app
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173","http://localhost:3000"]
 ```
 
 `frontend/.env.local` 파일 생성:

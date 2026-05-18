@@ -83,15 +83,6 @@ interface CanvasStageContext {
   selectedNodeId?: string;
 }
 
-function getErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return fallback;
-}
-
 function createCalibrationAccumulator(): CalibrationAccumulator {
   return {
     chunks: 0,
@@ -294,7 +285,6 @@ function HomeContent() {
   const audioImportPollTimerRef = useRef<number | null>(null);
   const lastSttStatusLogAtRef = useRef(0);
   const lastGatewayChunkLogAtRef = useRef(0);
-  const pendingAudioSendsRef = useRef<Set<Promise<unknown>>>(new Set());
 
   useEffect(() => {
     meetingTitleRef.current = meetingTitle;
@@ -355,29 +345,7 @@ function HomeContent() {
         window.clearTimeout(audioImportPollTimerRef.current);
       }
       audioRecorderRef.current?.cleanup();
-      pendingAudioSendsRef.current.clear();
     };
-  }, []);
-
-  const trackPendingAudioSend = useCallback((sendPromise: Promise<unknown>) => {
-    const trackedPromise = sendPromise.catch((error) => {
-      console.warn("[STT] pending audio send failed", error);
-      return null;
-    });
-    pendingAudioSendsRef.current.add(trackedPromise);
-    void trackedPromise.finally(() => {
-      pendingAudioSendsRef.current.delete(trackedPromise);
-    });
-  }, []);
-
-  const waitForPendingAudioSends = useCallback(async (timeoutMs = 1500) => {
-    const pending = Array.from(pendingAudioSendsRef.current);
-    if (pending.length === 0) return;
-
-    await Promise.race([
-      Promise.allSettled(pending),
-      new Promise((resolve) => window.setTimeout(resolve, timeoutMs)),
-    ]);
   }, []);
 
   const stopAudioImportPolling = useCallback(() => {
@@ -422,7 +390,6 @@ function HomeContent() {
 
     const loadMeeting = async () => {
       setLoadingMeeting(true);
-      setMeetingLoadError("");
       try {
         const [
           { data: meetingData, error: meetingError },
@@ -464,7 +431,6 @@ function HomeContent() {
         }
       } catch (error) {
         console.error("Failed to load meeting context:", error);
-        setMeetingLoadError(getErrorMessage(error, "회의 정보를 불러오지 못했습니다."));
       } finally {
         setLoadingMeeting(false);
       }
@@ -928,7 +894,6 @@ function HomeContent() {
       const recorder = audioRecorderRef.current;
       audioRecorderRef.current = null;
       await recorder?.stopAndCleanup();
-      await waitForPendingAudioSends();
       finishCalibration();
       setIsRecording(false);
       return;
@@ -1007,18 +972,16 @@ function HomeContent() {
           canvasStage: canvasContext.stage,
           canvasTargetId: canvasContext.targetId || "",
         });
-        trackPendingAudioSend(
-          wsClientRef.current.sendAudioChunk(
-            blob,
-            user.email || "Unknown",
-            metrics,
-            buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
-            {
-              stage: canvasContext.stage,
-              targetId: canvasContext.targetId,
-              selectedNodeId: canvasContext.selectedNodeId,
-            },
-          ),
+        wsClientRef.current.sendAudioChunk(
+          blob,
+          user.email || "Unknown",
+          metrics,
+          buildSttContext(meetingGoalRef.current, meetingGoalContextRef.current, meetingTitleRef.current),
+          {
+            stage: canvasContext.stage,
+            targetId: canvasContext.targetId,
+            selectedNodeId: canvasContext.selectedNodeId,
+          },
         );
       } else {
         console.warn("[STT] audio chunk not sent because WebSocket is disconnected", {
@@ -1037,11 +1000,9 @@ function HomeContent() {
       const recorder = audioRecorderRef.current;
       audioRecorderRef.current = null;
       await recorder?.stopAndCleanup();
-      await waitForPendingAudioSends();
       setIsRecording(false);
     }
 
-    await waitForPendingAudioSends();
     wsClientRef.current?.disconnect();
 
     try {
@@ -1096,34 +1057,6 @@ function HomeContent() {
         <div className="rounded-[28px] border border-white/70 bg-white/85 px-8 py-7 text-center shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
           <div className="mx-auto h-12 w-12 animate-spin rounded-full border-[3px] border-cyan-100 border-t-[#10243f]" />
           <p className="mt-4 text-sm font-medium text-slate-600">로딩 중...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (meetingLoadError) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#eaf0f7] px-5">
-        <div className="w-full max-w-md rounded-[28px] border border-red-100 bg-white px-8 py-7 text-center shadow-[0_24px_70px_rgba(15,23,42,0.12)]">
-          <p className="text-sm font-semibold text-red-600">회의를 불러오지 못했습니다.</p>
-          <h1 className="mt-3 text-2xl font-black text-slate-950">다시 연결이 필요합니다</h1>
-          <p className="mt-3 break-words text-sm leading-6 text-slate-600">{meetingLoadError}</p>
-          <div className="mt-6 flex justify-center gap-3">
-            <button
-              type="button"
-              onClick={() => setMeetingReloadToken((current) => current + 1)}
-              className="rounded-[12px] bg-[#10243f] px-5 py-2.5 text-sm font-bold text-white"
-            >
-              다시 시도
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push("/dashboard")}
-              className="rounded-[12px] bg-slate-100 px-5 py-2.5 text-sm font-bold text-slate-700"
-            >
-              대시보드
-            </button>
-          </div>
         </div>
       </div>
     );

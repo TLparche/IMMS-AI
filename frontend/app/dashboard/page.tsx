@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/contexts/AuthContext";
 import { getCanvasWorkspaceState, saveCanvasWorkspacePatch } from "@/lib/api";
+import { supabase } from "@/lib/supabase";
 import type { CanvasFinalSolutionSummary, CanvasFinalSolutionSummaryTopic, CanvasSolutionTopicResponse } from "@/lib/types";
-
-const GATEWAY_URL = (process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8001/gateway").replace(/\/+$/, "");
 
 interface Meeting {
   id: string;
@@ -25,43 +24,6 @@ function getErrorMessage(error: unknown, fallback: string) {
     if (typeof message === "string") return message;
   }
   return fallback;
-}
-
-async function parseGatewayResponse<T>(response: Response): Promise<T> {
-  if (response.ok) {
-    return (await response.json()) as T;
-  }
-
-  let message = `HTTP ${response.status}`;
-  try {
-    const body = await response.json();
-    if (typeof body?.detail === "string") {
-      message = body.detail;
-    }
-  } catch {
-    const text = await response.text();
-    if (text) message = text;
-  }
-  throw new Error(message);
-}
-
-async function requestGateway<T>(path: string, token: string, init?: RequestInit): Promise<T> {
-  if (!token) {
-    throw new Error("로그인 세션을 확인할 수 없습니다. 다시 로그인해 주세요.");
-  }
-
-  const headers = new Headers(init?.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  if (init?.body && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  const response = await fetch(`${GATEWAY_URL}${path}`, {
-    ...init,
-    headers,
-    cache: "no-store",
-  });
-  return parseGatewayResponse<T>(response);
 }
 
 function getMeetingStatusLabel(status: string) {
@@ -231,7 +193,7 @@ function getMeetingStatusBadgeClass(status: string) {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, session, loading: authLoading, signOut } = useAuth();
+  const { user, loading: authLoading, signOut } = useAuth();
 
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [loading, setLoading] = useState(true);
@@ -246,23 +208,6 @@ export default function DashboardPage() {
   const [resultLoadingMeetingId, setResultLoadingMeetingId] = useState<string | null>(null);
   const [resultRebuildingMeetingId, setResultRebuildingMeetingId] = useState<string | null>(null);
 
-  const loadMeetings = useCallback(async () => {
-    try {
-      setLoading(true);
-      console.log("📊 Dashboard - Fetching meetings from gateway...");
-
-      const data = await requestGateway<Meeting[]>("/meetings", session?.access_token || "");
-
-      console.log("✅ Dashboard - Loaded meetings:", data?.length || 0);
-      setMeetings(data || []);
-    } catch (error) {
-      console.error("Error loading meetings:", error);
-      alert("회의 목록을 불러오는데 실패했습니다.");
-    } finally {
-      setLoading(false);
-    }
-  }, [session?.access_token]);
-
   useEffect(() => {
     console.log("📊 Dashboard - Auth check:", { authLoading, userEmail: user?.email });
     if (!authLoading && !user) {
@@ -272,11 +217,37 @@ export default function DashboardPage() {
   }, [user, authLoading, router]);
 
   useEffect(() => {
-    if (user && session?.access_token) {
+    if (user) {
       console.log("📊 Dashboard - Loading meetings for user:", user.email);
       void loadMeetings();
     }
-  }, [user, session?.access_token, loadMeetings]);
+  }, [user]);
+
+  const loadMeetings = async () => {
+    try {
+      setLoading(true);
+      console.log("📊 Dashboard - Fetching meetings from Supabase...");
+
+      const { data, error } = await supabase
+        .from("meetings")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.error("❌ Dashboard - Failed to load meetings:", error);
+        throw error;
+      }
+
+      console.log("✅ Dashboard - Loaded meetings:", data?.length || 0);
+      setMeetings(data || []);
+    } catch (error) {
+      console.error("Error loading meetings:", error);
+      alert("회의 목록을 불러오는데 실패했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleCreateMeeting = async () => {
     if (!user) return;
@@ -288,13 +259,22 @@ export default function DashboardPage() {
     try {
       console.log("📊 Dashboard - Creating new meeting:", newMeetingTitle);
 
-      const data = await requestGateway<Meeting>("/meetings", session?.access_token || "", {
-        method: "POST",
-        body: JSON.stringify({
-          title: newMeetingTitle,
-          goal: "",
-        }),
-      });
+      const { data, error } = await supabase
+        .from("meetings")
+        .insert([
+          {
+            title: newMeetingTitle,
+            host_id: user.id,
+            status: "scheduled",
+          },
+        ])
+        .select()
+        .single();
+
+      if (error) {
+        console.error("❌ Dashboard - Failed to create meeting:", error);
+        throw error;
+      }
 
       console.log("✅ Dashboard - Meeting created:", data.id);
       setShowCreateModal(false);

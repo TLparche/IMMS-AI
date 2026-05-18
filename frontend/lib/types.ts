@@ -29,92 +29,6 @@ export interface LlmStatus {
   last_finish_reason?: string;
 }
 
-export interface AiTaskPolicy {
-  task_type: string;
-  queue_name: string;
-  worker_name: string;
-  model_policy: string;
-  cache_policy: string;
-  stale_policy: string;
-  output_policy: string;
-  priority: number;
-  description?: string;
-}
-
-export interface AiTaskRecord extends AiTaskPolicy {
-  task_id: string;
-  meeting_id: string;
-  source?: string;
-  job_id?: string;
-  job_type?: string;
-  scope_key?: string;
-  status: string;
-  activity_type?: string;
-  activity_line?: string;
-  activity_events?: Array<{
-    operation_id?: string;
-    operation_type?: string;
-    summary?: string;
-    target_node_id?: string;
-    source_node_ids?: string[];
-    created_at?: string;
-  }>;
-  stale_reason?: string;
-  retryable?: boolean;
-  detail?: string;
-  warning?: string;
-  cache_key?: string;
-  cache_hit?: boolean;
-  deduped?: boolean;
-  input_signature?: string;
-  pending_item_id?: string;
-  resolved_node_id?: string;
-  target_count?: number;
-  target_signature?: string;
-  retry_count?: number;
-  retry_after_epoch?: number;
-  retry_job_id?: string;
-  retry_source_job_id?: string;
-  created_at?: string;
-  updated_at?: string;
-  started_at?: string;
-  completed_at?: string;
-  duration_ms?: number;
-}
-
-export interface AiTaskPoliciesResponse {
-  ok: boolean;
-  policies: AiTaskPolicy[];
-}
-
-export interface AiTasksResponse {
-  ok: boolean;
-  meeting_id?: string;
-  limit?: number;
-  total?: number;
-  filters?: {
-    status?: string[];
-    task_type?: string[];
-    queue_name?: string[];
-  };
-  queues: Record<string, Record<string, number>>;
-  tasks: AiTaskRecord[];
-  policies: AiTaskPolicy[];
-}
-
-export interface AiTaskResponseFields extends Partial<AiTaskPolicy> {
-  task_id?: string;
-  cache_key?: string;
-  status?: string;
-  stale_reason?: string;
-  retryable?: boolean;
-  activity_type?: string;
-  activity_line?: string;
-  cache_hit?: boolean;
-  deduped?: boolean;
-  detail?: string;
-}
-
 export interface AgendaActionReason {
   turn_id?: number;
   speaker: string;
@@ -294,15 +208,12 @@ export interface CanvasProblemDefinitionGroup {
   keywords: string[];
   agenda_ids: string[];
   agenda_titles: string[];
-  source_group_id?: string;
-  source_group_title?: string;
   ideas: Array<{
     id: string;
     kind: string;
     title: string;
     body: string;
   }>;
-  source_child_item_ids?: string[];
   discussion_items?: CanvasProblemDiscussionItem[];
   linked_group_ids?: string[];
   evidence_utterance_ids?: string[];
@@ -334,7 +245,7 @@ export interface CanvasProblemDiscussionItem {
   created_at?: string;
 }
 
-export interface CanvasProblemDefinitionResponse extends AiTaskResponseFields {
+export interface CanvasProblemDefinitionResponse {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -361,7 +272,7 @@ export interface CanvasPersonalNote {
   body: string;
 }
 
-export interface CanvasProblemConclusionResponse extends AiTaskResponseFields {
+export interface CanvasProblemConclusionResponse {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -441,7 +352,6 @@ export interface CanvasWorkspaceItem {
   parent_topic_locked?: boolean;
   child_item_ids?: string[];
   topic_collapsed?: boolean;
-  auto_summary_disabled?: boolean;
   created_by?: "ai" | "user" | "";
   manual_position?: boolean;
   ai_generated?: boolean;
@@ -517,16 +427,12 @@ export interface CanvasWorkspaceProblemGroup {
   keywords: string[];
   agenda_ids: string[];
   agenda_titles: string[];
-  source_group_id?: string;
-  source_group_title?: string;
   ideas: Array<{
     id: string;
     kind: string;
     title: string;
     body: string;
   }>;
-  source_child_item_ids?: string[];
-  linked_group_ids?: string[];
   discussion_items?: CanvasProblemDiscussionItem[];
   linked_group_ids?: string[];
   evidence_utterance_ids?: string[];
@@ -548,37 +454,6 @@ export interface CanvasNodePositionsByStage {
   ideation?: Record<string, CanvasNodePosition>;
   "problem-definition"?: Record<string, CanvasNodePosition>;
   solution?: Record<string, CanvasNodePosition>;
-}
-
-export interface CanvasOperationLogEntry {
-  operation_id: string;
-  operation_type:
-    | "node_created"
-    | "node_moved"
-    | "node_merged"
-    | "node_compacted"
-    | "node_deleted"
-    | string;
-  source?: string;
-  target_node_id?: string;
-  source_node_ids?: string[];
-  previous_parent_id?: string;
-  next_parent_id?: string;
-  summary?: string;
-  created_at?: string;
-  created_epoch?: number;
-}
-
-export interface CanvasNodeLineageRecord {
-  node_id: string;
-  current_node_id?: string;
-  status?: "active" | "merged" | "deleted" | string;
-  source_operation_id?: string;
-  source_node_ids?: string[];
-  created_at?: string;
-  created_epoch?: number;
-  updated_at?: string;
-  updated_epoch?: number;
 }
 
 export interface CanvasWorkspaceStateResponse {
@@ -605,8 +480,6 @@ export interface CanvasWorkspaceStateResponse {
   idea_create_stack?: number;
   idea_processed_utterance_ids?: string[];
   problem_processed_utterance_ids?: string[];
-  operation_log?: CanvasOperationLogEntry[];
-  node_lineage?: Record<string, CanvasNodeLineageRecord>;
   imported_state?: MeetingState | null;
   saved_at?: string;
 }
@@ -648,7 +521,6 @@ export interface CanvasLocalState {
   >;
   canvas_items?: CanvasWorkspaceItem[];
   custom_groups?: CanvasCustomGroup[];
-  ideation_focus_item_id?: string;
   stage?: "ideation" | "problem-definition" | "solution";
   problem_groups?: CanvasWorkspaceProblemGroup[];
   problem_structure?: CanvasProblemStructureState;
@@ -726,7 +598,7 @@ export interface CanvasFinalSolutionSummary {
   markdown: string;
 }
 
-export interface MeetingGoalSuggestionResponse extends AiTaskResponseFields {
+export interface MeetingGoalSuggestionResponse {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -781,7 +653,7 @@ export interface CanvasSolutionTopicResponse {
   }>;
 }
 
-export interface CanvasSolutionStageResponse extends AiTaskResponseFields {
+export interface CanvasSolutionStageResponse {
   ok: boolean;
   used_llm: boolean;
   warning?: string;
@@ -789,7 +661,7 @@ export interface CanvasSolutionStageResponse extends AiTaskResponseFields {
   topics: CanvasSolutionTopicResponse[];
 }
 
-export interface CanvasIdeationSuggestionResponse extends AiTaskResponseFields {
+export interface CanvasIdeationSuggestionResponse {
   ok: boolean;
   used_llm: boolean;
   warning?: string;

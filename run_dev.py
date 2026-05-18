@@ -98,13 +98,6 @@ def _run_checked(cmd: list[str], cwd: Path) -> None:
         raise RuntimeError(f"명령 실패: {' '.join(cmd)} (exit={completed.returncode})")
 
 
-def _uvicorn_reload_args(*reload_dirs: Path) -> list[str]:
-    args = ["--reload"]
-    for reload_dir in reload_dirs:
-        args.extend(["--reload-dir", str(reload_dir)])
-    return args
-
-
 def _find_npm_executable() -> str | None:
     return shutil.which("npm.cmd") or shutil.which("npm")
 
@@ -161,7 +154,7 @@ def _start_backend_with_retry(python_exe: str, root: Path, host: str, preferred_
             "-m",
             "uvicorn",
             "backend.api:app",
-            *_uvicorn_reload_args(root / "backend"),
+            "--reload",
             "--host",
             host,
             "--port",
@@ -191,7 +184,7 @@ def _start_gateway_with_retry(
             "-m",
             "uvicorn",
             "gateway.main:app",
-            *_uvicorn_reload_args(root / "gateway"),
+            "--reload",
             "--host",
             host,
             "--port",
